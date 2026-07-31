@@ -38,6 +38,7 @@
 #include <stdint.h>
 
 #include "fbl.h"
+#include "usb_keyboard_state.h"
 
 extern "C" {
 #include "third_party/common/circle.h"
@@ -55,7 +56,8 @@ public:
   static void MouseStatusHandler(unsigned nButtons, int nPosX, int nPosY,
                                  int nWheelMove);
   static void KeyStatusHandlerRaw(unsigned char ucModifiers,
-                                  const unsigned char RawKeys[6]);
+                                  const unsigned char RawKeys[6],
+                                  void *pContext);
   static void GamePadStatusHandler(unsigned nDeviceIndex,
                                    const TGamePadState *pState);
 
@@ -144,6 +146,11 @@ public:
 private:
   class USBPlugAndPlayTask;
 
+  struct USBKeyboardContext {
+    CKernel *kernel;
+    unsigned slot;
+  };
+
   struct USBDeviceInfo {
     int numPads;
     int numButtons[MAX_USB_DEVICES];
@@ -155,6 +162,8 @@ private:
     char gamepadProduct[MAX_USB_DEVICES][BMX_USB_PRODUCT_STRING_SIZE];
     int keyboardCount;
     char keyboardProduct[MAX_USB_DEVICES][BMX_USB_PRODUCT_STRING_SIZE];
+    int mousePresent;
+    char mouseProduct[BMX_USB_PRODUCT_STRING_SIZE];
     char usbOutputProduct[BMX_USB_PRODUCT_STRING_SIZE];
   };
 
@@ -166,6 +175,7 @@ private:
   void ApplyUSBDeviceInfo();
   void ApplyUSBAudioChange();
   void PublishCurrentSoundOutput();
+  void DispatchUSBKeyboardState();
   static void MouseRemovedHandler(CDevice *pDevice, void *pContext);
   static void KeyRemovedHandler(CDevice *pDevice, void *pContext);
   static void GamePadRemovedHandler(CDevice *pDevice, void *pContext);
@@ -178,6 +188,8 @@ private:
 
   ViceSound *mViceSound;
   USBPlugAndPlayTask *mUSBPlugAndPlayTask;
+  bmc64::USBKeyboardState mUSBKeyboardState;
+  USBKeyboardContext mUSBKeyboardContexts[MAX_USB_DEVICES];
   CUSBKeyboardDevice *volatile mUSBKeyboards[MAX_USB_DEVICES];
   CMouseDevice *volatile mUSBMouse;
   CUSBGamePadDevice *volatile mUSBGamepads[MAX_USB_DEVICES];

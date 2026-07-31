@@ -154,6 +154,7 @@ typedef enum {
    FILTER_DIRS,
    FILTER_PRGS,
    FILTER_PHONEBOOK,
+   FILTER_REU,
 } FileFilter;
 
 // These can be saved
@@ -195,11 +196,14 @@ struct menu_item *volume_item;
 struct menu_item *sound_output_priority_item;
 static struct menu_item *current_sound_output_item;
 static struct menu_item *detected_keyboard_items[MAX_USB_DEVICES];
+static struct menu_item *detected_mouse_item;
 static enum bmx_sound_output current_sound_output = BMX_SOUND_OUTPUT_NONE;
 static int detected_keyboard_count;
+static int detected_mouse_present;
 static char current_usb_audio_product[BMX_USB_PRODUCT_STRING_SIZE];
 static char detected_keyboard_product[MAX_USB_DEVICES]
                                      [BMX_USB_PRODUCT_STRING_SIZE];
+static char detected_mouse_product[BMX_USB_PRODUCT_STRING_SIZE];
 struct menu_item *statusbar_item;
 struct menu_item *diagnostics_overlay_item;
 struct menu_item *statusbar_padding_item;
@@ -314,6 +318,9 @@ const char prg_filt_ext[1][5] = {".prg"};
 const int num_phonebook_ext = 1;
 const char phonebook_filt_ext[1][5] = {".pb"};
 
+const int num_reu_ext = 1;
+const char reu_filt_ext[1][5] = {".reu"};
+
 #define TEST_FILTER_MACRO(funcname, numvar, filtarray)                         \
   static int funcname(char *name) {                                            \
     int include = 0;                                                           \
@@ -363,6 +370,7 @@ TEST_FILTER_MACRO(test_cart_name, num_cart_ext, cart_filt_ext);
 TEST_FILTER_MACRO(test_snap_name, num_snap_ext, snap_filt_ext);
 TEST_FILTER_MACRO(test_prg_name, num_prg_ext, prg_filt_ext);
 TEST_FILTER_MACRO(test_phonebook_name, num_phonebook_ext, phonebook_filt_ext);
+TEST_FILTER_MACRO(test_reu_name, num_reu_ext, reu_filt_ext);
 
 static int filter_matches_file(FileFilter filter, char *name) {
   if (filter == FILTER_DISK) {
@@ -377,6 +385,8 @@ static int filter_matches_file(FileFilter filter, char *name) {
     return test_prg_name(name);
   } else if (filter == FILTER_PHONEBOOK) {
     return test_phonebook_name(name);
+  } else if (filter == FILTER_REU) {
+    return test_reu_name(name);
   } else if (filter == FILTER_NONE) {
     return 1;
   }
@@ -669,10 +679,11 @@ static void files_cursor_listener(struct menu_item* parent,
 static int files_left_right_listener(struct menu_item* parent,
                                      struct menu_item* current, int right);
 
-static void add_image_content_line(struct menu_item *root, const char *line) {
+static struct menu_item *add_image_content_line(struct menu_item *root,
+                                                const char *line) {
   char display[MAX_MENU_STR];
   snprintf(display, sizeof display, "%s", line ? line : "");
-  ui_menu_add_button(MENU_ID_DO_NOTHING, root, display);
+  return ui_menu_add_button(MENU_ID_DO_NOTHING, root, display);
 }
 
 static image_contents_t *read_supported_image_contents(const char *path) {
@@ -683,6 +694,16 @@ static image_contents_t *read_supported_image_contents(const char *path) {
   return contents;
 }
 
+static void autostart_image_content_entry(struct menu_item *item) {
+  ui_info("Starting...");
+  if (emux_autostart_file(item->str_value, (unsigned int)item->value) < 0) {
+    ui_pop_menu();
+    ui_error("Failed to autostart file");
+  } else {
+    ui_pop_all_and_toggle();
+  }
+}
+
 static void show_image_contents(DirType dir_type, const char *name) {
   char path[256];
   char title[MAX_MENU_STR];
@@ -691,6 +712,7 @@ static void show_image_contents(DirType dir_type, const char *name) {
   image_contents_t *contents;
   image_contents_file_list_t *entry;
   struct menu_item *root;
+  unsigned int program_number = 0;
 
   snprintf(path, sizeof path, "%s", fullpath(dir_type, (char *)name));
 
@@ -718,8 +740,12 @@ static void show_image_contents(DirType dir_type, const char *name) {
   lib_free(tmp);
 
   for (entry = contents->file_list; entry != NULL; entry = entry->next) {
+    struct menu_item *item;
     tmp = image_contents_file_to_string(entry, IMAGE_CONTENTS_STRING_ASCII);
-    add_image_content_line(root, tmp);
+    item = add_image_content_line(root, tmp);
+    item->value = (int)++program_number;
+    item->on_value_changed = autostart_image_content_entry;
+    snprintf(item->str_value, sizeof item->str_value, "%s", path);
     lib_free(tmp);
   }
 
@@ -733,30 +759,11 @@ static void show_image_contents(DirType dir_type, const char *name) {
   image_contents_destroy(contents);
 }
 
-static int files_left_right_listener(struct menu_item* parent,
-                                     struct menu_item* current, int right) {
-  if (parent->sub_id == MENU_SUB_IMAGE_CONTENTS) {
-    if (!right) {
-      ui_pop_menu();
-    }
-    return 1;
-  }
-
-  if (!right || current == NULL || current->disabled ||
-      current->type != BUTTON ||
-      current->sub_id != MENU_SUB_PICK_FILE ||
-      current->str_value[0] == '\0') {
-    return 0;
-  }
-
-  show_image_contents((DirType)parent->value, current->str_value);
-  return 1;
-}
-
 static void show_files(DirType dir_type, FileFilter filter, int menu_id,
                        int reset_cur_pos) {
   int has_name_field =
       menu_id == MENU_SAVE_SNAP_FILE ||
+      menu_id == MENU_SAVE_REU_FILE ||
       (menu_id >= MENU_CREATE_D64_FILE && menu_id <= MENU_CREATE_TAP_FILE);
 
   // Show files
@@ -1994,6 +2001,16 @@ void emu_set_keyboard_info(
     detected_keyboard_product[i][BMX_USB_PRODUCT_STRING_SIZE - 1] = '\0';
   }
   update_detected_keyboard_items();
+}
+
+void emu_set_mouse_info(int present, const char *product) {
+  detected_mouse_present = present != 0;
+  strncpy(detected_mouse_product, product != NULL ? product : "",
+          sizeof detected_mouse_product - 1);
+  detected_mouse_product[sizeof detected_mouse_product - 1] = '\0';
+  ui_menu_set_button_value_fitted(
+      detected_mouse_item,
+      present_device_name(detected_mouse_present, detected_mouse_product), 1);
 }
 
 void emu_set_current_sound_output(enum bmx_sound_output output,
@@ -3557,7 +3574,47 @@ static void set_current_dir_names() {
   }
 }
 
+typedef enum {
+  REU_FILENAME_OK = 0,
+  REU_FILENAME_EMPTY,
+  REU_FILENAME_TOO_LONG,
+  REU_FILENAME_WRONG_EXTENSION,
+} ReuFilenameStatus;
+
+static ReuFilenameStatus normalize_reu_filename(char *filename,
+                                                size_t capacity) {
+  static const char extension[] = ".reu";
+  char *dot;
+  size_t length;
+
+  if (filename == NULL || capacity == 0 || filename[0] == '\0') {
+    return REU_FILENAME_EMPTY;
+  }
+
+  length = strlen(filename);
+  if (length > MAX_FN_NAME || length >= capacity) {
+    return REU_FILENAME_TOO_LONG;
+  }
+
+  dot = strrchr(filename, '.');
+  if (dot != NULL) {
+    return strcasecmp(dot, extension) == 0
+               ? REU_FILENAME_OK
+               : REU_FILENAME_WRONG_EXTENSION;
+  }
+
+  if (length + sizeof(extension) - 1 > MAX_FN_NAME ||
+      length + sizeof(extension) > capacity) {
+    return REU_FILENAME_TOO_LONG;
+  }
+
+  memcpy(filename + length, extension, sizeof(extension));
+  return REU_FILENAME_OK;
+}
+
 static void select_file(struct menu_item *item) {
+  ReuFilenameStatus reu_filename_status;
+
   switch (item->id) {
      case MENU_IEC_DIR:
        emux_set_iec_dir(unit, fullpath(DIR_IEC, ""));
@@ -3569,6 +3626,15 @@ static void select_file(struct menu_item *item) {
        if (emux_load_state(fullpath(DIR_SNAPS, item->str_value)) < 0) {
          ui_pop_menu();
          ui_error("Load snapshot failed");
+       } else {
+         ui_pop_all_and_toggle();
+       }
+       return;
+     case MENU_LOAD_REU_FILE:
+       ui_info("Loading...");
+       if (emux_load_reu_image(fullpath(DIR_CARTS, item->str_value)) < 0) {
+         ui_pop_menu();
+         ui_error("Load REU image failed");
        } else {
          ui_pop_all_and_toggle();
        }
@@ -3637,7 +3703,7 @@ static void select_file(struct menu_item *item) {
        return;
      case MENU_AUTOSTART_FILE:
        ui_info("Starting...");
-       if (emux_autostart_file(fullpath(DIR_DISKS, item->str_value)) < 0) {
+       if (emux_autostart_file(fullpath(DIR_DISKS, item->str_value), 0) < 0) {
          ui_pop_menu();
          ui_error("Failed to autostart file");
        } else {
@@ -3646,7 +3712,7 @@ static void select_file(struct menu_item *item) {
        return;
      case MENU_LOADPRG_FILE:
        ui_info("Loading...");
-       if (emux_autostart_file(fullpath(DIR_ROOT, item->str_value)) < 0) {
+       if (emux_autostart_file(fullpath(DIR_ROOT, item->str_value), 0) < 0) {
          ui_pop_menu();
          ui_error("Failed to load file");
        } else {
@@ -3693,6 +3759,32 @@ static void select_file(struct menu_item *item) {
        return;
      default:
        break;
+  }
+
+  if (item->id == MENU_SAVE_REU_FILE) {
+    reu_filename_status = normalize_reu_filename(
+        item->str_value, sizeof item->str_value);
+    if (reu_filename_status == REU_FILENAME_EMPTY) {
+      ui_error("Empty filename");
+      return;
+    }
+    if (reu_filename_status == REU_FILENAME_TOO_LONG) {
+      ui_error("Too long");
+      return;
+    }
+    if (reu_filename_status == REU_FILENAME_WRONG_EXTENSION) {
+      ui_error("Need .REU extension");
+      return;
+    }
+
+    ui_info("Saving...");
+    if (emux_save_reu_image(fullpath(DIR_CARTS, item->str_value)) < 0) {
+      ui_pop_menu();
+      ui_error("Save REU image failed");
+    } else {
+      ui_pop_all_and_toggle();
+    }
+    return;
   }
 
   // Handle saving snapshots.
@@ -3784,6 +3876,8 @@ static int menu_file_item_to_dir_index(struct menu_item *item) {
   case MENU_C64_CART_8K_FILE:
   case MENU_C64_CART_16K_FILE:
   case MENU_C64_CART_ULTIMAX_FILE:
+  case MENU_LOAD_REU_FILE:
+  case MENU_SAVE_REU_FILE:
   case MENU_VIC20_CART_DETECT_FILE:
   case MENU_VIC20_CART_GENERIC_FILE:
   case MENU_VIC20_CART_16K_2000_FILE:
@@ -3868,6 +3962,10 @@ static void relist_files_after_dir_change(int menu_id) {
     break;
   case MENU_C64_CART_FILE:
     show_files(DIR_CARTS, FILTER_CART, menu_id, 1);
+    break;
+  case MENU_LOAD_REU_FILE:
+  case MENU_SAVE_REU_FILE:
+    show_files(DIR_CARTS, FILTER_REU, menu_id, 1);
     break;
   case MENU_C64_CART_8K_FILE:
   case MENU_C64_CART_16K_FILE:
@@ -3964,6 +4062,40 @@ static void enter_dir(struct menu_item *item) {
   strcpy(current_dir_names[dir_index], next_dir);
   ui_pop_menu();
   relist_files_after_dir_change(menu_id);
+}
+
+static int files_left_right_listener(struct menu_item* parent,
+                                     struct menu_item* current, int right) {
+  if (parent->sub_id == MENU_SUB_IMAGE_CONTENTS) {
+    if (!right) {
+      ui_pop_menu();
+    }
+    return 1;
+  }
+
+  if (current == NULL || current->disabled || current->type != BUTTON) {
+    return 0;
+  }
+
+  if (!right) {
+    if (strcmp(current_dir_names[parent->value], "/") != 0) {
+      up_dir(current);
+    }
+    return 1;
+  }
+
+  if (current->sub_id == MENU_SUB_ENTER_DIR) {
+    enter_dir(current);
+    return 1;
+  }
+
+  if (current->sub_id == MENU_SUB_PICK_FILE &&
+      current->str_value[0] != '\0') {
+    show_image_contents((DirType)parent->value, current->str_value);
+    return 1;
+  }
+
+  return 0;
 }
 
 static void toggle_warp(int value) {
@@ -4363,6 +4495,10 @@ static void menu_value_changed(struct menu_item *item) {
   case MENU_AUTOSTART_WARP:
     emux_set_int(Setting_AutostartWarp, item->value);
     return;
+  case MENU_MOUSE_SENSITIVITY:
+    emux_set_int(Setting_MouseSensitivity, item->value);
+    ui_mouse_preview_begin();
+    return;
   case MENU_DEFAULT_DISK_IMAGE:
     show_files(DIR_DISKS, FILTER_DISK, MENU_DEFAULT_DISK_FILE, 0);
     return;
@@ -4381,6 +4517,12 @@ static void menu_value_changed(struct menu_item *item) {
     return;
   case MENU_LOAD_SNAP:
     show_files(DIR_SNAPS, FILTER_SNAP, MENU_LOAD_SNAP_FILE, 0);
+    return;
+  case MENU_LOAD_REU:
+    show_files(DIR_CARTS, FILTER_REU, MENU_LOAD_REU_FILE, 0);
+    return;
+  case MENU_SAVE_REU:
+    show_files(DIR_CARTS, FILTER_REU, MENU_SAVE_REU_FILE, 0);
     return;
   case MENU_CREATE_D64:
     show_files(DIR_DISKS, FILTER_NONE, MENU_CREATE_D64_FILE, 0);
@@ -6384,6 +6526,16 @@ void build_menu(struct menu_item *root) {
   child->value = HOTKEY_CHOICE_MENU;
   set_hotkey_choices(hotkey_tf7_item);
 
+  parent = ui_menu_add_folder(root, "Mouse");
+  detected_mouse_item = ui_menu_add_button_with_value(
+      MENU_TEXT, parent, "Detected 1", 0, "", "");
+  emu_set_mouse_info(detected_mouse_present, detected_mouse_product);
+  ui_menu_add_divider(parent);
+  tmp = 100;
+  emux_get_int(Setting_MouseSensitivity, &tmp);
+  ui_menu_add_range(MENU_MOUSE_SENSITIVITY, parent, "Sensitivity (%)",
+                    10, 200, 10, tmp);
+
   parent = ui_menu_add_folder(root, "Joyports");
 
   if (emu_get_num_joysticks() > 1) {
@@ -6643,11 +6795,15 @@ int statusbar_always(void) {
 
 // Stuff to do when menu is activated
 void menu_about_to_activate() {
+  emux_mouse_input_clear();
   emux_get_int(Setting_WarpMode, &warp_item->value);
 }
 
 // Stuff to do before going back to emulator
-void menu_about_to_deactivate() {}
+void menu_about_to_deactivate() {
+  ui_mouse_preview_end();
+  emux_mouse_input_clear();
+}
 
 static void show_files_from_quick_func(DirType dir_type, FileFilter filter,
                                        int menu_id) {

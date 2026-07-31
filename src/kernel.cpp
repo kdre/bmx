@@ -33,16 +33,18 @@
 
 CKernel *static_kernel = NULL;
 
-#define MAX_KEY_CODES 128
 #define TICKS_PER_SECOND 1000000L
+
+static_assert(MAX_USB_DEVICES == bmc64::USBKeyboardState::MaxDevices,
+              "USB keyboard slot counts must match");
 
 // A global to control whether our special VICE CIA port changes
 // should take effect. Only set when gpio_outputs_enabled is allowed.
 int raspi_userport_enabled;
 
 // Usb key states
-static bool key_states[MAX_KEY_CODES];
-static int key_mod_states[MAX_KEY_CODES];
+static bool key_states[bmc64::USBKeyboardState::UsageCount];
+static int key_mod_states[bmc64::USBKeyboardState::UsageCount];
 static unsigned char mod_states;
 static bool uiLeftShift = false;
 static bool uiRightShift = false;
@@ -427,9 +429,11 @@ CKernel::CKernel(void)
       mNeedSoundInit(false), mNumSoundChannels(1) {
   static_kernel = this;
   mod_states = 0;
-  memset(key_states, 0, MAX_KEY_CODES * sizeof(bool));
-  memset(key_mod_states, 0, MAX_KEY_CODES * sizeof(int));
+  memset(key_states, 0, sizeof key_states);
+  memset(key_mod_states, 0, sizeof key_mod_states);
   for (unsigned i = 0; i < MAX_USB_DEVICES; i++) {
+    mUSBKeyboardContexts[i].kernel = this;
+    mUSBKeyboardContexts[i].slot = i;
     mUSBKeyboards[i] = nullptr;
     mUSBGamepads[i] = nullptr;
   }
@@ -785,16 +789,22 @@ void CKernel::MouseRemovedHandler(CDevice *pDevice, void *pContext) {
 }
 
 void CKernel::KeyRemovedHandler(CDevice *pDevice, void *pContext) {
-  CKernel *kernel = static_cast<CKernel *>(pContext);
-  assert(kernel != nullptr);
+  USBKeyboardContext *context =
+      static_cast<USBKeyboardContext *>(pContext);
+  if (context == nullptr || context->kernel == nullptr ||
+      context->slot >= MAX_USB_DEVICES) {
+    return;
+  }
 
-  for (unsigned i = 0; i < MAX_USB_DEVICES; i++) {
-    if (kernel->mUSBKeyboards[i] ==
-        static_cast<CUSBKeyboardDevice *>(pDevice)) {
-      kernel->mUSBKeyboards[i] = nullptr;
-      printf("usb: keyboard ukbd%u removed\r\n", i + 1);
-      break;
+  CKernel *kernel = context->kernel;
+  const unsigned slot = context->slot;
+  if (kernel->mUSBKeyboards[slot] ==
+      static_cast<CUSBKeyboardDevice *>(pDevice)) {
+    kernel->mUSBKeyboards[slot] = nullptr;
+    if (kernel->mUSBKeyboardState.RemoveDevice(slot)) {
+      kernel->DispatchUSBKeyboardState();
     }
+    printf("usb: keyboard ukbd%u removed\r\n", slot + 1);
   }
 }
 
@@ -821,13 +831,20 @@ void CKernel::SetupUSBKeyboard() {
     CUSBKeyboardDevice *pKeyboard =
         (CUSBKeyboardDevice *)mDeviceNameService.GetDevice(DeviceName, FALSE);
 
-    if (pKeyboard != mUSBKeyboards[i]) {
+    CUSBKeyboardDevice *current_keyboard = mUSBKeyboards[i];
+    if (pKeyboard != current_keyboard) {
+      if (mUSBKeyboardState.RemoveDevice(i)) {
+        DispatchUSBKeyboardState();
+      }
+
+      mUSBKeyboards[i] = pKeyboard;
       if (pKeyboard) {
-        pKeyboard->RegisterRemovedHandler(KeyRemovedHandler, this);
-        pKeyboard->RegisterKeyStatusHandlerRaw(KeyStatusHandlerRaw);
+        USBKeyboardContext *context = &mUSBKeyboardContexts[i];
+        pKeyboard->RegisterRemovedHandler(KeyRemovedHandler, context);
+        pKeyboard->RegisterKeyStatusHandlerRaw(KeyStatusHandlerRaw, FALSE,
+                                               context);
         printf("usb: registered keyboard ukbd%u\r\n", i + 1);
       }
-      mUSBKeyboards[i] = pKeyboard;
     }
 
     if (pKeyboard) {
@@ -863,8 +880,15 @@ void CKernel::SetupUSBGamepads() {
   char gamepad_product[MAX_USB_DEVICES][BMX_USB_PRODUCT_STRING_SIZE] = {};
   int keyboard_count = 0;
   char keyboard_product[MAX_USB_DEVICES][BMX_USB_PRODUCT_STRING_SIZE] = {};
+  int mouse_present = mUSBMouse != nullptr;
+  char mouse_product[BMX_USB_PRODUCT_STRING_SIZE] = {};
   char usb_output_product_raw[BMX_USB_PRODUCT_STRING_SIZE] = {};
   char usb_output_product[BMX_USB_PRODUCT_STRING_SIZE] = {};
+
+  if (mouse_present) {
+    copy_usb_product(mouse_product, sizeof mouse_product,
+                     mUSBMouse->GetProperty(CDevice::PropertyProduct));
+  }
 
   for (unsigned i = 0; i < MAX_USB_DEVICES; i++) {
     if (mUSBKeyboards[i] != nullptr) {
@@ -934,6 +958,8 @@ void CKernel::SetupUSBGamepads() {
   mUSBDeviceInfo.keyboardCount = keyboard_count;
   memcpy(mUSBDeviceInfo.keyboardProduct, keyboard_product,
          sizeof keyboard_product);
+  mUSBDeviceInfo.mousePresent = mouse_present;
+  memcpy(mUSBDeviceInfo.mouseProduct, mouse_product, sizeof mouse_product);
   memcpy(mUSBDeviceInfo.usbOutputProduct, usb_output_product,
          sizeof usb_output_product);
   mUSBDeviceInfoPending = TRUE;
@@ -960,6 +986,7 @@ void CKernel::ApplyUSBDeviceInfo() {
                        device_info.gamepadProduct);
   emu_set_keyboard_info(device_info.keyboardCount,
                         device_info.keyboardProduct);
+  emu_set_mouse_info(device_info.mousePresent, device_info.mouseProduct);
   memcpy(mUSBOutputProduct, device_info.usbOutputProduct,
          sizeof mUSBOutputProduct);
   // The audio change may have been applied before this pending name snapshot.
@@ -1586,10 +1613,28 @@ static int ViceKeyboardModifierMask(unsigned char ucModifiers) {
 }
 
 void CKernel::KeyStatusHandlerRaw(unsigned char ucModifiers,
-                                  const unsigned char RawKeys[6]) {
+                                  const unsigned char RawKeys[6],
+                                  void *pContext) {
+  USBKeyboardContext *context =
+      static_cast<USBKeyboardContext *>(pContext);
+  if (context == nullptr || context->kernel == nullptr ||
+      context->slot >= MAX_USB_DEVICES) {
+    return;
+  }
 
-  bool new_states[MAX_KEY_CODES];
-  memset(new_states, 0, MAX_KEY_CODES * sizeof(bool));
+  CKernel *kernel = context->kernel;
+  if (kernel->mUSBKeyboards[context->slot] == nullptr) {
+    return;
+  }
+
+  if (kernel->mUSBKeyboardState.ApplyReport(context->slot, ucModifiers,
+                                             RawKeys)) {
+    kernel->DispatchUSBKeyboardState();
+  }
+}
+
+void CKernel::DispatchUSBKeyboardState() {
+  const unsigned char ucModifiers = mUSBKeyboardState.Modifiers();
 
   // Compare previous to present and handle press/release that come from
   // modifier keys.
@@ -1664,19 +1709,12 @@ void CKernel::KeyStatusHandlerRaw(unsigned char ucModifiers,
   }
   mod_states = ucModifiers;
 
-  // Set new states
-  for (unsigned i = 0; i < 6; i++) {
-    const unsigned char key = RawKeys[i];
-    if (key != 0) {
-      new_states[key] = true;
-    }
-  }
-
   // Compare previous to present and handle key press/release events.
   int ui_activated = emu_is_ui_activated();
   int vice_modifiers = ViceKeyboardModifierMask(ucModifiers);
-  for (unsigned i = 1; i < MAX_KEY_CODES; i++) {
-    if (key_states[i] == true && new_states[i] == false) {
+  for (unsigned i = 1; i < bmc64::USBKeyboardState::UsageCount; i++) {
+    const bool new_state = mUSBKeyboardState.IsPressed(i);
+    if (key_states[i] == true && new_state == false) {
       if (ui_activated) {
         // We have to handle shift+left/right here or else our ui
         // isn't navigable by keyrah with real C64 board. Keep
@@ -1693,7 +1731,7 @@ void CKernel::KeyStatusHandlerRaw(unsigned char ucModifiers,
         emu_key_released_mod(i, key_mod_states[i]);
       }
       key_mod_states[i] = 0;
-    } else if (key_states[i] == false && new_states[i] == true) {
+    } else if (key_states[i] == false && new_state == true) {
       key_mod_states[i] = vice_modifiers;
       if (ui_activated) {
         // See above note on shift.
@@ -1708,7 +1746,7 @@ void CKernel::KeyStatusHandlerRaw(unsigned char ucModifiers,
         emu_key_pressed_mod(i, vice_modifiers);
       }
     }
-    key_states[i] = new_states[i];
+    key_states[i] = new_state;
   }
 }
 

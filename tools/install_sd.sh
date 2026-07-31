@@ -64,11 +64,11 @@ done
 case "$BOARD" in
   pi4)
     BOARD_NAME="Pi 4 / Pi 400"
-    KERNEL_NAME="kernel7l.img"
+    KERNEL_NAME="kernel7l.img.c64"
     ;;
   pi5)
     BOARD_NAME="Pi 5 / Pi 500"
-    KERNEL_NAME="kernel_2712.img"
+    KERNEL_NAME="kernel_2712.img.c64"
     ;;
   "")
     echo "missing board" >&2

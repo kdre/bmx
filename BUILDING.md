@@ -64,7 +64,7 @@ tools/install_sd.sh pi4 /path/to/mounted/boot
 
 The install target must be the exact mounted FAT/vfat boot partition, not a
 directory below it. The script checks that the stage contains `cmdline.txt`,
-`config.txt` and `kernel7l.img`, refuses targets on the current system disk,
+`config.txt` and `kernel7l.img.c64`, refuses targets on the current system disk,
 then clears the top level of the target partition before copying the staged
 tree.
 
@@ -110,7 +110,7 @@ tools/install_sd.sh pi5 /path/to/mounted/boot
 
 The install target must be the exact mounted FAT/vfat boot partition, not a
 directory below it. The script checks that the stage contains `cmdline.txt`,
-`config.txt` and `kernel_2712.img`, refuses targets on the current system disk,
+`config.txt` and `kernel_2712.img.c64`, refuses targets on the current system disk,
 then clears the top level of the target partition before copying the staged
 tree.
 

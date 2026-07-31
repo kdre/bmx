@@ -117,7 +117,7 @@ public:
                      int *dst_w, int *dst_h);
 
   // initializes the bcm_host interface
-  static void Initialize();
+  static bool Initialize();
   static bool OGLInit();
 
   bool UsesShader();

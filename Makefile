@@ -131,7 +131,8 @@ endif
 TARGET ?= $(BUILD_DIR)/$(TARGET_BASENAME)
 .DEFAULT_GOAL := $(TARGET).img
 
-BMC64_OBJS = main.o kernel.o viceoptions.o viceapp.o crt_pi_idx.o crt_pi_rgb.o \
+BMC64_OBJS = main.o kernel.o usb_keyboard_state.o viceoptions.o viceapp.o \
+             crt_pi_idx.o crt_pi_rgb.o \
              vicesound.o new_io.o errno_stubs.o async_network.o \
              config/runtime_config.o machines/machine_descriptor.o \
              network/network_manager.o \

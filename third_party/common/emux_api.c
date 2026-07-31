@@ -59,6 +59,19 @@ int vdc_showing;
 int vic_enabled = 1;
 int vdc_enabled;
 
+// Optional emulator hooks. VICE provides strong implementations; keeping
+// fallbacks here lets other emulator integrations continue using common menu
+// code without acquiring REU-specific link dependencies.
+int __attribute__((weak)) emux_load_reu_image(char *filename) {
+  (void)filename;
+  return -1;
+}
+
+int __attribute__((weak)) emux_save_reu_image(char *filename) {
+  (void)filename;
+  return -1;
+}
+
 // Ring buffer for key latch events
 struct pending_emu_key_s pending_emu_key;
 

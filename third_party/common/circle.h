@@ -397,6 +397,7 @@ extern void emu_set_gamepad_info(int num_pads,
 extern void emu_set_keyboard_info(
     int count,
     const char product[MAX_USB_DEVICES][BMX_USB_PRODUCT_STRING_SIZE]);
+extern void emu_set_mouse_info(int present, const char *product);
 extern void emu_set_current_sound_output(enum bmx_sound_output output,
                                          const char *usb_product);
 

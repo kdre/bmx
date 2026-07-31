@@ -69,6 +69,9 @@ static int ui_commodore_down;
 static int ui_transparent;
 static int ui_transparent_layer; // which layer we are revealing for adjustment
 static int ui_render_current_item_only;
+static int mouse_preview_active;
+static float mouse_preview_x;
+static float mouse_preview_y;
 
 // Stubs for vice callbacks. Unimplemented for now.
 void ui_pause_emulation(int flag) {}
@@ -357,6 +360,7 @@ static void ui_key_pressed(long key) {
   // only while the user is on the item they were triggered
   // for.
   if (key != KEYCODE_Left && key != KEYCODE_Right) {
+    ui_mouse_preview_end();
     ui_transparent = 0;
     ui_transparent_layer = -1;
     ui_render_current_item_only = 0;
@@ -624,6 +628,48 @@ void ui_render_single_frame() {
 
   for (int msi=0;msi<=current_menu;msi++) {
      ui_render_now(msi);
+  }
+
+  if (mouse_preview_active) {
+    float delta_x;
+    float delta_y;
+    int left = menu_roots[0].menu_left;
+    int top = menu_roots[0].menu_top;
+    int right = left + menu_roots[0].menu_width - 1;
+    int bottom = top + menu_roots[0].menu_height - 1;
+    const int radius = 7;
+    int x;
+    int y;
+
+    if (emux_mouse_preview_poll(&delta_x, &delta_y)) {
+      mouse_preview_x += delta_x;
+      mouse_preview_y += delta_y;
+    }
+    if (menu_roots[0].menu_width <= 2 * radius ||
+        menu_roots[0].menu_height <= 2 * radius) {
+      left = 0;
+      top = 0;
+      right = ui_fb_w - 1;
+      bottom = ui_fb_h - 1;
+    }
+    if (mouse_preview_x < left + radius) {
+      mouse_preview_x = left + radius;
+    } else if (mouse_preview_x > right - radius) {
+      mouse_preview_x = right - radius;
+    }
+    if (mouse_preview_y < top + radius) {
+      mouse_preview_y = top + radius;
+    } else if (mouse_preview_y > bottom - radius) {
+      mouse_preview_y = bottom - radius;
+    }
+
+    x = (int)(mouse_preview_x + 0.5f);
+    y = (int)(mouse_preview_y + 0.5f);
+    ui_draw_rect(x - radius, y - 1, radius * 2 + 1, 3, BG_COLOR, 1);
+    ui_draw_rect(x - radius + 1, y, radius * 2 - 1, 1, FG_COLOR, 1);
+    ui_draw_rect(x - 1, y - radius, 3, radius * 2 + 1, BG_COLOR, 1);
+    ui_draw_rect(x, y - radius + 1, 1, radius * 2 - 1, FG_COLOR, 1);
+    ui_draw_rect(x - 1, y - 1, 3, 3, BORDER_COLOR, 0);
   }
 
   ui_render_update_progress();
@@ -2129,6 +2175,31 @@ void ui_canvas_reveal_temp(int layer) {
     ui_transparent_layer = layer;
     ui_set_render_current_item_only(1);
   }
+}
+
+void ui_mouse_preview_begin(void) {
+  if (!mouse_preview_active) {
+    mouse_preview_x = menu_roots[0].menu_left +
+                      menu_roots[0].menu_width / 2.0f;
+    mouse_preview_y = menu_roots[0].menu_top +
+                      menu_roots[0].menu_height / 2.0f;
+    mouse_preview_active = 1;
+  }
+  emux_mouse_input_clear();
+  ui_transparent = 1;
+  ui_transparent_layer = -1;
+  ui_set_render_current_item_only(1);
+}
+
+void ui_mouse_preview_end(void) {
+  if (!mouse_preview_active) {
+    return;
+  }
+  mouse_preview_active = 0;
+  emux_mouse_input_clear();
+  ui_transparent = 0;
+  ui_transparent_layer = -1;
+  ui_set_render_current_item_only(0);
 }
 
 void emu_exit(void) {

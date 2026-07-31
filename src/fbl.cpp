@@ -639,9 +639,9 @@ void FrameBufferLayer::SetShaderParams(
 }
 
 // static
-void FrameBufferLayer::Initialize() {
+bool FrameBufferLayer::Initialize() {
   if (initialized_)
-     return;
+     return true;
 
   printf("boot: fbl bcm_host init enter\r\n");
   bcm_host_init();
@@ -650,6 +650,10 @@ void FrameBufferLayer::Initialize() {
   printf("boot: fbl dispman display open %u enter\r\n",
          (unsigned)BMC64_DISPMANX_DISPLAY_ID);
   dispman_display_ = vc_dispmanx_display_open(BMC64_DISPMANX_DISPLAY_ID);
+  if (dispman_display_ == 0) {
+    printf("boot: fbl dispman display open failed\r\n");
+    return false;
+  }
   printf("boot: fbl dispman display open ready\r\n");
 
   printf("boot: fbl scaling kernel read enter\r\n");
@@ -665,6 +669,7 @@ void FrameBufferLayer::Initialize() {
   }
 
   initialized_ = true;
+  return true;
 }
 
 int FrameBufferLayer::Allocate(int pixelmode, uint8_t **pixels,
@@ -674,6 +679,9 @@ int FrameBufferLayer::Allocate(int pixelmode, uint8_t **pixels,
   uint32_t vc_image_ptr;
 
   assert(!allocated_);
+  if (!Initialize()) {
+    return -1;
+  }
 
   allocated_ = true;
 

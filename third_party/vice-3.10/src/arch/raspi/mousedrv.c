@@ -28,10 +28,44 @@
 
 #include <stdio.h>
 
+#include "resources.h"
+
+#define MOUSE_SENSITIVITY_DEFAULT 100
+#define MOUSE_SENSITIVITY_MIN 10
+#define MOUSE_SENSITIVITY_MAX 200
+
 /* Circle delivers USB mouse movement on core 0; VICE consumes it on core 1. */
 static int mouse_pending_x;
 static int mouse_pending_y;
+static int mouse_sensitivity = MOUSE_SENSITIVITY_DEFAULT;
+static int mouse_resources_registered;
 static mouse_func_t mouse_funcs;
+
+static int set_mouse_sensitivity(int value, void *param) {
+  (void)param;
+
+  if (value < MOUSE_SENSITIVITY_MIN || value > MOUSE_SENSITIVITY_MAX) {
+    return -1;
+  }
+  __atomic_store_n(&mouse_sensitivity, value, __ATOMIC_RELEASE);
+  return 0;
+}
+
+static const resource_int_t mouse_resources_int[] = {
+    {"MouseSensitivity", MOUSE_SENSITIVITY_DEFAULT, RES_EVENT_SAME, NULL,
+     &mouse_sensitivity, set_mouse_sensitivity, NULL},
+    RESOURCE_INT_LIST_END};
+
+static int take_scaled_mouse_delta(float *delta_x, float *delta_y) {
+  int raw_x = __atomic_exchange_n(&mouse_pending_x, 0, __ATOMIC_ACQ_REL);
+  int raw_y = __atomic_exchange_n(&mouse_pending_y, 0, __ATOMIC_ACQ_REL);
+  float scale = (float)__atomic_load_n(&mouse_sensitivity, __ATOMIC_ACQUIRE) /
+                100.0f;
+
+  *delta_x = (float)raw_x * scale;
+  *delta_y = (float)raw_y * scale;
+  return raw_x != 0 || raw_y != 0;
+}
 
 int mousedrv_resources_init(mouse_func_t *funcs) {
   mouse_funcs.mbl = funcs->mbl;
@@ -39,6 +73,13 @@ int mousedrv_resources_init(mouse_func_t *funcs) {
   mouse_funcs.mbm = funcs->mbm;
   mouse_funcs.mbu = funcs->mbu;
   mouse_funcs.mbd = funcs->mbd;
+
+  if (!mouse_resources_registered) {
+    if (resources_register_int(mouse_resources_int) < 0) {
+      return -1;
+    }
+    mouse_resources_registered = 1;
+  }
 
   return 0;
 }
@@ -50,12 +91,21 @@ void mousedrv_init(void) {}
 void mousedrv_mouse_changed(void) {}
 
 void mousedrv_poll(void) {
-  int delta_x = __atomic_exchange_n(&mouse_pending_x, 0, __ATOMIC_ACQ_REL);
-  int delta_y = __atomic_exchange_n(&mouse_pending_y, 0, __ATOMIC_ACQ_REL);
+  float delta_x;
+  float delta_y;
 
-  if (delta_x != 0 || delta_y != 0) {
-    mouse_move((float)delta_x, (float)delta_y);
+  if (take_scaled_mouse_delta(&delta_x, &delta_y)) {
+    mouse_move(delta_x, delta_y);
   }
+}
+
+int mousedrv_poll_scaled(float *delta_x, float *delta_y) {
+  return take_scaled_mouse_delta(delta_x, delta_y);
+}
+
+void mousedrv_clear_pending(void) {
+  __atomic_exchange_n(&mouse_pending_x, 0, __ATOMIC_ACQ_REL);
+  __atomic_exchange_n(&mouse_pending_y, 0, __ATOMIC_ACQ_REL);
 }
 
 void emu_mouse_move(int x, int y) {

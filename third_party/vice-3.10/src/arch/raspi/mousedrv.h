@@ -38,5 +38,7 @@ extern void mousedrv_mouse_changed(void);
 
 #define MOUSEDRV_HAS_POLL
 extern void mousedrv_poll(void);
+extern int mousedrv_poll_scaled(float *delta_x, float *delta_y);
+extern void mousedrv_clear_pending(void);
 
 #endif

@@ -110,6 +110,7 @@ typedef enum {
   Setting_FileSystemDeviceN,
   Setting_IECDeviceN,
   Setting_Mouse,
+  Setting_MouseSensitivity,
   Setting_RAMBlock0, // Vic20
   Setting_RAMBlock1, // Vic20
   Setting_RAMBlock2, // Vic20
@@ -327,6 +328,11 @@ int emux_prepare_shutdown(void);
 // Return negative on error.
 int emux_attach_cart(int bank, char *filename);
 
+// Load/save a raw REU image. Implementations without REU support return
+// negative. Saving writes a copy and does not enable automatic write-back.
+int emux_load_reu_image(char *filename);
+int emux_save_reu_image(char *filename);
+
 // Make current attached cartridge the default
 void emux_set_cart_default(void);
 
@@ -361,8 +367,8 @@ void emux_display_tape_counter(int counter);
 void emux_display_tape_control_status(int control);
 void emux_display_tape_motor_status(int motor);
 
-// Autostart a file
-int emux_autostart_file(char* filename);
+// Autostart a file, optionally selecting an entry inside an image.
+int emux_autostart_file(char* filename, unsigned int program_number);
 
 // Show change model menu
 void emux_drive_change_model(int unit);
@@ -410,6 +416,9 @@ struct menu_item* emux_add_palette_options(int menu_id,
 void emux_add_machine_options(struct menu_item* parent);
 struct menu_item* emux_add_cartridge_options(struct menu_item* parent);
 
+// Add VICE REU controls to a machine's cartridge menu.
+void emux_add_reu_options(struct menu_item* parent);
+
 void emux_set_warp(int warp);
 
 void emux_apply_video_adjustments(int layer, int hcenter, int vcenter,
@@ -453,6 +462,10 @@ void emux_set_int_1(IntSetting setting, int value, int param);
 void emux_get_int(IntSetting setting, int* dest);
 void emux_get_int_1(IntSetting setting, int* dest, int param);
 void emux_get_string_1(StringSetting setting, const char** dest, int param);
+
+// The menu preview consumes the same scaled relative input as emulation.
+void emux_mouse_input_clear(void);
+int emux_mouse_preview_poll(float *delta_x, float *delta_y);
 
 // Persist all settings.
 int emux_save_settings(void);

@@ -366,6 +366,13 @@ bool present_kms_framebuffer(unsigned buffer_index, bool wait_for_vblank) {
   return true;
 }
 
+void destroy_kms_scanout_framebuffers() {
+  for (unsigned i = 0; i < kKmsBufferCount; ++i) {
+    pi5kms::DestroyFramebuffer(&g_kms_framebuffers[i]);
+  }
+  g_kms_front_buffer_index = 0;
+}
+
 bool ensure_hwscale_framebuffer(unsigned slot, unsigned buffer_index,
                                 u32 width, u32 height,
                                 u32 depth, bool *recreated) {
@@ -731,9 +738,9 @@ void FrameBufferLayer::MarkDirty() {
   }
 }
 
-void FrameBufferLayer::Initialize() {
+bool FrameBufferLayer::Initialize() {
   if (initialized_) {
-    return;
+    return true;
   }
 
   ViceOptions *options = ViceOptions::Get();
@@ -779,20 +786,34 @@ void FrameBufferLayer::Initialize() {
   }
 
   memset(g_layers, 0, sizeof(g_layers));
+  g_kms_active = false;
+  screen_pixels_ = nullptr;
+  screen_pitch_bytes_ = 0;
 
   if (kms_mode_resolved) {
     screen_ = nullptr;
-    assert(requested_depth == 16);
+    if (requested_depth != 16) {
+      printf("boot: pi5kms unsupported framebuffer depth %u\r\n",
+             requested_depth);
+      return false;
+    }
 
     g_effective_width = (int) kms_mode.width;
     g_effective_height = (int) kms_mode.height;
-    assert(g_effective_width > 0);
-    assert(g_effective_height > 0);
+    if (g_effective_width <= 0 || g_effective_height <= 0) {
+      printf("boot: pi5kms invalid framebuffer dimensions %dx%d\r\n",
+             g_effective_width, g_effective_height);
+      return false;
+    }
 
     for (unsigned i = 0; i < kKmsBufferCount; ++i) {
-      assert(pi5kms::CreateFramebuffer(kms_mode.width, kms_mode.height,
-                                       requested_depth,
-                                       &g_kms_framebuffers[i]));
+      if (!pi5kms::CreateFramebuffer(kms_mode.width, kms_mode.height,
+                                     requested_depth,
+                                     &g_kms_framebuffers[i])) {
+        printf("boot: pi5kms framebuffer %u allocation failed\r\n", i);
+        destroy_kms_scanout_framebuffers();
+        return false;
+      }
     }
     g_kms_front_buffer_index = 0;
     screen_pixels_ = g_kms_framebuffers[g_kms_front_buffer_index].pixels;
@@ -800,43 +821,73 @@ void FrameBufferLayer::Initialize() {
     screen_bytes_per_pixel_ =
         g_kms_framebuffers[g_kms_front_buffer_index].depth / 8;
     g_framebuffer_bytes_per_pixel = screen_bytes_per_pixel_;
-    assert(screen_bytes_per_pixel_ == 2);
+    if (screen_pixels_ == nullptr || screen_pitch_bytes_ == 0 ||
+        screen_bytes_per_pixel_ != 2) {
+      printf("boot: pi5kms invalid framebuffer layout\r\n");
+      destroy_kms_scanout_framebuffers();
+      return false;
+    }
 
     pi5kms::Plane initial_plane =
         make_kms_framebuffer_plane(g_kms_framebuffers[g_kms_front_buffer_index]);
     if (!pi5kms::ConfigureScanout(initial_plane, kms_mode.width, kms_mode.height)) {
       printf("boot: pi5kms scanout setup failed\r\n");
+      destroy_kms_scanout_framebuffers();
+      return false;
     }
     g_kms_active = true;
   } else {
     screen_ = new CBcmFrameBuffer(requested_width,
                                   requested_height,
                                   requested_depth);
-    assert(screen_ != nullptr);
-    assert(screen_->Initialize());
+    if (screen_ == nullptr) {
+      printf("boot: pi5 firmware framebuffer allocation failed\r\n");
+      return false;
+    }
+    if (!screen_->Initialize()) {
+      printf("boot: pi5 firmware framebuffer initialization failed\r\n");
+      delete screen_;
+      screen_ = nullptr;
+      return false;
+    }
 
     screen_pixels_ = (uint8_t *) (uintptr) screen_->GetBuffer();
-    assert(screen_pixels_ != nullptr);
     screen_pitch_bytes_ = screen_->GetPitch();
-    assert(screen_pitch_bytes_ > 0);
     screen_bytes_per_pixel_ =
         framebuffer_bytes_per_pixel(screen_, requested_depth);
     g_framebuffer_bytes_per_pixel = screen_bytes_per_pixel_;
-    assert(screen_bytes_per_pixel_ == 2 || screen_bytes_per_pixel_ == 4);
 
     g_effective_width = effective_screen_width(screen_, screen_bytes_per_pixel_);
     g_effective_height = effective_screen_height(screen_);
-    assert(g_effective_width > 0);
-    assert(g_effective_height > 0);
+    if (screen_pixels_ == nullptr || screen_pitch_bytes_ == 0 ||
+        (screen_bytes_per_pixel_ != 2 && screen_bytes_per_pixel_ != 4) ||
+        g_effective_width <= 0 || g_effective_height <= 0) {
+      printf("boot: pi5 firmware framebuffer returned invalid layout\r\n");
+      delete screen_;
+      screen_ = nullptr;
+      screen_pixels_ = nullptr;
+      screen_pitch_bytes_ = 0;
+      return false;
+    }
   }
-
-  initialized_ = true;
 
   g_compose_pitch_bytes = (unsigned) g_effective_width *
                           screen_bytes_per_pixel_;
   g_compose_pixels = (uint8_t *) malloc((size_t) g_compose_pitch_bytes *
                                         (size_t) g_effective_height);
-  assert(g_compose_pixels != nullptr);
+  if (g_compose_pixels == nullptr) {
+    printf("boot: pi5 composition framebuffer allocation failed\r\n");
+    if (g_kms_active) {
+      destroy_kms_scanout_framebuffers();
+      g_kms_active = false;
+    } else {
+      delete screen_;
+      screen_ = nullptr;
+    }
+    screen_pixels_ = nullptr;
+    screen_pitch_bytes_ = 0;
+    return false;
+  }
 
   memset(g_compose_pixels, 0, (size_t) g_compose_pitch_bytes *
          (size_t) g_effective_height);
@@ -860,6 +911,8 @@ void FrameBufferLayer::Initialize() {
   printf("boot: pi5 fbl direct bpp %u effective %dx%d compose_pitch %u\r\n",
          screen_bytes_per_pixel_, g_effective_width, g_effective_height,
          g_compose_pitch_bytes);
+  initialized_ = true;
+  return true;
 }
 
 bool FrameBufferLayer::OGLInit() { return false; }
@@ -867,7 +920,9 @@ bool FrameBufferLayer::OGLInit() { return false; }
 int FrameBufferLayer::Allocate(int pixelmode, uint8_t **pixels,
                                int width, int height, int *pitch) {
   assert(!allocated_);
-  Initialize();
+  if (!Initialize()) {
+    return -1;
+  }
 
   pixelmode_ = pixelmode;
   bytes_per_pixel_ = pixelmode == 1 ? 2 : 1;

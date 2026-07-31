@@ -224,13 +224,12 @@ struct menu_item* emux_add_cartridge_options(struct menu_item* root) {
   ui_menu_add_button(MENU_C64_ATTACH_CART_16K, parent, "Attach 16 raw...");
   ui_menu_add_button(MENU_C64_ATTACH_CART_ULTIMAX, parent, "Attach Ultimax raw...");
   ui_menu_add_button(MENU_DETACH_CART, parent, "Detach cartridge");
-
-  ui_menu_add_button(MENU_TEXT, parent, "");
   ui_menu_add_button(MENU_MAKE_CART_DEFAULT, parent,
-                     "Set current cart default (Need Save)");
+                     "Set cart default (Need Save)");
 
   ui_menu_add_button(MENU_SAVE_EASYFLASH, parent, "Save EasyFlash Now");
   ui_menu_add_button(MENU_CART_FREEZE, parent, "Cartridge Freeze");
+  emux_add_reu_options(parent);
 
   return parent;
 }

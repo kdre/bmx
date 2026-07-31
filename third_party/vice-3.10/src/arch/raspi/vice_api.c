@@ -69,6 +69,7 @@
 // RASPI includes
 #include "circle.h"
 #include "keycodes.h"
+#include "mousedrv.h"
 
 extern int emux_network_is_ready(void);
 
@@ -152,6 +153,15 @@ void raspi_keymap_changed(int, int, signed long);
 
 static void sync_sid_menu_items(void);
 static void sync_sound_menu_items(void);
+
+static const int reu_sizes_kib[] = {
+  128, 256, 512, 1024, 2048, 4096, 8192, 16384,
+};
+static struct menu_item *reu_image_item;
+static struct menu_item *reu_enabled_item;
+static struct menu_item *reu_size_item;
+
+static void sync_reu_menu_items(void);
 
 static void reopen_sound_after_sid_menu_change(void) {
   sound_close();
@@ -449,6 +459,43 @@ int emux_load_state(char *filename) {
   return status;
 }
 
+int emux_load_reu_image(char *filename) {
+  int cartridge_reset = 0;
+  int restore_status = 0;
+  int status;
+
+  if (resources_get_int("CartridgeReset", &cartridge_reset) < 0) {
+    return -1;
+  }
+
+  /* REU RAM can be exchanged while the machine is running.  The generic
+     cartridge attach path normally power-cycles the machine, so suppress that
+     reset only for this synchronous attach and restore the user's setting. */
+  if (cartridge_reset && resources_set_int("CartridgeReset", 0) < 0) {
+    return -1;
+  }
+
+  status = cartridge_attach_image(CARTRIDGE_REU, filename);
+
+  if (cartridge_reset) {
+    restore_status = resources_set_int("CartridgeReset", cartridge_reset);
+  }
+  sync_reu_menu_items();
+
+  if (restore_status < 0) {
+    return -1;
+  }
+
+  return status;
+}
+
+int emux_save_reu_image(char *filename) {
+  if (!cartridge_can_save_image(CARTRIDGE_REU)) {
+    return -1;
+  }
+  return cartridge_save_image(CARTRIDGE_REU, filename);
+}
+
 int emux_tape_control(int cmd) {
   switch (cmd) {
     case EMUX_TAPE_PLAY:
@@ -478,8 +525,9 @@ int emux_tape_control(int cmd) {
   }
 }
 
-int emux_autostart_file(char* filename) {
-   return autostart_autodetect(filename, NULL, 0, AUTOSTART_MODE_RUN);
+int emux_autostart_file(char* filename, unsigned int program_number) {
+   return autostart_autodetect(filename, NULL, program_number,
+                               AUTOSTART_MODE_RUN);
 }
 
 void emux_drive_change_model(int unit) {
@@ -890,9 +938,17 @@ void emux_detach_tape(void) {
 }
 
 int emux_prepare_shutdown(void) {
+   int reu_write_back = 0;
+   int status = 0;
+
+   if (resources_get_int("REUImageWrite", &reu_write_back) == 0 &&
+       reu_write_back && cartridge_can_flush_image(CARTRIDGE_REU) &&
+       cartridge_flush_image(CARTRIDGE_REU) < 0) {
+      status = -1;
+   }
    file_system_detach_disk_shutdown();
    tape_image_detach_all();
-   return 0;
+   return status;
 }
 
 static int viceSidEngineToBmcChoice(int viceEngine) {
@@ -1496,6 +1552,9 @@ void emux_set_int(IntSetting setting, int value) {
    case Setting_Mouse:
      resources_set_int("Mouse", value);
      break;
+   case Setting_MouseSensitivity:
+     resources_set_int("MouseSensitivity", value);
+     break;
    case Setting_RAMBlock0:
      resources_set_int("RAMBlock0", value);
      break;
@@ -1567,6 +1626,9 @@ void emux_get_int(IntSetting setting, int* dest) {
     case Setting_DatasetteResetWithCPU:
       resources_get_int("DatasetteResetWithCPU", dest);
       break;
+    case Setting_MouseSensitivity:
+      resources_get_int("MouseSensitivity", dest);
+      break;
     case Setting_VideoSize:
       resources_get_int("VideoSize", dest);
       break;
@@ -1608,8 +1670,98 @@ int emux_save_settings(void) {
    return resources_save(NULL);
 }
 
+void emux_mouse_input_clear(void) {
+  mousedrv_clear_pending();
+}
+
+int emux_mouse_preview_poll(float *delta_x, float *delta_y) {
+  return mousedrv_poll_scaled(delta_x, delta_y);
+}
+
+static const char *reu_image_basename(const char *filename) {
+  const char *slash;
+
+  if (filename == NULL || filename[0] == '\0') {
+    return "(none)";
+  }
+
+  slash = strrchr(filename, '/');
+  return slash == NULL ? filename : slash + 1;
+}
+
+static void sync_reu_menu_items(void) {
+  const char *filename = "";
+  int enabled;
+  int size_kib;
+  unsigned int i;
+
+  if (reu_image_item != NULL) {
+    resources_get_string("REUfilename", &filename);
+    ui_menu_set_button_value_fitted(
+        reu_image_item, reu_image_basename(filename), 2);
+  }
+
+  if (reu_enabled_item != NULL && resources_get_int("REU", &enabled) == 0) {
+    reu_enabled_item->value = enabled;
+  }
+
+  if (reu_size_item != NULL &&
+      resources_get_int("REUsize", &size_kib) == 0) {
+    for (i = 0; i < sizeof reu_sizes_kib / sizeof reu_sizes_kib[0]; ++i) {
+      if (size_kib == reu_sizes_kib[i]) {
+        reu_size_item->value = (int)i;
+        break;
+      }
+    }
+  }
+}
+
+void emux_add_reu_options(struct menu_item *parent) {
+  struct menu_item *child;
+  int write_back = 0;
+  unsigned int i;
+
+  resources_get_int("REUImageWrite", &write_back);
+
+  child = ui_menu_add_folder(parent, "RAM Expansion");
+  reu_enabled_item = ui_menu_add_toggle(MENU_REU, child, "Enabled", 0);
+
+  reu_size_item = ui_menu_add_multiple_choice(MENU_REU_SIZE, child,
+                                              "Memory Size");
+  reu_size_item->num_choices =
+      (int)(sizeof reu_sizes_kib / sizeof reu_sizes_kib[0]);
+  reu_size_item->value = 2;
+  for (i = 0; i < sizeof reu_sizes_kib / sizeof reu_sizes_kib[0]; ++i) {
+    snprintf(reu_size_item->choices[i], sizeof reu_size_item->choices[i],
+             "%d KiB", reu_sizes_kib[i]);
+    reu_size_item->choice_ints[i] = reu_sizes_kib[i];
+  }
+
+  reu_image_item = ui_menu_add_button_with_value(
+      MENU_TEXT, child, "Current Image", 0, "", "(none)");
+  reu_image_item->prefer_str = 1;
+  ui_menu_add_button(MENU_LOAD_REU, child, "Load .REU Image...");
+  ui_menu_add_button(MENU_SAVE_REU, child, "Save .REU Image...");
+  ui_menu_add_toggle(MENU_REU_WRITE_BACK, child, "Auto-save Image",
+                     write_back);
+  sync_reu_menu_items();
+}
+
 int emux_handle_menu_change(struct menu_item* item) {
   switch (item->id) {
+    case MENU_REU:
+      resources_set_int("REU", item->value);
+      return 1;
+    case MENU_REU_SIZE:
+      if (item->value >= 0 &&
+          item->value < (int)(sizeof reu_sizes_kib /
+                              sizeof reu_sizes_kib[0])) {
+        resources_set_int("REUsize", reu_sizes_kib[item->value]);
+      }
+      return 1;
+    case MENU_REU_WRITE_BACK:
+      resources_set_int("REUImageWrite", item->value);
+      return 1;
     case MENU_SID2_ADDRESS:
       resources_set_int("Sid2AddressStart", item->choice_ints[item->value]);
       sync_sid_menu_items();

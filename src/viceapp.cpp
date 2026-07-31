@@ -140,7 +140,11 @@ bool ViceScreenApp::Initialize(void) {
   EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
                 "boot: gpio configured");
 
-  FrameBufferLayer::Initialize();
+  if (!FrameBufferLayer::Initialize()) {
+    EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
+                  "boot: framebuffer initialization failed");
+    return false;
+  }
   EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
                 "boot: framebuffer initialized");
 

@@ -317,5 +317,7 @@ extern uint8_t *raw_video_font;
 // etc). Only takes effect while the user remains on the current menu
 // item.
 extern void ui_canvas_reveal_temp(int layer);
+extern void ui_mouse_preview_begin(void);
+extern void ui_mouse_preview_end(void);
 
 #endif
