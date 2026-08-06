@@ -1641,7 +1641,7 @@ index b10e7be..3aee87f 100644
  
  	m_pTimer = 0;
 diff --git a/libs/circle/lib/net/tcpconnection.cpp b/libs/circle/lib/net/tcpconnection.cpp
-index d1b5c12..66c0446 100644
+index d1b5c12..ba90a5e 100644
 --- a/libs/circle/lib/net/tcpconnection.cpp
 +++ b/libs/circle/lib/net/tcpconnection.cpp
 @@ -37,7 +37,9 @@
@@ -1679,7 +1679,15 @@ index d1b5c12..66c0446 100644
  		break;
  
  	case TCPStateEstablished:
-@@ -1299,7 +1307,23 @@ int CTCPConnection::PacketReceived (CNetBuffer	*pPacket,
+@@ -774,6 +782,7 @@ int CTCPConnection::PacketReceived (CNetBuffer	*pPacket,
+ 			return 0;
+ 		}
+ 
++		m_Checksum.SetSourceAddress (rReceiverIP);
+ 		m_Checksum.SetDestinationAddress (rSenderIP);
+ 	}
+ 
+@@ -1299,7 +1308,23 @@ int CTCPConnection::PacketReceived (CNetBuffer	*pPacket,
  			}
  			else if (le (nSEG_ACK, m_nSND_UNA))	// RFC 1122 section 4.2.2.20 (g)
  			{

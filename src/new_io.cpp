@@ -13,6 +13,7 @@ extern int errno;
 
 #include "circle_glue.h"
 #include "bmx_dirent_info.h"
+#include "remote/developer_log_ring.h"
 #include <assert.h>
 
 #include <malloc.h>
@@ -979,6 +980,7 @@ extern "C" int _write(int fildes, char *ptr, int len) {
   }
 
   if (fildes == 1 || fildes == 2) {
+    bmx::remote::CaptureDeveloperLog(ptr, static_cast<size_t>(len));
     if (g_serial) {
        return SerialWriteAll(ptr, len);
     } 

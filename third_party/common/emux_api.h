@@ -33,6 +33,7 @@
 #include <stdint.h>
 
 #include "ui.h"
+#include "../../src/developer_settings.h"
 
 extern const uint8_t ascii_to_petscii[256];
 
@@ -110,6 +111,7 @@ typedef enum {
   Setting_FileSystemDeviceN,
   Setting_IECDeviceN,
   Setting_Mouse,
+  Setting_MouseType,
   Setting_MouseSensitivity,
   Setting_RAMBlock0, // Vic20
   Setting_RAMBlock1, // Vic20
@@ -123,6 +125,20 @@ typedef enum {
   Setting_VideoFilter,
   Setting_AutostartWarp,
 } IntSetting;
+
+/* Stable BMX values. The emulator adapter maps these to native device IDs. */
+typedef enum {
+  BMX_MOUSE_TYPE_1351 = 0,
+  BMX_MOUSE_TYPE_NEOS,
+  BMX_MOUSE_TYPE_AMIGA,
+  BMX_MOUSE_TYPE_CX22,
+  BMX_MOUSE_TYPE_ST,
+  BMX_MOUSE_TYPE_SMART,
+  BMX_MOUSE_TYPE_MICROMYS,
+  BMX_MOUSE_TYPE_NUM
+} BmxMouseType;
+
+#define BMX_MOUSE_TYPE_DEFAULT BMX_MOUSE_TYPE_MICROMYS
 
 typedef enum {
   Setting_FSDeviceNDir,
@@ -285,6 +301,17 @@ int emux_apply_rs232net(int enabled, int mode, int interface,
                         int hayes_audio, const char *phonebook);
 void emux_set_rs232_hayes_audio(int hayes_audio);
 
+// Returns the developer_mode value parsed at boot. Runtime menu changes only
+// take effect after the requested reboot.
+int emux_developer_mode_enabled(void);
+
+// Copies the decoded developer_password value parsed at boot.  Returns 1 on
+// success.  An empty value means that Developer routes require no password.
+int emux_get_developer_password(char *password, unsigned password_size);
+
+// Returns the validated developer log-ring size parsed at boot, in KiB.
+unsigned emux_get_developer_log_buffer_kb(void);
+
 // Update access is deliberately synchronous and explicit. The menu must call
 // these functions only after the user activates System > Update... . Merely
 // building, opening or navigating the menu must never start network activity.
@@ -377,6 +404,13 @@ void emux_add_drive_option(struct menu_item* parent, int drive);
 
 void emux_add_keyboard_options(struct menu_item* parent);
 
+// Keyboard-monitor helpers implemented by the active emulator core.
+int emux_keyboard_mapping_lookup(long keycode, unsigned char usb_modifiers,
+                                 int *row, int *column, int *flags);
+int emux_keyboard_mapping_target_name(int row, int column, int flags,
+                                      char *buffer, size_t buffer_size);
+const char *emux_keyboard_mapping_file(void);
+
 // Create an empty disk image
 void emux_create_disk(struct menu_item* item, fullpath_func f_fullpath);
 
@@ -431,7 +465,10 @@ void emux_apply_video_adjustments(int layer, int hcenter, int vcenter,
 
 // Select a palette index for the given display number.
 // (For indexed displays only)
-void emux_change_palette(int display_num, int palette_index);
+int emux_change_palette(int display_num, int palette_index);
+int emux_apply_palette_setting(int display_num);
+int emux_set_palette_setting(int display_num, const char *setting);
+const char *emux_get_palette_setting(int display_num);
 
 // Set joystick latch value for port and device.
 // Safe to call from ISR

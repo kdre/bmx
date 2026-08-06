@@ -229,9 +229,47 @@ static int palette_load_core(FILE *f, const char *file_name,
     return 0;
 }
 
-int palette_load(const char *file_name, const char *subpath, palette_t *palette_return)
+static int palette_load_stream(FILE *f, const char *name,
+                               palette_t *palette_return)
 {
     palette_t *tmp_palette;
+    int rc;
+
+    tmp_palette = palette_create(palette_return->num_entries, NULL);
+    if (tmp_palette == NULL) {
+        return -1;
+    }
+
+    rc = palette_load_core(f, name, tmp_palette, palette_return);
+    palette_free(tmp_palette);
+
+    return rc;
+}
+
+int palette_load_path(const char *path, palette_t *palette_return)
+{
+    FILE *f;
+    int rc;
+
+    if (path == NULL || *path == '\0' || palette_return == NULL) {
+        return -1;
+    }
+
+    f = fopen(path, MODE_READ_TEXT);
+    if (f == NULL) {
+        log_error(palette_log, "Palette not found: `%s'.", path);
+        return -1;
+    }
+
+    log_message(palette_log, "Loading palette `%s'.", path);
+    rc = palette_load_stream(f, path, palette_return);
+    fclose(f);
+
+    return rc;
+}
+
+int palette_load(const char *file_name, const char *subpath, palette_t *palette_return)
+{
     char *complete_path;
     FILE *f;
     int rc;
@@ -239,6 +277,8 @@ int palette_load(const char *file_name, const char *subpath, palette_t *palette_
 #ifdef RASPI_COMPILE
     if (file_name != NULL &&
         (strcmp(file_name, "RASPI") == 0 || strcmp(file_name, "RASPI2") == 0)) {
+        palette_t *tmp_palette;
+
         tmp_palette = raspi_video_load_palette(palette_return->num_entries, (char *)file_name);
         if (tmp_palette == NULL) {
             return -1;
@@ -268,12 +308,9 @@ int palette_load(const char *file_name, const char *subpath, palette_t *palette_
     log_message(palette_log, "Loading palette `%s'.", complete_path);
     lib_free(complete_path);
 
-    tmp_palette = palette_create(palette_return->num_entries, NULL);
-
-    rc = palette_load_core(f, file_name, tmp_palette, palette_return);
+    rc = palette_load_stream(f, file_name, palette_return);
 
     fclose(f);
-    palette_free(tmp_palette);
 
     return rc;
 }

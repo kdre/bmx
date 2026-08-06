@@ -32,15 +32,9 @@
 
 // RASPI includes
 #include "circle.h"
+#include "gpio_layout.h"
 #include "menu.h"
 #include "ui.h"
-
-// These are listed in the same order as the array in viceapp.cpp
-// in the kernel layer. They must match.  TODO: Set these from kernel
-// in an init method instead of this duplicated list.
-int custom_gpio_pins[NUM_GPIO_PINS] = {
-    5, 20, 19, 16, 13, 6, 12, 26, 8, 25, 24,
-    18, 23, 27, 17, 22, 4, 7, 21, 2, 3, 9, 10 };
 
 #define NUM_GPIO_BINDINGS 45
 
@@ -93,14 +87,46 @@ static int menu_items_list[NUM_GPIO_BINDINGS][2] = {
     { BTN_ASSIGN_SID_FILTER_OSD, 0 },
 };
 
+static unsigned gpio_monitor_enabled;
+static uint32_t gpio_monitor_levels = UINT32_MAX;
+static uint32_t gpio_monitor_outputs;
+static struct menu_item *gpio_monitor_items[NUM_GPIO_PINS];
+
+static void format_binding(char *buffer, size_t size, unsigned binding) {
+   unsigned func = binding & 0xff;
+   unsigned bank = binding >> 8;
+   snprintf(buffer, size, "%s", function_to_string(func));
+   if (bank > 0) {
+      size_t used = strlen(buffer);
+      snprintf(buffer + used, size - used, " (Bank %u)", bank);
+   }
+}
+
 static void menu_value_changed(struct menu_item *item) {
    int pin_index = item->id;
    gpio_bindings[pin_index] = item->choice_ints[item->value];
 }
 
 void build_gpio_menu(struct menu_item *root) {
+   int config = menu_get_gpio_selection();
    struct menu_item* item;
-   for (int i=0;i<NUM_GPIO_PINS;i++) {
+
+   ui_menu_add_button(MENU_TEXT, root,
+                      config >= GPIO_CONFIG_NAV_JOY &&
+                      config <= GPIO_CONFIG_USERPORT
+                          ? "Active preset (read-only)"
+                          : "Saved Custom bindings");
+
+   for (int row = 0; row < NUM_GPIO_PINS; row++) {
+     int i = gpio_sorted_pin_index(row);
+     if (config >= GPIO_CONFIG_NAV_JOY && config <= GPIO_CONFIG_USERPORT) {
+       char name[16];
+       snprintf(name, sizeof name, "GPIO%02d", custom_gpio_pins[i]);
+       item = ui_menu_add_button_with_value(MENU_TEXT, root, name, 0, "", "");
+       ui_menu_set_button_value_fitted(item, gpio_preset_role(config, i), 1);
+       continue;
+     }
+
      item = ui_menu_add_multiple_choice(i, root, "");
      item->num_choices = NUM_GPIO_BINDINGS;
      sprintf (item->name, "GPIO%02d Binding", custom_gpio_pins[i]);
@@ -132,4 +158,91 @@ void build_gpio_menu(struct menu_item *root) {
      }
      item->on_value_changed = menu_value_changed;
    }
+}
+
+int emu_wants_raw_gpio(void) {
+   return ui_enabled &&
+          __atomic_load_n(&gpio_monitor_enabled, __ATOMIC_ACQUIRE) != 0;
+}
+
+void emu_set_raw_gpio(uint32_t levels, uint32_t outputs) {
+   if (!__atomic_load_n(&gpio_monitor_enabled, __ATOMIC_ACQUIRE)) {
+      return;
+   }
+   __atomic_store_n(&gpio_monitor_levels, levels, __ATOMIC_RELAXED);
+   __atomic_store_n(&gpio_monitor_outputs, outputs, __ATOMIC_RELEASE);
+}
+
+void gpio_monitor_refresh(void) {
+   char role[64];
+   char value[16];
+   int config;
+   uint32_t levels;
+   uint32_t outputs;
+
+   if (!__atomic_load_n(&gpio_monitor_enabled, __ATOMIC_ACQUIRE)) {
+      return;
+   }
+   config = menu_get_gpio_selection();
+   levels = __atomic_load_n(&gpio_monitor_levels, __ATOMIC_RELAXED);
+   outputs = __atomic_load_n(&gpio_monitor_outputs, __ATOMIC_ACQUIRE);
+
+   for (int row = 0; row < NUM_GPIO_PINS; row++) {
+      int i = gpio_sorted_pin_index(row);
+      unsigned pin = custom_gpio_pins[i];
+      uint32_t bit = UINT32_C(1) << pin;
+      const char *mode = outputs & bit ? "OUT" : "IN";
+
+      if (config == GPIO_CONFIG_CUSTOM) {
+         format_binding(role, sizeof role, gpio_bindings[i]);
+      } else {
+         snprintf(role, sizeof role, "%s", gpio_preset_role(config, i));
+      }
+      snprintf(gpio_monitor_items[row]->name,
+               sizeof gpio_monitor_items[row]->name,
+               "GPIO%02u  %-19.19s", pin, role);
+      snprintf(value, sizeof value, "%s %s",
+               levels & bit ? "HIGH" : "LOW", mode);
+      ui_menu_set_button_value_fitted(gpio_monitor_items[row], value, 1);
+   }
+}
+
+static void gpio_monitor_popped(struct menu_item *old_root,
+                                struct menu_item *new_root) {
+   (void)old_root;
+   (void)new_root;
+   __atomic_store_n(&gpio_monitor_enabled, 0U, __ATOMIC_RELEASE);
+   memset(gpio_monitor_items, 0, sizeof gpio_monitor_items);
+   circle_reset_gpio(emu_get_gpio_config());
+}
+
+void show_gpio_monitor(void) {
+   struct menu_item *root = ui_push_menu(-1, -1);
+   struct menu_item *config_item;
+   if (root == NULL) {
+      return;
+   }
+
+   root->on_popped_off = gpio_monitor_popped;
+   memset(gpio_monitor_items, 0, sizeof gpio_monitor_items);
+   ui_menu_add_button(MENU_TEXT, root, "GPIO Monitor (raw)");
+   config_item = ui_menu_add_button_with_value(
+       MENU_TEXT, root, "Config", 0, "", "");
+   ui_menu_set_button_value_fitted(
+       config_item, gpio_config_name(menu_get_gpio_selection()), 1);
+
+   for (int row = 0; row < NUM_GPIO_PINS; row++) {
+      int i = gpio_sorted_pin_index(row);
+      char name[32];
+      snprintf(name, sizeof name, "GPIO%02d", custom_gpio_pins[i]);
+      gpio_monitor_items[row] = ui_menu_add_button_with_value(
+          MENU_TEXT, root, name, 0, "", "");
+   }
+   ui_menu_add_divider(root);
+   ui_menu_add_button(MENU_TEXT, root, "Esc/F12 closes; GPIO is consumed");
+
+   __atomic_store_n(&gpio_monitor_levels, UINT32_MAX, __ATOMIC_RELAXED);
+   __atomic_store_n(&gpio_monitor_outputs, 0U, __ATOMIC_RELAXED);
+   __atomic_store_n(&gpio_monitor_enabled, 1U, __ATOMIC_RELEASE);
+   gpio_monitor_refresh();
 }

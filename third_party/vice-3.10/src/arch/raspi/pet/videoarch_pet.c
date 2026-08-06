@@ -36,14 +36,6 @@
 #include "pet/petmodel.h"
 #include "resources.h"
 
-static unsigned int white_color_palette[] = {
-    0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF,
-};
-
-static unsigned int amber_color_palette[] = {
-    0x00, 0x00, 0x00, 0xFF, 0xA8, 0x00,
-};
-
 static unsigned int green_color_palette[] = {
     0x00, 0x00, 0x00, 0x41, 0xFF, 0x00,
 };
@@ -98,19 +90,9 @@ void set_video_font(void) {
 }
 
 unsigned int *raspi_get_palette(int display, int index) {
-  switch (index) {
-  case 0:
-    return green_color_palette;
-    break;
-  case 1:
-    return amber_color_palette;
-    break;
-  case 2:
-    return white_color_palette;
-    break;
-  default:
-    return NULL;
-  }
+  (void)display;
+  (void)index;
+  return green_color_palette;
 }
 
 void set_canvas_size(int index, int *w, int *h, int *gw, int *gh) {

@@ -30,5 +30,8 @@
 #include "ui.h"
 
 void build_gpio_menu(struct menu_item *parent);
+void show_gpio_monitor(void);
+void gpio_monitor_refresh(void);
+int menu_get_gpio_selection(void);
 
 #endif

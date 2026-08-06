@@ -14,6 +14,8 @@
 // limitations under the License.
 
 #include "kernel.h"
+#include "mouse_input.h"
+#include "third_party/common/gpio_layout.h"
 #include "update/update_service.h"
 
 #include "platform/platform.h"
@@ -30,6 +32,13 @@
 #include <string.h>
 
 #include <circle/gpiopin.h>
+#include <circle/startup.h>
+#if RASPPI == 4
+#include <circle/bcm2835.h>
+#include <circle/memio.h>
+#endif
+
+extern "C" int emux_prepare_shutdown(void);
 
 CKernel *static_kernel = NULL;
 
@@ -80,6 +89,31 @@ static void copy_usb_product(char *destination, unsigned destination_size,
 
 // Real keyboard matrix states
 static bool kbdMatrixStates[8][8];
+static unsigned char kbdMatrixArmed[8][8];
+static const unsigned char gpioUserportIndices[8] = {
+    GPIO_CONFIG_3_USERPORT_PB0_INDEX, GPIO_CONFIG_3_USERPORT_PB1_INDEX,
+    GPIO_CONFIG_3_USERPORT_PB2_INDEX, GPIO_CONFIG_3_USERPORT_PB3_INDEX,
+    GPIO_CONFIG_3_USERPORT_PB4_INDEX, GPIO_CONFIG_3_USERPORT_PB5_INDEX,
+    GPIO_CONFIG_3_USERPORT_PB6_INDEX, GPIO_CONFIG_3_USERPORT_PB7_INDEX };
+
+static void log_gpio18(const char *phase, int config,
+                       uint32_t levels_before, uint32_t levels_after) {
+#if RASPPI == 4
+  uint32_t fsel = read32(ARM_GPIO_GPFSEL0 + (18 / 10) * 4);
+  uint32_t pull = read32(ARM_GPIO_GPPUPPDN0 + (18 / 16) * 4);
+  printf("gpio: %s config=%d GPIO18 before=%s after=%s fsel=%u pull=%u%s\r\n",
+         phase, config,
+         levels_before & (UINT32_C(1) << 18) ? "HIGH" : "LOW",
+         levels_after & (UINT32_C(1) << 18) ? "HIGH" : "LOW",
+         (unsigned)((fsel >> ((18 % 10) * 3)) & 7U),
+         (unsigned)((pull >> ((18 % 16) * 2)) & 3U),
+         ((pull >> ((18 % 16) * 2)) & 3U) == 1U ? " (up)" : "");
+#else
+  printf("gpio: %s config=%d GPIO18 before=%s after=%s\r\n", phase, config,
+         levels_before & (UINT32_C(1) << 18) ? "HIGH" : "LOW",
+         levels_after & (UINT32_C(1) << 18) ? "HIGH" : "LOW");
+#endif
+}
 // These for translating row/col scans into equivalent keycodes.
 #if defined(RASPI_PLUS4)
 static long kbdMatrixKeyCodes[8][8] = {
@@ -419,7 +453,8 @@ private:
 
 CKernel::CKernel(void)
     : ViceStdioApp("vice"), mViceSound(nullptr),
-      mUSBPlugAndPlayTask(nullptr), mUSBMouse(nullptr),
+      mUSBPlugAndPlayTask(nullptr), mRawKeyboardMonitorActive(false),
+      mRawKeyboardSuppressedModifiers(0), mUSBMouse(nullptr),
       mUSBDeviceInfoLock(TASK_LEVEL), mUSBDeviceInfoPending(FALSE),
       mUSBOutputAvailable(FALSE), mUSBAudioChangePending(FALSE),
       mNumJoy(emu_get_num_joysticks()),
@@ -431,6 +466,7 @@ CKernel::CKernel(void)
   mod_states = 0;
   memset(key_states, 0, sizeof key_states);
   memset(key_mod_states, 0, sizeof key_mod_states);
+  memset(mRawKeyboardSuppressed, 0, sizeof mRawKeyboardSuppressed);
   for (unsigned i = 0; i < MAX_USB_DEVICES; i++) {
     mUSBKeyboardContexts[i].kernel = this;
     mUSBKeyboardContexts[i].slot = i;
@@ -444,12 +480,22 @@ CKernel::CKernel(void)
   for (int i = 0; i < NUM_GPIO_PINS; i++) {
     gpio_debounce_state[i] = BTN_UP;
     gpio_prev_state[i] = HIGH;
+    gpio_input_armed[i] = 0;
+  }
+  for (int device = 0; device < 2; device++) {
+    for (int i = 0; i < 7; i++) {
+      gpio_joystick_armed[device][i] = 0;
+      if (i < 5) {
+        gpio_joystick_prev[device][i] = HIGH;
+      }
+    }
   }
 
   kbdRestoreState = HIGH;
   for (int i = 0; i < 8; i++) {
     for (int j = 0; j < 8; j++) {
       kbdMatrixStates[i][j] = HIGH;
+      kbdMatrixArmed[i][j] = 0;
     }
   }
 
@@ -473,6 +519,11 @@ CKernel::CKernel(void)
 bool CKernel::Initialize(void) {
   if (!ViceStdioApp::Initialize()) {
     return false;
+  }
+
+  if (circle_gpio_enabled()) {
+    uint32_t levels = CGPIOPin::ReadAll();
+    log_gpio18("boot", GPIO_CONFIG_DISABLED, levels, levels);
   }
 
   return true;
@@ -801,9 +852,7 @@ void CKernel::KeyRemovedHandler(CDevice *pDevice, void *pContext) {
   if (kernel->mUSBKeyboards[slot] ==
       static_cast<CUSBKeyboardDevice *>(pDevice)) {
     kernel->mUSBKeyboards[slot] = nullptr;
-    if (kernel->mUSBKeyboardState.RemoveDevice(slot)) {
-      kernel->DispatchUSBKeyboardState();
-    }
+    kernel->RemoveUSBKeyboardDevice(slot);
     printf("usb: keyboard ukbd%u removed\r\n", slot + 1);
   }
 }
@@ -833,9 +882,7 @@ void CKernel::SetupUSBKeyboard() {
 
     CUSBKeyboardDevice *current_keyboard = mUSBKeyboards[i];
     if (pKeyboard != current_keyboard) {
-      if (mUSBKeyboardState.RemoveDevice(i)) {
-        DispatchUSBKeyboardState();
-      }
+      RemoveUSBKeyboardDevice(i);
 
       mUSBKeyboards[i] = pKeyboard;
       if (pKeyboard) {
@@ -994,7 +1041,17 @@ void CKernel::ApplyUSBDeviceInfo() {
 }
 
 void CKernel::UpdateUSBPlugAndPlay() {
+  if (mDeveloperUsbDiagnostic != nullptr) {
+    // Publish a REST start before Circle asks whether an otherwise unsupported
+    // HID interface should get the diagnostic fallback.
+    mDeveloperUsbDiagnostic->Poll(CTimer::GetClockTicks64() / 1000U);
+  }
   boolean usb_changed = mUSBHCII.UpdatePlugAndPlay();
+  if (mDeveloperUsbDiagnostic != nullptr) {
+    // Circle callbacks only enqueue bounded records. Formatting and developer
+    // log output stay on the USB owner task here.
+    mDeveloperUsbDiagnostic->Poll(CTimer::GetClockTicks64() / 1000U);
+  }
   if (usb_changed) {
     printf("usb: plug-and-play update\r\n");
     SetupUSBKeyboard();
@@ -1094,7 +1151,7 @@ ViceApp::TShutdownMode CKernel::Run(void) {
 void CKernel::ScanKeyboard() {
   int ui_activated = emu_is_ui_activated();
 
-  int restore = gpioPins[GPIO_KBD_RESTORE_INDEX]->Read();
+  int restore = ReadGPIOInput(GPIO_KBD_RESTORE_INDEX);
   // For restore, there is no public API that triggers it so we will
   // pass the keycode that will.  NOTE: On the plus/4, this key sym
   // will be the CLR key according to the keymap.
@@ -1113,6 +1170,7 @@ void CKernel::ScanKeyboard() {
     for (int kbdPB = 0; kbdPB < 8; kbdPB++) {
       // Read PB line
       int val = gpioPins[kbdPB + 8]->Read();
+      val = gpio_rearm_filter(val, &kbdMatrixArmed[kbdPA][kbdPB]);
 
       // My PA/PB to keycode matrix is transposed and I'm too lazy to fix
       // it. Just swap PB and PA here for the keycode lookup.
@@ -1170,11 +1228,7 @@ void CKernel::ScanKeyboard() {
 // selector is used to drive pins low instead of GND).
 // If gpioConfig is 2, the Waveshare HAT layout is used.
 void CKernel::ReadJoystick(int device, int gpioConfig) {
-  // For remembering button states for UI only
-  static int js_prev_0[5] = {HIGH, HIGH, HIGH, HIGH, HIGH};
-  static int js_prev_1[5] = {HIGH, HIGH, HIGH, HIGH, HIGH};
-
-  int *js_prev;
+  int *js_prev = gpio_joystick_prev[device];
   CGPIOPin **js_pins = NULL;
   CGPIOPin *js_selector = NULL;
   int port = 0;
@@ -1196,7 +1250,6 @@ void CKernel::ReadJoystick(int device, int gpioConfig) {
       return;
     }
 
-    js_prev = js_prev_0;
     switch (gpioConfig) {
        case GPIO_CONFIG_NAV_JOY:
           js_pins = config_0_joystickPins1;
@@ -1225,7 +1278,6 @@ void CKernel::ReadJoystick(int device, int gpioConfig) {
       return;
     }
 
-    js_prev = js_prev_1;
     switch (gpioConfig) {
        case GPIO_CONFIG_NAV_JOY:
          js_pins = config_0_joystickPins2;
@@ -1257,6 +1309,22 @@ void CKernel::ReadJoystick(int device, int gpioConfig) {
   int js_fire = js_pins[JOY_FIRE]->Read();
   int js_potx = gpioConfig == 2 ? js_pins[JOY_POTX]->Read() : HIGH;
   int js_poty = gpioConfig == 2 ? js_pins[JOY_POTY]->Read() : HIGH;
+
+  js_up = gpio_rearm_filter(js_up, &gpio_joystick_armed[device][JOY_UP]);
+  js_down = gpio_rearm_filter(js_down,
+                              &gpio_joystick_armed[device][JOY_DOWN]);
+  js_left = gpio_rearm_filter(js_left,
+                              &gpio_joystick_armed[device][JOY_LEFT]);
+  js_right = gpio_rearm_filter(js_right,
+                               &gpio_joystick_armed[device][JOY_RIGHT]);
+  js_fire = gpio_rearm_filter(js_fire,
+                              &gpio_joystick_armed[device][JOY_FIRE]);
+  if (gpioConfig == GPIO_CONFIG_WAVESHARE) {
+    js_potx = gpio_rearm_filter(js_potx,
+                                &gpio_joystick_armed[device][JOY_POTX]);
+    js_poty = gpio_rearm_filter(js_poty,
+                                &gpio_joystick_armed[device][JOY_POTY]);
+  }
 
   if (ui_activated) {
     if (js_up == LOW && js_prev[JOY_UP] != LOW) {
@@ -1340,7 +1408,7 @@ void CKernel::ReadCustomGPIO() {
     func = gpio_bindings[i] & 0xFF;
     if (bank > 0) {
       // This is for a joystick bank
-      value = gpioPins[i]->Read();
+      value = ReadGPIOInput(i);
       if (ui_activated) {
         if (value == LOW && gpio_prev_state[i] != LOW) {
           emu_ui_key_interrupt(func_to_keycode(func), 1);
@@ -1562,29 +1630,35 @@ int CKernel::circle_sound_bufferspace(void) {
 void CKernel::circle_yield(void) {
   ApplyUSBDeviceInfo();
   ApplyUSBAudioChange();
+  ProcessRemoteCommand();
   CScheduler::Get()->Yield();
+}
+
+void CKernel::ProcessRemoteCommand() {
+  if (mRemoteService == nullptr) return;
+  bmx::remote::RemoteCommand command = bmx::remote::RemoteCommand::None;
+  if (!mRemoteService->TakeCommand(&command) ||
+      command != bmx::remote::RemoteCommand::SystemReboot) {
+    return;
+  }
+
+  printf("developer: reboot requested\r\n");
+  StopDeveloperService();
+  if (emux_prepare_shutdown() != 0) {
+    printf("developer: emulator shutdown failed; reboot cancelled\r\n");
+    return;
+  }
+  if (PrepareSystemShutdown() != 0) {
+    printf("developer: storage shutdown failed; reboot cancelled\r\n");
+    return;
+  }
+  reboot();
 }
 
 void CKernel::MouseStatusHandler(unsigned nButtons, int deltaX, int deltaY,
                                  int wheelMove) {
-  static unsigned int prev_buttons = {0};
-  (void) wheelMove;
-
-  emu_mouse_move(deltaX, deltaY);
-
-  if ((prev_buttons & MOUSE_BUTTON_LEFT) && !(nButtons & MOUSE_BUTTON_LEFT)) {
-    emu_mouse_button_left(0);
-  } else if (!(prev_buttons & MOUSE_BUTTON_LEFT) &&
-             (nButtons & MOUSE_BUTTON_LEFT)) {
-    emu_mouse_button_left(1);
-  }
-  if ((prev_buttons & MOUSE_BUTTON_RIGHT) && !(nButtons & MOUSE_BUTTON_RIGHT)) {
-    emu_mouse_button_right(0);
-  } else if (!(prev_buttons & MOUSE_BUTTON_RIGHT) &&
-             (nButtons & MOUSE_BUTTON_RIGHT)) {
-    emu_mouse_button_right(1);
-  }
-  prev_buttons = nButtons;
+  static BmxMouseStatusState state = {0, 0, 0};
+  bmx_mouse_status_update(nButtons, deltaX, deltaY, wheelMove, &state);
 }
 
 static int ViceKeyboardModifierMask(unsigned char ucModifiers) {
@@ -1627,14 +1701,120 @@ void CKernel::KeyStatusHandlerRaw(unsigned char ucModifiers,
     return;
   }
 
+  if (emu_wants_raw_keyboard()) {
+    kernel->mUSBKeyboardState.ApplyReport(context->slot, ucModifiers, RawKeys);
+    if (!kernel->mRawKeyboardMonitorActive) {
+      kernel->ReleaseDispatchedUSBKeyboardState();
+      kernel->mRawKeyboardMonitorActive = true;
+    }
+    emu_set_raw_keyboard(context->slot, ucModifiers, RawKeys);
+    return;
+  }
+
+  const bool monitor_ended = kernel->EndRawKeyboardMonitor();
   if (kernel->mUSBKeyboardState.ApplyReport(context->slot, ucModifiers,
-                                             RawKeys)) {
+                                             RawKeys) || monitor_ended) {
     kernel->DispatchUSBKeyboardState();
   }
 }
 
+bool CKernel::EndRawKeyboardMonitor() {
+  if (!mRawKeyboardMonitorActive) {
+    return false;
+  }
+
+  mRawKeyboardSuppressedModifiers = mUSBKeyboardState.Modifiers();
+  for (unsigned usage = 1;
+       usage < bmc64::USBKeyboardState::UsageCount; usage++) {
+    mRawKeyboardSuppressed[usage] = mUSBKeyboardState.IsPressed(usage);
+  }
+  mRawKeyboardMonitorActive = false;
+  return true;
+}
+
+void CKernel::RemoveUSBKeyboardDevice(unsigned slot) {
+  static const unsigned char no_keys[6] = {};
+  if (slot >= MAX_USB_DEVICES) {
+    return;
+  }
+
+  if (emu_wants_raw_keyboard()) {
+    if (!mRawKeyboardMonitorActive) {
+      ReleaseDispatchedUSBKeyboardState();
+      mRawKeyboardMonitorActive = true;
+    }
+    mUSBKeyboardState.RemoveDevice(slot);
+    emu_set_raw_keyboard(slot, 0, no_keys);
+    return;
+  }
+
+  const bool monitor_ended = EndRawKeyboardMonitor();
+  if (mUSBKeyboardState.RemoveDevice(slot) || monitor_ended) {
+    DispatchUSBKeyboardState();
+  }
+}
+
+void CKernel::ReleaseDispatchedUSBKeyboardState() {
+  const int ui_activated = emu_is_ui_activated();
+
+  /* Release ordinary keys while UI shift state still describes them. */
+  for (unsigned usage = 1;
+       usage < bmc64::USBKeyboardState::UsageCount; usage++) {
+    if (!key_states[usage]) {
+      continue;
+    }
+    if (ui_activated) {
+      if ((uiLeftShift || uiRightShift) && usage == KEYCODE_Right) {
+        emu_key_released(KEYCODE_Left);
+      } else if ((uiLeftShift || uiRightShift) && usage == KEYCODE_Down) {
+        emu_key_released(KEYCODE_Up);
+      } else {
+        emu_key_released(usage);
+      }
+    } else {
+      emu_key_released_mod(usage, key_mod_states[usage]);
+    }
+    key_states[usage] = false;
+    key_mod_states[usage] = 0;
+  }
+
+  for (int bit = 0; bit < 8; bit++) {
+    if ((mod_states & (1U << bit)) == 0) {
+      continue;
+    }
+    switch (bit) {
+    case 0: emu_key_released(KEYCODE_LeftControl); break;
+    case 1: emu_key_released(KEYCODE_LeftShift); break;
+    case 2: emu_key_released(KEYCODE_LeftAlt); break;
+    case 3: emu_key_released(KEYCODE_LeftSuper); break;
+    case 4: emu_key_released(KEYCODE_RightControl); break;
+    case 5: emu_key_released(KEYCODE_RightShift); break;
+    case 6: emu_key_released(KEYCODE_RightAlt); break;
+    case 7: emu_key_released(KEYCODE_RightSuper); break;
+    default: break;
+    }
+  }
+  mod_states = 0;
+  uiLeftShift = false;
+  uiRightShift = false;
+}
+
 void CKernel::DispatchUSBKeyboardState() {
-  const unsigned char ucModifiers = mUSBKeyboardState.Modifiers();
+  const unsigned char rawModifiers = mUSBKeyboardState.Modifiers();
+  unsigned char ucModifiers = rawModifiers;
+
+  for (int bit = 0; bit < 8; bit++) {
+    const unsigned char mask = (unsigned char)(1U << bit);
+    if ((mRawKeyboardSuppressedModifiers & mask) == 0) {
+      continue;
+    }
+    if ((rawModifiers & mask) != 0) {
+      ucModifiers = (unsigned char)(ucModifiers & ~mask);
+    } else {
+      mRawKeyboardSuppressedModifiers =
+          (unsigned char)(mRawKeyboardSuppressedModifiers & ~mask);
+    }
+  }
 
   // Compare previous to present and handle press/release that come from
   // modifier keys.
@@ -1669,6 +1849,9 @@ void CKernel::DispatchUSBKeyboardState() {
       case 6: // RightAlt
         emu_key_pressed(KEYCODE_RightAlt);
         break;
+      case 7: // RightSuper
+        emu_key_pressed(KEYCODE_RightSuper);
+        break;
       default:
         break;
       }
@@ -1701,6 +1884,9 @@ void CKernel::DispatchUSBKeyboardState() {
       case 6: // RightAlt
         emu_key_released(KEYCODE_RightAlt);
         break;
+      case 7: // RightSuper
+        emu_key_released(KEYCODE_RightSuper);
+        break;
       default:
         break;
       }
@@ -1713,7 +1899,15 @@ void CKernel::DispatchUSBKeyboardState() {
   int ui_activated = emu_is_ui_activated();
   int vice_modifiers = ViceKeyboardModifierMask(ucModifiers);
   for (unsigned i = 1; i < bmc64::USBKeyboardState::UsageCount; i++) {
-    const bool new_state = mUSBKeyboardState.IsPressed(i);
+    const bool raw_state = mUSBKeyboardState.IsPressed(i);
+    bool new_state = raw_state;
+    if (mRawKeyboardSuppressed[i]) {
+      if (raw_state) {
+        new_state = false;
+      } else {
+        mRawKeyboardSuppressed[i] = false;
+      }
+    }
     if (key_states[i] == true && new_state == false) {
       if (ui_activated) {
         // We have to handle shift+left/right here or else our ui
@@ -1750,8 +1944,12 @@ void CKernel::DispatchUSBKeyboardState() {
   }
 }
 
+int CKernel::ReadGPIOInput(int pinIndex) {
+  return gpio_rearm_filter(gpioPins[pinIndex]->Read(),
+                           &gpio_input_armed[pinIndex]);
+}
+
 int CKernel::ReadDebounced(int pinIndex) {
-  CGPIOPin *pin = gpioPins[pinIndex];
 
   if (gpio_debounce_state[pinIndex] == BTN_PRESS) {
     gpio_debounce_state[pinIndex] = BTN_DOWN;
@@ -1759,18 +1957,18 @@ int CKernel::ReadDebounced(int pinIndex) {
     gpio_debounce_state[pinIndex] = BTN_UP;
   }
 
-  if (pin->Read() == LOW) {
+  if (ReadGPIOInput(pinIndex) == LOW) {
     if (gpio_debounce_state[pinIndex] == BTN_UP) {
       circle_sleep(5);
-      if (pin->Read() == LOW) {
+      if (ReadGPIOInput(pinIndex) == LOW) {
         gpio_debounce_state[pinIndex] = BTN_PRESS;
       }
     }
   } else {
     if (gpio_debounce_state[pinIndex] == BTN_DOWN) {
-      if (pin->Read() == HIGH) {
+      if (ReadGPIOInput(pinIndex) == HIGH) {
         circle_sleep(5);
-        if (pin->Read() == HIGH) {
+        if (ReadGPIOInput(pinIndex) == HIGH) {
           gpio_debounce_state[pinIndex] = BTN_RELEASE;
         }
       }
@@ -1804,6 +2002,24 @@ void CKernel::circle_check_gpio() {
 #endif
 
   int gpio_config = emu_get_gpio_config();
+
+  if (emu_wants_raw_gpio()) {
+    uint32_t outputs = 0;
+    if (gpio_config == GPIO_CONFIG_USERPORT &&
+        circle_gpio_outputs_enabled()) {
+      uint8_t ddr = circle_get_userport_ddr();
+      SetupUserport();
+      ReadWriteUserport();
+      for (int i = 0; i < 8; i++) {
+        if (ddr & (1U << i)) {
+          outputs |= UINT32_C(1) <<
+                     custom_gpio_pins[gpioUserportIndices[i]];
+        }
+      }
+    }
+    emu_set_raw_gpio(CGPIOPin::ReadAll(), outputs);
+    return;
+  }
 
   switch(gpio_config) {
     case GPIO_CONFIG_NAV_JOY:
@@ -1887,7 +2103,23 @@ void CKernel::circle_check_gpio() {
 // Reset the state of the GPIO pins.
 // Needed when switching to and from GPIO_CONFIG_USERPORT
 void CKernel::circle_reset_gpio(int gpio_config) {
+  if (!circle_gpio_enabled()) {
+    return;
+  }
+
+  uint32_t levels_before = CGPIOPin::ReadAll();
+
+  // Release emulator-side GPIO joystick latches from the previous layout.
+  for (int i = 0; i < MAX_JOY_PORTS; i++) {
+    if ((joydevs[i].device == JOYDEV_GPIO_0 ||
+         joydevs[i].device == JOYDEV_GPIO_1) && joydevs[i].port > 0) {
+      emu_joy_interrupt_abs(joydevs[i].port, joydevs[i].device,
+                            0, 0, 0, 0, 0, 0, 0);
+    }
+  }
+
   switch (gpio_config) {
+    case GPIO_CONFIG_DISABLED:
     case GPIO_CONFIG_NAV_JOY:
     case GPIO_CONFIG_KYB_JOY:
     case GPIO_CONFIG_WAVESHARE:
@@ -1906,9 +2138,39 @@ void CKernel::circle_reset_gpio(int gpio_config) {
       SetupUserport();
       break;
     default:
-      // Disabled
+      for (int i = 0; i < NUM_GPIO_PINS; i++) {
+        gpioPins[i]->SetMode(GPIOModeInputPullUp);
+      }
       break;
   }
+
+  circle_sleep(10);
+  uint32_t levels_after = CGPIOPin::ReadAll();
+  for (int i = 0; i < NUM_GPIO_PINS; i++) {
+    gpio_debounce_state[i] = BTN_UP;
+    gpio_prev_state[i] = HIGH;
+    gpio_input_armed[i] =
+        (levels_after & (UINT32_C(1) << custom_gpio_pins[i])) != 0;
+  }
+  for (int device = 0; device < 2; device++) {
+    for (int i = 0; i < 7; i++) {
+      gpio_joystick_armed[device][i] = 0;
+      if (i < 5) {
+        gpio_joystick_prev[device][i] = HIGH;
+      }
+    }
+  }
+  for (int pa = 0; pa < 8; pa++) {
+    for (int pb = 0; pb < 8; pb++) {
+      kbdMatrixStates[pa][pb] = HIGH;
+      kbdMatrixArmed[pa][pb] = 0;
+    }
+  }
+  kbdRestoreState = HIGH;
+  uiLeftShift = false;
+  uiRightShift = false;
+
+  log_gpio18("reset", gpio_config, levels_before, levels_after);
 }
 
 void CKernel::circle_lock_acquire() { m_Lock.Acquire(); }

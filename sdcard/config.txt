@@ -9,9 +9,9 @@
 # 6 = HAMMING - soft edges (default)
 #scaling_kernel=2
 
-# BMX replaces only the block between these markers when switching emulator
-# or video mode. Keep board- and user-specific options outside the block.
-# The selected values originate in machines.ini.
+# BMX replaces only the block between these markers when switching emulator,
+# video mode or overclocking settings. Keep unrelated board- and user-specific
+# options outside the block. Video values originate in machines.ini.
 # BEGIN BMX MANAGED
 disable_overscan=1
 sdtv_mode=18

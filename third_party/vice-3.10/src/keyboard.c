@@ -655,6 +655,30 @@ static int keyb_find_in_keyconvtab(int sym, int mod)
     return found;
 }
 
+int keyboard_keymap_lookup(signed long key, int mod,
+                           int *row, int *column, int *flags)
+{
+    int keynum;
+
+    if (keyconvmap == NULL) {
+        return 0;
+    }
+    keynum = keyb_find_in_keyconvtab((int)key, mod);
+    if (keynum < 0) {
+        return 0;
+    }
+    if (row != NULL) {
+        *row = keyconvmap[keynum].row;
+    }
+    if (column != NULL) {
+        *column = keyconvmap[keynum].column;
+    }
+    if (flags != NULL) {
+        *flags = (int)keyconvmap[keynum].shift;
+    }
+    return 1;
+}
+
 /* press or release a key in the keyboard matrix
  * key: host key
  * mod: host key modifier

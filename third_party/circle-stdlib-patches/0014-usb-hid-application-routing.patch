@@ -1,0 +1,865 @@
+diff --git a/libs/circle/include/circle/usb/usbhidapplication.h b/libs/circle/include/circle/usb/usbhidapplication.h
+new file mode 100644
+index 00000000..f088afe4
+--- /dev/null
++++ b/libs/circle/include/circle/usb/usbhidapplication.h
+@@ -0,0 +1,82 @@
++//
++// usbhidapplication.h
++//
++// Circle - A C++ bare metal environment for Raspberry Pi
++// Copyright (C) 2014-2026  R. Stange <rsta2@gmx.net>
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with this program.  If not, see <http://www.gnu.org/licenses/>.
++//
++#ifndef _circle_usb_usbhidapplication_h
++#define _circle_usb_usbhidapplication_h
++
++#include <circle/types.h>
++
++enum TUSBHIDApplicationMask
++{
++	USBHIDApplicationNone		= 0,
++	USBHIDApplicationMouse		= 1 << 0,
++	USBHIDApplicationJoystick	= 1 << 1,
++	USBHIDApplicationGamePad	= 1 << 2,
++	USBHIDApplicationTouchScreen	= 1 << 3,
++	USBHIDApplicationTouchPad	= 1 << 4,
++	USBHIDApplicationPen		= 1 << 5,
++	USBHIDApplicationKeyboard	= 1 << 6,
++	USBHIDApplicationAuxiliary	= 1 << 7,
++	USBHIDApplicationOther		= 1 << 8
++};
++
++enum TUSBHIDDeviceType
++{
++	USBHIDDeviceUnsupported,
++	USBHIDDeviceMouse,
++	USBHIDDeviceGamePad,
++	USBHIDDeviceTouchScreen,
++	USBHIDDeviceComposite
++};
++
++class CUSBHIDApplicationParser
++{
++public:
++	CUSBHIDApplicationParser (void);
++
++	boolean Parse (const u8 *pDescriptor, unsigned nDescriptorSize);
++
++	TUSBHIDDeviceType GetDeviceType (void) const;
++	unsigned GetApplicationMask (void) const;
++	unsigned GetInputApplicationCount (void) const;
++	boolean HasUnscopedInput (void) const;
++
++private:
++	static const unsigned MaxApplications = 16;
++
++	struct TApplication
++	{
++		u32 Usage;
++		boolean HasDataInput;
++	};
++
++	void Reset (void);
++	void Classify (void);
++	static unsigned ClassifyUsage (u32 nUsage);
++
++private:
++	TApplication m_Application[MaxApplications];
++	unsigned m_nApplicationCount;
++	unsigned m_nInputApplicationCount;
++	unsigned m_nApplicationMask;
++	TUSBHIDDeviceType m_DeviceType;
++	boolean m_bUnscopedInput;
++};
++
++#endif
+diff --git a/libs/circle/lib/usb/Makefile b/libs/circle/lib/usb/Makefile
+index 186c939b..4ee44e80 100644
+--- a/libs/circle/lib/usb/Makefile
++++ b/libs/circle/lib/usb/Makefile
+@@ -28,7 +28,7 @@ OBJS	= lan7800.o smsc951x.o usbbluetooth.o usbcdcethernet.o usbfloppydevice.o \
+ 	  usbconfigparser.o usbdevice.o usbdevicefactory.o usbendpoint.o usbfunction.o \
+ 	  usbgamepad.o usbgamepad8bitdo.o usbgamepad8bitdoum2.o usbgamepad8bitdoxinput.o usbgamepadps3.o usbgamepadps4.o usbgamepadstandard.o \
+ 	  usbgamepadswitchpro.o usbgamepadxbox360.o usbgamepadxboxone.o \
+-	  usbhiddevice.o usbhostcontroller.o \
++	  usbhidapplication.o usbhiddevice.o usbhostcontroller.o \
+ 	  usbkeyboard.o usbkeyboard8bitdo.o usbmassdevice.o usbmidi.o usbmidihost.o usbmouse.o usbmouseparser.o usbprinter.o usbrequest.o \
+ 	  usbstandardhub.o usbstring.o usbserial.o usbserialhost.o usbserialch341.o usbserialcp210x.o \
+ 	  usbserialpl2303.o usbserialft231x.o usbserialcdc.o usbtouchscreen.o dwhciregister.o
+diff --git a/libs/circle/lib/usb/usbdevicefactory.cpp b/libs/circle/lib/usb/usbdevicefactory.cpp
+index d41e38db..b91589ed 100644
+--- a/libs/circle/lib/usb/usbdevicefactory.cpp
++++ b/libs/circle/lib/usb/usbdevicefactory.cpp
+@@ -19,6 +19,7 @@
+ //
+ #include <circle/usb/usbdevicefactory.h>
+ #include <circle/usb/usbhid.h>
++#include <circle/usb/usbhidapplication.h>
+ #include <circle/synchronize.h>
+ #include <circle/sysconfig.h>
+ #include <circle/koptions.h>
+@@ -290,7 +291,6 @@ CUSBFunction *CUSBDeviceFactory::GetDevice (CUSBFunction *pParent, CString *pNam
+ 
+ CUSBFunction *CUSBDeviceFactory::GetGenericHIDDevice (CUSBFunction *pParent)
+ {
+-#ifndef EXCLUDE_USB_TOUCHSCREEN
+ 	// Must copy parent function here, because we consume the HID report descriptor,
+ 	// which is requested again later by the HID Use Page specific driver class.
+ 	CUSBFunction TempFunction (pParent);
+@@ -320,57 +320,48 @@ CUSBFunction *CUSBDeviceFactory::GetGenericHIDDevice (CUSBFunction *pParent)
+ 		return 0;
+ 	}
+ 
+-	// If we find a Usage Page (Digitizer) item anywhere in the HID report descriptor,
+-	// then use the touch screen driver, otherwise the gamepad standard driver.
+-	const u8 *pDesc = ReportDescriptor;
+-	for (u16 nDescSize = usReportDescriptorLength; nDescSize;)
++	CUSBHIDApplicationParser ApplicationParser;
++	if (!ApplicationParser.Parse (ReportDescriptor, usReportDescriptorLength))
+ 	{
+-		u8 ucItem = *pDesc++;
+-		nDescSize--;
+-
+-		u32 nArg;
+-
+-		switch (ucItem & 0x03)
+-		{
+-		case 0:
+-			nArg = 0;
+-			break;
++		TempFunction.GetDevice ()->LogWrite (LogError,
++						      "Invalid HID report descriptor on interface %u",
++						      (unsigned) TempFunction.GetInterfaceNumber ());
++		return 0;
++	}
+ 
+-		case 1:
+-			nArg = *pDesc++;
+-			nDescSize--;
+-			break;
++	switch (ApplicationParser.GetDeviceType ())
++	{
++#ifndef EXCLUDE_USB_MOUSE
++	case USBHIDDeviceMouse:
++		return new CUSBMouseDevice (pParent);
++#endif
+ 
+-		case 2:
+-			nArg  = *pDesc++;
+-			nArg |= *pDesc++ << 8;
+-			nDescSize -= 2;
+-			break;
++#ifndef EXCLUDE_USB_GAMEPAD
++	case USBHIDDeviceGamePad:
++		return new CUSBGamePadStandardDevice (pParent);
++#endif
+ 
+-		case 3:
+-			nArg  = *pDesc++;
+-			nArg |= *pDesc++ << 8;
+-			nArg |= *pDesc++ << 16;
+-			nArg |= *pDesc++ << 24;
+-			nDescSize -= 4;
+-			break;
+-		}
++#ifndef EXCLUDE_USB_TOUCHSCREEN
++	case USBHIDDeviceTouchScreen:
++		return new CUSBTouchScreenDevice (pParent);
++#endif
+ 
+-		ucItem &= 0xFC;
++	case USBHIDDeviceComposite:
++		TempFunction.GetDevice ()->LogWrite (LogWarning,
++						      "Composite HID applications 0x%X on interface %u are unsupported",
++						      ApplicationParser.GetApplicationMask (),
++						      (unsigned) TempFunction.GetInterfaceNumber ());
++		break;
+ 
+-		if (   ucItem == 0x04		// Usage Page (Digitizer)
+-		    && nArg == 0x0D)
+-		{
+-			return new CUSBTouchScreenDevice (pParent);
+-		}
++	default:
++		TempFunction.GetDevice ()->LogWrite (LogWarning,
++						      "Unsupported HID applications 0x%X on interface %u",
++						      ApplicationParser.GetApplicationMask (),
++						      (unsigned) TempFunction.GetInterfaceNumber ());
++		break;
+ 	}
+-#endif
+ 
+-#ifndef EXCLUDE_USB_GAMEPAD
+-	return new CUSBGamePadStandardDevice (pParent);
+-#else
+ 	return 0;
+-#endif
+ }
+ 
+ boolean CUSBDeviceFactory::FindDeviceID (CString *pName, const TUSBDeviceID *pIDTable)
+diff --git a/libs/circle/lib/usb/usbhidapplication.cpp b/libs/circle/lib/usb/usbhidapplication.cpp
+new file mode 100644
+index 00000000..678107fe
+--- /dev/null
++++ b/libs/circle/lib/usb/usbhidapplication.cpp
+@@ -0,0 +1,647 @@
++//
++// usbhidapplication.cpp
++//
++// Circle - A C++ bare metal environment for Raspberry Pi
++// Copyright (C) 2014-2026  R. Stange <rsta2@gmx.net>
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with this program.  If not, see <http://www.gnu.org/licenses/>.
++//
++#include <circle/usb/usbhidapplication.h>
++#include <string.h>
++
++namespace
++{
++
++// HID 1.11, section 6.2.2
++enum
++{
++	HIDItemLong		= 0xFE,
++
++	HIDTypeMain		= 0,
++	HIDTypeGlobal		= 1,
++	HIDTypeLocal		= 2,
++
++	HIDMainInput		= 8,
++	HIDMainOutput		= 9,
++	HIDMainCollection	= 10,
++	HIDMainFeature		= 11,
++	HIDMainEndCollection	= 12,
++
++	HIDGlobalUsagePage	= 0,
++	HIDGlobalReportSize	= 7,
++	HIDGlobalReportID	= 8,
++	HIDGlobalReportCount	= 9,
++	HIDGlobalPush		= 10,
++	HIDGlobalPop		= 11,
++
++	HIDLocalUsage		= 0,
++	HIDLocalUsageMinimum	= 1,
++	HIDLocalUsageMaximum	= 2,
++	HIDLocalDelimiter	= 10,
++
++	HIDCollectionApplication = 1,
++	HIDInputConstant	= 1 << 0,
++
++	HIDUsagePageGenericDesktop = 0x01,
++	HIDUsagePageConsumer	= 0x0C,
++	HIDUsagePageDigitizers	= 0x0D,
++
++	HIDUsageMouse		= 0x02,
++	HIDUsageJoystick	= 0x04,
++	HIDUsageGamePad		= 0x05,
++	HIDUsageKeyboard	= 0x06,
++	HIDUsageSystemControl	= 0x80,
++
++	HIDUsagePen		= 0x02,
++	HIDUsageTouchScreen	= 0x04,
++	HIDUsageTouchPad	= 0x05,
++
++	MaxDescriptorSize	= 4096,
++	MaxInputReportSize	= 4096,
++	MaxReportIDs		= 256,
++	MaxLocalUsages		= 64,
++	MaxCollectionDepth	= 16,
++	MaxGlobalStackDepth	= 8
++};
++
++struct TGlobalState
++{
++	u32 UsagePage;
++	u32 ReportSize;
++	u32 ReportCount;
++	u8 ReportID;
++};
++
++struct TLocalUsage
++{
++	u32 Value;
++	u8 Size;
++};
++
++struct TLocalState
++{
++	TLocalUsage Usage[MaxLocalUsages];
++	unsigned UsageCount;
++	boolean UsageOverflow;
++	TLocalUsage UsageMinimum;
++	boolean HasUsageMinimum;
++	unsigned DelimiterDepth;
++	unsigned DelimiterBranch;
++};
++
++struct TCollectionState
++{
++	int ApplicationIndex;
++};
++
++static void ResetLocalState (TLocalState *pLocal)
++{
++	memset (pLocal, 0, sizeof *pLocal);
++}
++
++static u32 CompleteUsage (const TLocalUsage &Usage, u32 nUsagePage)
++{
++	if (Usage.Size <= 2)
++	{
++		return (nUsagePage << 16) | (Usage.Value & 0xFFFF);
++	}
++
++	return Usage.Value;
++}
++
++static void AddLocalUsage (TLocalState *pLocal, u32 nValue, u8 uchSize)
++{
++	if (pLocal->DelimiterBranch > 1)
++	{
++		return;
++	}
++
++	if (pLocal->UsageCount >= MaxLocalUsages)
++	{
++		pLocal->UsageOverflow = TRUE;
++		return;
++	}
++
++	pLocal->Usage[pLocal->UsageCount].Value = nValue;
++	pLocal->Usage[pLocal->UsageCount].Size = uchSize;
++	pLocal->UsageCount++;
++}
++
++static boolean AddUsageRange (TLocalState *pLocal, u32 nMaximum, u8 uchMaximumSize,
++			      u32 nUsagePage)
++{
++	if (!pLocal->HasUsageMinimum)
++	{
++		return FALSE;
++	}
++
++	u32 nMinimum = CompleteUsage (pLocal->UsageMinimum, nUsagePage);
++	TLocalUsage Maximum = {nMaximum, uchMaximumSize};
++	nMaximum = CompleteUsage (Maximum, nUsagePage);
++	pLocal->HasUsageMinimum = FALSE;
++
++	if (nMaximum < nMinimum)
++	{
++		return FALSE;
++	}
++
++	u64 nRangeCount = (u64) nMaximum - nMinimum + 1;
++	u32 nCount;
++	if (nRangeCount > MaxLocalUsages - pLocal->UsageCount)
++	{
++		pLocal->UsageOverflow = TRUE;
++		nCount = MaxLocalUsages - pLocal->UsageCount;
++	}
++	else
++	{
++		nCount = (u32) nRangeCount;
++	}
++
++	for (u32 i = 0; i < nCount; i++)
++	{
++		AddLocalUsage (pLocal, nMinimum + i, 4);
++	}
++
++	return TRUE;
++}
++
++static u32 GetLocalUsage (const TLocalState &Local, u32 nUsagePage)
++{
++	if (Local.UsageCount == 0)
++	{
++		return 0;
++	}
++
++	return CompleteUsage (Local.Usage[0], nUsagePage);
++}
++
++}
++
++CUSBHIDApplicationParser::CUSBHIDApplicationParser (void)
++{
++	Reset ();
++}
++
++void CUSBHIDApplicationParser::Reset (void)
++{
++	memset (m_Application, 0, sizeof m_Application);
++	m_nApplicationCount = 0;
++	m_nInputApplicationCount = 0;
++	m_nApplicationMask = USBHIDApplicationNone;
++	m_DeviceType = USBHIDDeviceUnsupported;
++	m_bUnscopedInput = FALSE;
++}
++
++boolean CUSBHIDApplicationParser::Parse (const u8 *pDescriptor, unsigned nDescriptorSize)
++{
++	Reset ();
++
++	if (   pDescriptor == 0
++	    || nDescriptorSize == 0
++	    || nDescriptorSize > MaxDescriptorSize)
++	{
++		return FALSE;
++	}
++
++	TGlobalState Global;
++	memset (&Global, 0, sizeof Global);
++	TGlobalState GlobalStack[MaxGlobalStackDepth];
++	unsigned nGlobalStackDepth = 0;
++
++	TLocalState Local;
++	ResetLocalState (&Local);
++
++	TCollectionState Collection[MaxCollectionDepth];
++	unsigned nCollectionDepth = 0;
++	u32 InputBits[MaxReportIDs];
++	memset (InputBits, 0, sizeof InputBits);
++	boolean bNumberedInputSeen = FALSE;
++	boolean bUnnumberedInputSeen = FALSE;
++
++	while (nDescriptorSize > 0)
++	{
++		u8 uchPrefix = *pDescriptor++;
++		nDescriptorSize--;
++
++		if (uchPrefix == HIDItemLong)
++		{
++			if (nDescriptorSize < 2)
++			{
++				Reset ();
++				return FALSE;
++			}
++
++			unsigned nLongSize = pDescriptor[0];
++			pDescriptor += 2;
++			nDescriptorSize -= 2;
++			if (nLongSize > nDescriptorSize)
++			{
++				Reset ();
++				return FALSE;
++			}
++
++			pDescriptor += nLongSize;
++			nDescriptorSize -= nLongSize;
++			continue;
++		}
++
++		unsigned nSizeCode = uchPrefix & 0x03;
++		unsigned nItemSize = nSizeCode == 3 ? 4 : nSizeCode;
++		if (nItemSize > nDescriptorSize)
++		{
++			Reset ();
++			return FALSE;
++		}
++
++		u32 nValue = 0;
++		for (unsigned i = 0; i < nItemSize; i++)
++		{
++			nValue |= (u32) pDescriptor[i] << (i * 8);
++		}
++		pDescriptor += nItemSize;
++		nDescriptorSize -= nItemSize;
++
++		unsigned nType = (uchPrefix >> 2) & 0x03;
++		unsigned nTag = (uchPrefix >> 4) & 0x0F;
++
++		if (nType == HIDTypeGlobal)
++		{
++			switch (nTag)
++			{
++			case HIDGlobalUsagePage:
++				if (nValue > 0xFFFF)
++				{
++					Reset ();
++					return FALSE;
++				}
++				Global.UsagePage = nValue;
++				break;
++
++			case HIDGlobalReportSize:
++				if (nValue > 256)
++				{
++					Reset ();
++					return FALSE;
++				}
++				Global.ReportSize = nValue;
++				break;
++
++			case HIDGlobalReportID:
++				if (nValue == 0 || nValue >= MaxReportIDs)
++				{
++					Reset ();
++					return FALSE;
++				}
++				Global.ReportID = (u8) nValue;
++				break;
++
++			case HIDGlobalReportCount:
++				if (nValue > MaxInputReportSize * 8)
++				{
++					Reset ();
++					return FALSE;
++				}
++				Global.ReportCount = nValue;
++				break;
++
++			case HIDGlobalPush:
++				if (nGlobalStackDepth >= MaxGlobalStackDepth)
++				{
++					Reset ();
++					return FALSE;
++				}
++				GlobalStack[nGlobalStackDepth++] = Global;
++				break;
++
++			case HIDGlobalPop:
++				if (nGlobalStackDepth == 0)
++				{
++					Reset ();
++					return FALSE;
++				}
++				Global = GlobalStack[--nGlobalStackDepth];
++				break;
++
++			case 1:     // Logical Minimum
++			case 2:     // Logical Maximum
++			case 3:     // Physical Minimum
++			case 4:     // Physical Maximum
++			case 5:     // Unit Exponent
++			case 6:     // Unit
++				break;
++
++			default:
++				Reset ();
++				return FALSE;
++			}
++
++			continue;
++		}
++
++		if (nType == HIDTypeLocal)
++		{
++			switch (nTag)
++			{
++			case HIDLocalUsage:
++				AddLocalUsage (&Local, nValue, (u8) nItemSize);
++				break;
++
++			case HIDLocalUsageMinimum:
++				Local.UsageMinimum.Value = nValue;
++				Local.UsageMinimum.Size = (u8) nItemSize;
++				Local.HasUsageMinimum = TRUE;
++				break;
++
++			case HIDLocalUsageMaximum:
++				if (!AddUsageRange (&Local, nValue, (u8) nItemSize, Global.UsagePage))
++				{
++					Reset ();
++					return FALSE;
++				}
++				break;
++
++			case HIDLocalDelimiter:
++				if (nValue != 0)
++				{
++					if (Local.DelimiterDepth != 0)
++					{
++						Reset ();
++						return FALSE;
++					}
++					Local.DelimiterDepth++;
++					Local.DelimiterBranch++;
++				}
++				else
++				{
++					if (Local.DelimiterDepth == 0)
++					{
++						Reset ();
++						return FALSE;
++					}
++					Local.DelimiterDepth--;
++				}
++				break;
++
++			default:
++				break;
++			}
++
++			continue;
++		}
++
++		if (nType != HIDTypeMain)
++		{
++			continue;
++		}
++
++		if (Local.DelimiterDepth != 0)
++		{
++			Reset ();
++			return FALSE;
++		}
++
++		switch (nTag)
++		{
++		case HIDMainCollection:
++		{
++			if (   nCollectionDepth >= MaxCollectionDepth
++			    || Local.UsageOverflow)
++			{
++				Reset ();
++				return FALSE;
++			}
++
++			int nApplicationIndex = nCollectionDepth > 0
++						? Collection[nCollectionDepth-1].ApplicationIndex
++						: -1;
++			if (nValue == HIDCollectionApplication)
++			{
++				if (m_nApplicationCount >= MaxApplications)
++				{
++					Reset ();
++					return FALSE;
++				}
++
++				nApplicationIndex = (int) m_nApplicationCount++;
++				m_Application[nApplicationIndex].Usage =
++					GetLocalUsage (Local, Global.UsagePage);
++			}
++
++			Collection[nCollectionDepth++].ApplicationIndex = nApplicationIndex;
++			break;
++		}
++
++		case HIDMainEndCollection:
++			if (nCollectionDepth == 0)
++			{
++				Reset ();
++				return FALSE;
++			}
++			nCollectionDepth--;
++			break;
++
++		case HIDMainInput:
++		{
++			if (Global.ReportID != 0)
++			{
++				bNumberedInputSeen = TRUE;
++			}
++			else
++			{
++				bUnnumberedInputSeen = TRUE;
++			}
++			if (bNumberedInputSeen && bUnnumberedInputSeen)
++			{
++				Reset ();
++				return FALSE;
++			}
++
++			u64 nFieldBits = (u64) Global.ReportSize * Global.ReportCount;
++			if (   nFieldBits > MaxInputReportSize * 8
++			    || InputBits[Global.ReportID] > MaxInputReportSize * 8 - nFieldBits)
++			{
++				Reset ();
++				return FALSE;
++			}
++			InputBits[Global.ReportID] += (u32) nFieldBits;
++
++			if (nFieldBits != 0 && !(nValue & HIDInputConstant))
++			{
++				int nApplicationIndex = nCollectionDepth > 0
++							? Collection[nCollectionDepth-1].ApplicationIndex
++							: -1;
++				if (nApplicationIndex >= 0)
++				{
++					m_Application[nApplicationIndex].HasDataInput = TRUE;
++				}
++				else
++				{
++					m_bUnscopedInput = TRUE;
++				}
++			}
++			break;
++		}
++
++		case HIDMainOutput:
++		case HIDMainFeature:
++			break;
++
++		default:
++			break;
++		}
++
++		ResetLocalState (&Local);
++	}
++
++	if (   nCollectionDepth != 0
++	    || nGlobalStackDepth != 0
++	    || Local.DelimiterDepth != 0)
++	{
++		Reset ();
++		return FALSE;
++	}
++
++	Classify ();
++	return TRUE;
++}
++
++void CUSBHIDApplicationParser::Classify (void)
++{
++	unsigned nPrimaryCount = 0;
++	unsigned nConflictingCount = m_bUnscopedInput ? 1 : 0;
++	TUSBHIDDeviceType Candidate = USBHIDDeviceUnsupported;
++
++	for (unsigned i = 0; i < m_nApplicationCount; i++)
++	{
++		if (!m_Application[i].HasDataInput)
++		{
++			continue;
++		}
++
++		m_nInputApplicationCount++;
++		unsigned nApplication = ClassifyUsage (m_Application[i].Usage);
++		m_nApplicationMask |= nApplication;
++
++		switch (nApplication)
++		{
++		case USBHIDApplicationMouse:
++			Candidate = USBHIDDeviceMouse;
++			nPrimaryCount++;
++			break;
++
++		case USBHIDApplicationJoystick:
++		case USBHIDApplicationGamePad:
++			Candidate = USBHIDDeviceGamePad;
++			nPrimaryCount++;
++			break;
++
++		case USBHIDApplicationTouchScreen:
++			Candidate = USBHIDDeviceTouchScreen;
++			nPrimaryCount++;
++			break;
++
++		case USBHIDApplicationAuxiliary:
++			break;
++
++		default:
++			nConflictingCount++;
++			break;
++		}
++	}
++
++	if (nPrimaryCount == 1 && nConflictingCount == 0)
++	{
++		m_DeviceType = Candidate;
++	}
++	else if (nPrimaryCount > 0 && (nPrimaryCount > 1 || nConflictingCount > 0))
++	{
++		m_DeviceType = USBHIDDeviceComposite;
++	}
++}
++
++unsigned CUSBHIDApplicationParser::ClassifyUsage (u32 nUsage)
++{
++	u32 nUsagePage = nUsage >> 16;
++	u32 nUsageID = nUsage & 0xFFFF;
++
++	if (nUsagePage == HIDUsagePageGenericDesktop)
++	{
++		switch (nUsageID)
++		{
++		case HIDUsageMouse:
++			return USBHIDApplicationMouse;
++
++		case HIDUsageJoystick:
++			return USBHIDApplicationJoystick;
++
++		case HIDUsageGamePad:
++			return USBHIDApplicationGamePad;
++
++		case HIDUsageKeyboard:
++			return USBHIDApplicationKeyboard;
++
++		case HIDUsageSystemControl:
++			return USBHIDApplicationAuxiliary;
++
++		default:
++			return USBHIDApplicationOther;
++		}
++	}
++
++	if (nUsagePage == HIDUsagePageDigitizers)
++	{
++		switch (nUsageID)
++		{
++		case HIDUsagePen:
++			return USBHIDApplicationPen;
++
++		case HIDUsageTouchScreen:
++			return USBHIDApplicationTouchScreen;
++
++		case HIDUsageTouchPad:
++			return USBHIDApplicationTouchPad;
++
++		default:
++			return USBHIDApplicationOther;
++		}
++	}
++
++	if (   nUsagePage == HIDUsagePageConsumer
++	    || nUsagePage >= 0xFF00)
++	{
++		return USBHIDApplicationAuxiliary;
++	}
++
++	return USBHIDApplicationOther;
++}
++
++TUSBHIDDeviceType CUSBHIDApplicationParser::GetDeviceType (void) const
++{
++	return m_DeviceType;
++}
++
++unsigned CUSBHIDApplicationParser::GetApplicationMask (void) const
++{
++	return m_nApplicationMask;
++}
++
++unsigned CUSBHIDApplicationParser::GetInputApplicationCount (void) const
++{
++	return m_nInputApplicationCount;
++}
++
++boolean CUSBHIDApplicationParser::HasUnscopedInput (void) const
++{
++	return m_bUnscopedInput;
++}

@@ -46,6 +46,13 @@ static void EmitBootTrace(CSerialDevice *serial, bool enabled, const char *msg) 
   printf("bootprof: %10u us %s\r\n", CTimer::GetClockTicks(), msg);
 }
 
+static void WriteUsbDiagnosticLog(void *context, const char *data,
+                                  size_t size) {
+  bmx::remote::DeveloperLogDevice *device =
+      static_cast<bmx::remote::DeveloperLogDevice *>(context);
+  if (device != nullptr) (void)device->Write(data, size);
+}
+
 //
 // ViceApp impl
 //
@@ -98,14 +105,13 @@ bool ViceScreenApp::Initialize(void) {
   EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
                 "boot: ViceScreenApp::Initialize enter");
 
-  if (mViceOptions.SerialEnabled()) {
-     if (!mLogger.Initialize(&mSerial)) {
-        return false;
-     }
-  } else {
-     if (!mLogger.Initialize(&mNullDevice)) {
-        return false;
-     }
+  CDevice *loggerTarget = mDeveloperLogDevice != nullptr
+                              ? static_cast<CDevice *>(mDeveloperLogDevice)
+                              : (mViceOptions.SerialEnabled()
+                                     ? static_cast<CDevice *>(&mSerial)
+                                     : static_cast<CDevice *>(&mNullDevice));
+  if (!mLogger.Initialize(loggerTarget)) {
+    return false;
   }
   EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
                 "boot: logger ready");
@@ -399,6 +405,73 @@ void ViceStdioApp::DisableBootStat() {
   CGlueStdioInitBootStat(0, nullptr, nullptr, nullptr);
 }
 
+void ViceStdioApp::StartDeveloperService(void) {
+  if (!mViceOptions.DeveloperModeEnabled() || mRemoteService != nullptr) {
+    return;
+  }
+  if (mDeveloperLogRing == nullptr) {
+    mLogger.Write(GetKernelName(), LogWarning,
+                  "Developer Mode log buffer is unavailable");
+    return;
+  }
+  CNetSubSystem *network = mNetworkManager != nullptr
+                               ? mNetworkManager->GetNetSubSystem()
+                               : nullptr;
+  if (network == nullptr) {
+    mLogger.Write(GetKernelName(), LogNotice,
+                  "Developer Mode enabled; network is disabled");
+    return;
+  }
+  if (mDeveloperUsbDiagnostic == nullptr) {
+    mDeveloperUsbDiagnostic = new bmx::remote::DeveloperUsbDiagnostic(
+        WriteUsbDiagnosticLog, mDeveloperLogDevice);
+  }
+  if (mDeveloperUsbDiagnostic != nullptr &&
+      mCircleUsbDiagnosticAdapter == nullptr) {
+    mCircleUsbDiagnosticAdapter =
+        new bmx::remote::CircleUsbDiagnosticAdapter(mDeveloperUsbDiagnostic);
+  }
+  if (mDeveloperUsbDiagnostic == nullptr ||
+      mCircleUsbDiagnosticAdapter == nullptr) {
+    delete mCircleUsbDiagnosticAdapter;
+    delete mDeveloperUsbDiagnostic;
+    mCircleUsbDiagnosticAdapter = nullptr;
+    mDeveloperUsbDiagnostic = nullptr;
+    mLogger.Write(GetKernelName(), LogWarning,
+                  "Cannot allocate Developer USB diagnostic");
+    return;
+  }
+  mUSBHCII.SetDiagnosticObserver(mCircleUsbDiagnosticAdapter);
+  mRemoteService = new bmx::remote::RemoteService(
+      mDeveloperLogRing, mDeveloperUsbDiagnostic,
+      mViceOptions.GetDeveloperPassword());
+  if (mRemoteService == nullptr || !mRemoteService->Start(network)) {
+    delete mRemoteService;
+    mRemoteService = nullptr;
+    mUSBHCII.SetDiagnosticObserver(nullptr);
+    delete mCircleUsbDiagnosticAdapter;
+    delete mDeveloperUsbDiagnostic;
+    mCircleUsbDiagnosticAdapter = nullptr;
+    mDeveloperUsbDiagnostic = nullptr;
+    mLogger.Write(GetKernelName(), LogWarning,
+                  "Cannot start Developer HTTP service");
+    return;
+  }
+  mLogger.Write(GetKernelName(), LogNotice,
+                "Developer HTTP service listening on port %u",
+                static_cast<unsigned>(bmx::remote::kRemoteHttpPort));
+}
+
+void ViceStdioApp::StopDeveloperService(void) {
+  if (mRemoteService == nullptr) return;
+  mRemoteService->Stop();
+  delete mRemoteService;
+  mRemoteService = nullptr;
+  // The observer adapter and diagnostic state intentionally live until boot
+  // teardown. USB/HID callbacks may still be in flight here; deleting either
+  // object would require quiescing the USB controller first.
+}
+
 bool ViceStdioApp::Initialize(void) {
   if (!ViceScreenApp::Initialize()) {
     return false;
@@ -442,6 +515,8 @@ bool ViceStdioApp::Initialize(void) {
     return false;
   }
 
+  StartDeveloperService();
+
   // Now that emmc is initialized, launch
   // the emulator main loop on CORE 1 before USBHCII.
   snprintf(mTimingOption, sizeof mTimingOption, "%s",
@@ -464,6 +539,8 @@ bool ViceStdioApp::Initialize(void) {
 
 int ViceStdioApp::PrepareSystemShutdown(void) {
   int status = 0;
+
+  StopDeveloperService();
 
   if (CGlueStdioShutdown() != 0) {
     mLogger.Write(GetKernelName(), LogError, "Cannot close all stdio files");

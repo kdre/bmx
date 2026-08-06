@@ -69,6 +69,7 @@
 // RASPI includes
 #include "circle.h"
 #include "keycodes.h"
+#include "keyboard_matrix.h"
 #include "mousedrv.h"
 
 extern int emux_network_is_ready(void);
@@ -138,6 +139,8 @@ struct menu_item *audio_leak_ted_item;
 struct menu_item *audio_leak_crtc_item;
 
 struct menu_item *keyboard_mapping_item;
+static struct menu_item *keyboard_host_layout_item;
+static int keyboard_host_layout = -1;
 
 // TODO: Fix these
 extern struct menu_item *port_3_menu_item;
@@ -289,16 +292,72 @@ static int user_pos_keymap_is(const char *expected) {
    return strcmp(name, expected) == 0;
 }
 
+static int keyboard_host_layout_value(void) {
+   if (keyboard_host_layout < 0) {
+      keyboard_host_layout =
+          user_pos_keymap_is("rpi_pos_de.vkm") ||
+          user_pos_keymap_is("user_pos_de.vkm")
+              ? KEYBOARD_HOST_LAYOUT_DE
+              : KEYBOARD_HOST_LAYOUT_US;
+   }
+   return keyboard_host_layout;
+}
+
+static const char *custom_keyboard_mapping_file(void) {
+   return keyboard_host_layout_value() == KEYBOARD_HOST_LAYOUT_DE
+              ? "user_pos_de.vkm"
+              : "user_pos.vkm";
+}
+
+static const char *positional_keyboard_mapping_file(void) {
+   return keyboard_host_layout_value() == KEYBOARD_HOST_LAYOUT_DE
+              ? "rpi_pos_de.vkm"
+              : "rpi_pos.vkm";
+}
+
+static int set_pos_keyboard_mapping_file(const char *filename) {
+   if (resources_set_string("KeymapUserPosFile", filename) < 0 ||
+       resources_set_int("KeymapIndex", KBD_INDEX_USERPOS) < 0) {
+      return -1;
+   }
+
+   /* Clear the old resource only after it is inactive.  Clearing an active
+      PETSCIIBOARD map first makes the PETSCIIBOARD -> Custom transition fail. */
+   resources_set_string("KeymapUserSymFile", "");
+   return 0;
+}
+
+static int set_sym_keyboard_mapping_file(const char *filename) {
+   if (resources_set_string("KeymapUserSymFile", filename) < 0 ||
+       resources_set_int("KeymapIndex", KBD_INDEX_USERSYM) < 0) {
+      return -1;
+   }
+
+   resources_set_string("KeymapUserPosFile", "");
+   return 0;
+}
+
+static int fallback_to_positional_keyboard_mapping(void) {
+   int result =
+       set_pos_keyboard_mapping_file(positional_keyboard_mapping_file());
+   if (keyboard_mapping_item != NULL) {
+      keyboard_mapping_item->value = KEYBOARD_MAPPING_POS;
+   }
+   return result;
+}
+
 static int vice_keymap_index_to_bmc(int value) {
    switch (value) {
       case KBD_INDEX_SYM:
       case KBD_INDEX_POS:
          return KEYBOARD_MAPPING_POS;
       case KBD_INDEX_USERPOS:
-         if (user_pos_keymap_is("rpi_pos_de.vkm")) {
-            return KEYBOARD_MAPPING_POS_DE;
+         if (user_pos_keymap_is("user_pos.vkm") ||
+             user_pos_keymap_is("user_pos_de.vkm")) {
+            return KEYBOARD_MAPPING_CUSTOM;
          }
-         if (user_pos_keymap_is("rpi_pos.vkm")) {
+         if (user_pos_keymap_is("rpi_pos.vkm") ||
+             user_pos_keymap_is("rpi_pos_de.vkm")) {
             return KEYBOARD_MAPPING_POS;
          }
          return KEYBOARD_MAPPING_MAXI;
@@ -307,6 +366,85 @@ static int vice_keymap_index_to_bmc(int value) {
       default:
          return KEYBOARD_MAPPING_POS;
    }
+}
+
+int emu_ui_uses_german_keyboard_layout(void) {
+   return keyboard_host_layout_value() == KEYBOARD_HOST_LAYOUT_DE;
+}
+
+int emux_keyboard_mapping_lookup(long keycode, unsigned char usb_modifiers,
+                                 int *row, int *column, int *flags) {
+   int vice_modifiers = 0;
+   if (usb_modifiers & (1 << 0)) vice_modifiers |= KBD_MOD_LCTRL;
+   if (usb_modifiers & (1 << 1)) vice_modifiers |= KBD_MOD_LSHIFT;
+   if (usb_modifiers & (1 << 2)) vice_modifiers |= KBD_MOD_LALT;
+   if (usb_modifiers & (1 << 4)) vice_modifiers |= KBD_MOD_RCTRL;
+   if (usb_modifiers & (1 << 5)) vice_modifiers |= KBD_MOD_RSHIFT;
+   if (usb_modifiers & (1 << 6)) vice_modifiers |= KBD_MOD_RALT;
+   return keyboard_keymap_lookup(keycode, vice_modifiers,
+                                 row, column, flags);
+}
+
+int emux_keyboard_mapping_target_name(int row, int column, int flags,
+                                      char *buffer, size_t buffer_size) {
+   BmxKeyboardMatrix matrix;
+
+   switch (machine_class) {
+      case VICE_MACHINE_C64:
+      case VICE_MACHINE_C64SC:
+      case VICE_MACHINE_SCPU64:
+         matrix = BMX_KEYBOARD_MATRIX_C64;
+         break;
+      case VICE_MACHINE_C128:
+         matrix = BMX_KEYBOARD_MATRIX_C128;
+         break;
+      case VICE_MACHINE_VIC20:
+         matrix = BMX_KEYBOARD_MATRIX_VIC20;
+         break;
+      case VICE_MACHINE_PLUS4:
+         matrix = BMX_KEYBOARD_MATRIX_PLUS4;
+         break;
+      case VICE_MACHINE_PET:
+         switch (machine_get_keyboard_type()) {
+            case 1:
+               matrix = BMX_KEYBOARD_MATRIX_PET_BUSINESS_US;
+               break;
+            case 2:
+               matrix = BMX_KEYBOARD_MATRIX_PET_BUSINESS_DE;
+               break;
+            case 4:
+               matrix = BMX_KEYBOARD_MATRIX_PET_GRAPHICS;
+               break;
+            default:
+               /* The Japanese PET matrix is not documented separately. */
+               matrix = BMX_KEYBOARD_MATRIX_PET_BUSINESS_UK;
+               break;
+         }
+         break;
+      default:
+         if (buffer != NULL && buffer_size > 0) {
+            buffer[0] = '\0';
+         }
+         return 0;
+   }
+
+   return keyboard_matrix_format_emulated_key(matrix, row, column, flags,
+                                               buffer, buffer_size);
+}
+
+const char *emux_keyboard_mapping_file(void) {
+   const char *name = NULL;
+   int index;
+   if (resources_get_int("KeymapIndex", &index) < 0) {
+      return "(unknown)";
+   }
+   if (resources_get_string(index == KBD_INDEX_USERSYM
+                                ? "KeymapUserSymFile"
+                                : "KeymapUserPosFile",
+                            &name) < 0 || name == NULL || *name == '\0') {
+      return "(default)";
+   }
+   return name;
 }
 
 void emux_trap_main_loop_ui(void) {
@@ -895,7 +1033,8 @@ void emux_set_joy_port_device(int port_num, int dev_id) {
         vice_id = JOYPORT_ID_NONE;
         break;
      case JOYDEV_MOUSE:
-        vice_id = JOYPORT_ID_MOUSE_1351;
+        vice_id = mousedrv_mouse_type_to_joyport_id(
+            mousedrv_get_mouse_type());
         break;
      default:
         vice_id = JOYPORT_ID_JOYSTICK;
@@ -1282,14 +1421,27 @@ void emux_add_keyboard_options(struct menu_item* parent) {
   int tmp_value;
   resources_get_int("KeymapIndex", &tmp_value);
   keyboard_mapping_item->value = vice_keymap_index_to_bmc(tmp_value);
-  strcpy(keyboard_mapping_item->choices[KEYBOARD_MAPPING_POS], "Positional US");
+  strcpy(keyboard_mapping_item->choices[KEYBOARD_MAPPING_POS], "Positional");
   keyboard_mapping_item->choice_ints[KEYBOARD_MAPPING_POS] = KBD_INDEX_USERPOS;
-  strcpy(keyboard_mapping_item->choices[KEYBOARD_MAPPING_POS_DE], "Positional DE");
-  keyboard_mapping_item->choice_ints[KEYBOARD_MAPPING_POS_DE] = KBD_INDEX_USERPOS;
   strcpy(keyboard_mapping_item->choices[KEYBOARD_MAPPING_MAXI], "Maxi Positional");
   keyboard_mapping_item->choice_ints[KEYBOARD_MAPPING_MAXI] = KBD_INDEX_USERPOS;
   strcpy(keyboard_mapping_item->choices[KEYBOARD_MAPPING_PETSCIIBOARD], "PETSCIIBOARD");
   keyboard_mapping_item->choice_ints[KEYBOARD_MAPPING_PETSCIIBOARD] = KBD_INDEX_USERSYM;
+  strcpy(keyboard_mapping_item->choices[KEYBOARD_MAPPING_CUSTOM], "Custom");
+  keyboard_mapping_item->choice_ints[KEYBOARD_MAPPING_CUSTOM] = KBD_INDEX_USERPOS;
+
+  keyboard_host_layout_item = ui_menu_add_multiple_choice(
+      MENU_KEYBOARD_HOST_LAYOUT, parent, "USB Keyboard Layout");
+  keyboard_host_layout_item->num_choices = 2;
+  keyboard_host_layout_item->value = keyboard_host_layout_value();
+  strcpy(keyboard_host_layout_item->choices[KEYBOARD_HOST_LAYOUT_US], "US");
+  keyboard_host_layout_item->choice_ints[KEYBOARD_HOST_LAYOUT_US] =
+      KEYBOARD_HOST_LAYOUT_US;
+  strcpy(keyboard_host_layout_item->choices[KEYBOARD_HOST_LAYOUT_DE], "DE");
+  keyboard_host_layout_item->choice_ints[KEYBOARD_HOST_LAYOUT_DE] =
+      KEYBOARD_HOST_LAYOUT_DE;
+
+  ui_menu_add_button(MENU_KEYBOARD_RELOAD, parent, "Reload Custom Mapping");
 
   if (tmp_value == KBD_INDEX_SYM) {
      resources_set_string("KeymapUserSymFile", "");
@@ -1552,6 +1704,15 @@ void emux_set_int(IntSetting setting, int value) {
    case Setting_Mouse:
      resources_set_int("Mouse", value);
      break;
+   case Setting_MouseType:
+     if (resources_set_int("BMXMouseType", value) == 0) {
+       for (int port = 0; port < 2; ++port) {
+         if (joydevs[port].device == JOYDEV_MOUSE) {
+           emux_set_joy_port_device(port + 1, JOYDEV_MOUSE);
+         }
+       }
+     }
+     break;
    case Setting_MouseSensitivity:
      resources_set_int("MouseSensitivity", value);
      break;
@@ -1628,6 +1789,9 @@ void emux_get_int(IntSetting setting, int* dest) {
       break;
     case Setting_MouseSensitivity:
       resources_get_int("MouseSensitivity", dest);
+      break;
+    case Setting_MouseType:
+      *dest = mousedrv_get_mouse_type();
       break;
     case Setting_VideoSize:
       resources_get_int("VideoSize", dest);
@@ -1925,26 +2089,59 @@ int emux_handle_menu_change(struct menu_item* item) {
       return 1;
     case MENU_KEYBOARD_MAPPING:
       if (item->value == KEYBOARD_MAPPING_POS) {
-         resources_set_string("KeymapUserSymFile", "");
-         resources_set_string("KeymapUserPosFile", "rpi_pos.vkm");
-      }
-      else if (item->value == KEYBOARD_MAPPING_POS_DE) {
-         resources_set_string("KeymapUserSymFile", "");
-         resources_set_string("KeymapUserPosFile", "rpi_pos_de.vkm");
+         if (set_pos_keyboard_mapping_file(
+                 positional_keyboard_mapping_file()) < 0) {
+            ui_error("Positional keymap unavailable");
+         }
       }
       else if (item->value == KEYBOARD_MAPPING_MAXI) {
-         resources_set_string("KeymapUserSymFile", "");
-         resources_set_string("KeymapUserPosFile", "rpi_maxi_pos.vkm");
+         if (set_pos_keyboard_mapping_file("rpi_maxi_pos.vkm") < 0) {
+            fallback_to_positional_keyboard_mapping();
+            ui_error("Maxi keymap unavailable; using positional fallback");
+         }
       }
       else if (item->value == KEYBOARD_MAPPING_PETSCIIBOARD) {
-         resources_set_string("KeymapUserPosFile", "");
-         resources_set_string("KeymapUserSymFile", "rpi_petsciiboard_sym.vkm");
+         if (set_sym_keyboard_mapping_file("rpi_petsciiboard_sym.vkm") < 0) {
+            fallback_to_positional_keyboard_mapping();
+            ui_error("PETSCIIBOARD keymap unavailable; using positional fallback");
+         }
       }
-      else {
-         resources_set_string("KeymapUserPosFile", "");
-         resources_set_string("KeymapUserSymFile", "");
+      else if (item->value == KEYBOARD_MAPPING_CUSTOM) {
+         if (set_pos_keyboard_mapping_file(custom_keyboard_mapping_file()) < 0) {
+            fallback_to_positional_keyboard_mapping();
+            ui_error("Custom keymap unavailable; using positional fallback");
+         }
+         return 1;
       }
-      resources_set_int("KeymapIndex", item->choice_ints[item->value]);
+      return 1;
+    case MENU_KEYBOARD_HOST_LAYOUT:
+      keyboard_host_layout = item->value == KEYBOARD_HOST_LAYOUT_DE
+                                 ? KEYBOARD_HOST_LAYOUT_DE
+                                 : KEYBOARD_HOST_LAYOUT_US;
+      if (keyboard_mapping_item != NULL) {
+         if (keyboard_mapping_item->value == KEYBOARD_MAPPING_POS) {
+            if (set_pos_keyboard_mapping_file(
+                    positional_keyboard_mapping_file()) < 0) {
+               ui_error("Positional keymap unavailable");
+            }
+         } else if (keyboard_mapping_item->value == KEYBOARD_MAPPING_CUSTOM &&
+                    set_pos_keyboard_mapping_file(
+                        custom_keyboard_mapping_file()) < 0) {
+            fallback_to_positional_keyboard_mapping();
+            ui_error("Custom keymap unavailable; using positional fallback");
+         }
+      }
+      return 1;
+    case MENU_KEYBOARD_RELOAD:
+      if (keyboard_mapping_item == NULL ||
+          keyboard_mapping_item->value != KEYBOARD_MAPPING_CUSTOM) {
+         ui_info("Select Mapping: Custom first");
+      } else if (keyboard_set_keymap_index(KBD_INDEX_USERPOS, NULL) < 0) {
+         fallback_to_positional_keyboard_mapping();
+         ui_error("Custom keymap invalid; using positional fallback");
+      } else {
+         ui_info("Custom keymap reloaded");
+      }
       return 1;
     case MENU_DRIVE_TRUE_EMULATION:
       set_all_drive_resource("Drive%iTrueEmulation", item->value);
@@ -2212,9 +2409,20 @@ void emux_load_additional_settings() {
      canvas_state[VDC_INDEX].max_border_h *=
         canvas_state[VDC_INDEX].raster_skip;
   }
+
+  keyboard_host_layout_value();
+  {
+     int keymap_index;
+     if (resources_get_int("KeymapIndex", &keymap_index) == 0 &&
+         vice_keymap_index_to_bmc(keymap_index) == KEYBOARD_MAPPING_CUSTOM &&
+         keyboard_set_keymap_index(KBD_INDEX_USERPOS, NULL) < 0) {
+        fallback_to_positional_keyboard_mapping();
+     }
+  }
 }
 
 void emux_save_additional_settings(FILE *fp) {
+  fprintf(fp, "keyboard_host_layout=%d\n", keyboard_host_layout_value());
 }
 
 void emux_get_default_color_setting(int *brightness, int *contrast,
@@ -2227,6 +2435,27 @@ void emux_get_default_color_setting(int *brightness, int *contrast,
 }
 
 int emux_handle_loaded_setting(char *name, char* value_str, int value) {
+  if (strcmp(name, "keyboard_host_layout") == 0) {
+    int keymap_index;
+    int mapping;
+    keyboard_host_layout = value == KEYBOARD_HOST_LAYOUT_DE
+                               ? KEYBOARD_HOST_LAYOUT_DE
+                               : KEYBOARD_HOST_LAYOUT_US;
+    if (keyboard_host_layout_item != NULL) {
+      keyboard_host_layout_item->value = keyboard_host_layout;
+    }
+    if (resources_get_int("KeymapIndex", &keymap_index) == 0) {
+      mapping = vice_keymap_index_to_bmc(keymap_index);
+      if (mapping == KEYBOARD_MAPPING_POS) {
+        set_pos_keyboard_mapping_file(positional_keyboard_mapping_file());
+      } else if (mapping == KEYBOARD_MAPPING_CUSTOM &&
+                 set_pos_keyboard_mapping_file(
+                     custom_keyboard_mapping_file()) < 0) {
+        fallback_to_positional_keyboard_mapping();
+      }
+    }
+    return 1;
+  }
   return 0;
 }
 

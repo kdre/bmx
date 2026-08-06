@@ -121,6 +121,10 @@ void keyboard_key_pressed(signed long key, int mod);
 void keyboard_key_released(signed long key, int mod);
 void keyboard_key_clear(void);
 
+/* Side-effect-free lookup used by the bare-metal keyboard monitor. */
+int keyboard_keymap_lookup(signed long key, int mod,
+                           int *row, int *column, int *flags);
+
 /* shift/lock handling, the emulation may also call this */
 void keyboard_set_shiftlock(int state);
 int keyboard_get_shiftlock(void);

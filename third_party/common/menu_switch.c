@@ -191,6 +191,20 @@ static int parse_int(const char *text, int *value) {
   return 0;
 }
 
+static int parse_signed_int(const char *text, int *value) {
+  char *end;
+  long parsed;
+
+  errno = 0;
+  parsed = strtol(text, &end, 10);
+  if (errno != 0 || end == text || *trim(end) != '\0' || parsed < INT_MIN ||
+      parsed > INT_MAX) {
+    return 1;
+  }
+  *value = (int)parsed;
+  return 0;
+}
+
 static int parse_bool(const char *text, int *value) {
   if (strcasecmp(text, "true") == 0 || strcmp(text, "1") == 0) {
     *value = 1;
@@ -1160,6 +1174,67 @@ int bmx_boot_plan_set_cmdline_option(struct bmx_boot_plan *plan,
                        value);
 }
 
+int bmx_boot_plan_set_developer_mode(struct bmx_boot_plan *plan, int enabled) {
+  if (enabled != 0 && enabled != 1) {
+    return 1;
+  }
+  if (!enabled) {
+    return bmx_boot_plan_manage_cmdline_key(plan, "developer_mode");
+  }
+  return bmx_boot_plan_set_cmdline_option(plan, "developer_mode", "1");
+}
+
+int bmx_boot_plan_set_developer_password(struct bmx_boot_plan *plan,
+                                         const char *password) {
+  static const char hex[] = "0123456789ABCDEF";
+  char encoded[BMX_DEVELOPER_PASSWORD_MAX_LEN * 3 + 1];
+  size_t input_size;
+  size_t output_size = 0;
+  size_t i;
+
+  if (plan == NULL || password == NULL) {
+    return 1;
+  }
+  input_size = strlen(password);
+  if (input_size > BMX_DEVELOPER_PASSWORD_MAX_LEN) {
+    return 1;
+  }
+  if (input_size == 0) {
+    return bmx_boot_plan_manage_cmdline_key(plan, "developer_password");
+  }
+
+  for (i = 0; i < input_size; ++i) {
+    unsigned char value = (unsigned char)password[i];
+    if ((value >= 'a' && value <= 'z') ||
+        (value >= 'A' && value <= 'Z') ||
+        (value >= '0' && value <= '9') || value == '-' || value == '_' ||
+        value == '.' || value == '~') {
+      encoded[output_size++] = (char)value;
+    } else {
+      encoded[output_size++] = '%';
+      encoded[output_size++] = hex[value >> 4];
+      encoded[output_size++] = hex[value & 0x0f];
+    }
+  }
+  encoded[output_size] = '\0';
+  return bmx_boot_plan_set_cmdline_option(plan, "developer_password",
+                                          encoded);
+}
+
+int bmx_boot_plan_set_developer_log_buffer_kb(struct bmx_boot_plan *plan,
+                                              unsigned buffer_kb) {
+  char value[16];
+
+  if (buffer_kb < BMX_DEVELOPER_LOG_BUFFER_MIN_KB ||
+      buffer_kb > BMX_DEVELOPER_LOG_BUFFER_MAX_KB ||
+      buffer_kb % BMX_DEVELOPER_LOG_BUFFER_STEP_KB != 0U) {
+    return 1;
+  }
+  snprintf(value, sizeof value, "%u", buffer_kb);
+  return bmx_boot_plan_set_cmdline_option(
+      plan, "developer_log_buffer_kb", value);
+}
+
 static int boot_plan_add_config_option(struct bmx_boot_plan *plan,
                                        const char *key, const char *value) {
   const unsigned char *p;
@@ -1242,6 +1317,68 @@ static int boot_plan_add_config_int(struct bmx_boot_plan *plan,
   char text[24];
   snprintf(text, sizeof(text), "%d", value);
   return boot_plan_add_config_option(plan, key, text);
+}
+
+static int overclock_value_valid(unsigned field, int value, int pi_model) {
+  switch (field) {
+    case BMX_OVERCLOCK_ARM_FREQ:
+      return pi_model == 4 ? value >= 600 && value <= 2400
+                           : pi_model == 5 && value >= 1500 && value <= 3200;
+    case BMX_OVERCLOCK_CORE_FREQ:
+    case BMX_OVERCLOCK_V3D_FREQ:
+      return (pi_model == 4 || pi_model == 5) && value >= 100 && value <= 1200;
+    case BMX_OVERCLOCK_VOLTAGE_DELTA:
+      return (pi_model == 4 || pi_model == 5) &&
+             value >= -100000 && value <= 100000;
+    case BMX_OVERCLOCK_TEMP_LIMIT:
+      return (pi_model == 4 || pi_model == 5) && value >= 1 && value <= 85;
+    default:
+      return 0;
+  }
+}
+
+static int overclock_config_valid(const struct bmx_overclock_config *config,
+                                  int pi_model) {
+  if (config == NULL || (config->present & ~BMX_OVERCLOCK_ALL) != 0) {
+    return 0;
+  }
+  return (!(config->present & BMX_OVERCLOCK_ARM_FREQ) ||
+          overclock_value_valid(BMX_OVERCLOCK_ARM_FREQ,
+                                config->arm_freq_mhz, pi_model)) &&
+         (!(config->present & BMX_OVERCLOCK_CORE_FREQ) ||
+          overclock_value_valid(BMX_OVERCLOCK_CORE_FREQ,
+                                config->core_freq_mhz, pi_model)) &&
+         (!(config->present & BMX_OVERCLOCK_V3D_FREQ) ||
+          overclock_value_valid(BMX_OVERCLOCK_V3D_FREQ,
+                                config->v3d_freq_mhz, pi_model)) &&
+         (!(config->present & BMX_OVERCLOCK_VOLTAGE_DELTA) ||
+          overclock_value_valid(BMX_OVERCLOCK_VOLTAGE_DELTA,
+                                config->over_voltage_delta_uv, pi_model)) &&
+         (!(config->present & BMX_OVERCLOCK_TEMP_LIMIT) ||
+          overclock_value_valid(BMX_OVERCLOCK_TEMP_LIMIT,
+                                config->temp_limit_c, pi_model));
+}
+
+int bmx_boot_plan_add_overclock(struct bmx_boot_plan *plan,
+                               const struct bmx_overclock_config *config) {
+  if (plan == NULL || !plan->update_config ||
+      !overclock_config_valid(config, circle_get_model())) {
+    return ERROR_INVALID_CONFIG;
+  }
+  if (((config->present & BMX_OVERCLOCK_ARM_FREQ) &&
+       boot_plan_add_config_int(plan, "arm_freq", config->arm_freq_mhz)) ||
+      ((config->present & BMX_OVERCLOCK_CORE_FREQ) &&
+       boot_plan_add_config_int(plan, "core_freq", config->core_freq_mhz)) ||
+      ((config->present & BMX_OVERCLOCK_V3D_FREQ) &&
+       boot_plan_add_config_int(plan, "v3d_freq", config->v3d_freq_mhz)) ||
+      ((config->present & BMX_OVERCLOCK_VOLTAGE_DELTA) &&
+       boot_plan_add_config_int(plan, "over_voltage_delta",
+                                config->over_voltage_delta_uv)) ||
+      ((config->present & BMX_OVERCLOCK_TEMP_LIMIT) &&
+       boot_plan_add_config_int(plan, "temp_limit", config->temp_limit_c))) {
+    return ERROR_INVALID_CONFIG;
+  }
+  return 0;
 }
 
 static int boot_plan_set_cmdline_int(struct bmx_boot_plan *plan,
@@ -1840,6 +1977,155 @@ int switch_read_active_video_mode(char *mode_id, size_t mode_id_size) {
   }
   fclose(file);
   return 1;
+}
+
+static unsigned overclock_field_for_key(const char *key) {
+  if (strcmp(key, "arm_freq") == 0) {
+    return BMX_OVERCLOCK_ARM_FREQ;
+  }
+  if (strcmp(key, "core_freq") == 0) {
+    return BMX_OVERCLOCK_CORE_FREQ;
+  }
+  if (strcmp(key, "v3d_freq") == 0) {
+    return BMX_OVERCLOCK_V3D_FREQ;
+  }
+  if (strcmp(key, "over_voltage_delta") == 0) {
+    return BMX_OVERCLOCK_VOLTAGE_DELTA;
+  }
+  if (strcmp(key, "temp_limit") == 0) {
+    return BMX_OVERCLOCK_TEMP_LIMIT;
+  }
+  return 0;
+}
+
+static int overclock_key_conflicts_with_menu(const char *key) {
+  return overclock_field_for_key(key) != 0 || strcmp(key, "arm_boost") == 0 ||
+         strcmp(key, "gpu_freq") == 0 || strcmp(key, "over_voltage") == 0 ||
+         strcmp(key, "over_voltage_min") == 0 ||
+         strcmp(key, "force_turbo") == 0 ||
+         strcmp(key, "core_freq_fixed") == 0;
+}
+
+static void overclock_set_value(struct bmx_overclock_config *config,
+                                unsigned field, int value) {
+  switch (field) {
+    case BMX_OVERCLOCK_ARM_FREQ:
+      config->arm_freq_mhz = value;
+      break;
+    case BMX_OVERCLOCK_CORE_FREQ:
+      config->core_freq_mhz = value;
+      break;
+    case BMX_OVERCLOCK_V3D_FREQ:
+      config->v3d_freq_mhz = value;
+      break;
+    case BMX_OVERCLOCK_VOLTAGE_DELTA:
+      config->over_voltage_delta_uv = value;
+      break;
+    case BMX_OVERCLOCK_TEMP_LIMIT:
+      config->temp_limit_c = value;
+      break;
+    default:
+      break;
+  }
+}
+
+int switch_read_overclock_config(struct bmx_overclock_config *config) {
+  char path[CONFIG_TXT_LINE_LEN];
+  char line[CONFIG_TXT_LINE_LEN];
+  FILE *file;
+  int in_managed_block = 0;
+  int found_begin = 0;
+  int found_end = 0;
+  int conflict = 0;
+  int invalid = 0;
+
+  if (config == NULL) {
+    return BMX_OVERCLOCK_READ_INVALID;
+  }
+  memset(config, 0, sizeof(*config));
+  boot_path(path, sizeof(path), "config.txt");
+  file = fopen(path, "r");
+  if (file == NULL) {
+    return BMX_OVERCLOCK_READ_INVALID;
+  }
+
+  while (fgets(line, sizeof(line), file) != NULL) {
+    char *text;
+    char *equals;
+    char *key;
+    char *value_text;
+    unsigned field;
+    int value;
+
+    if (strchr(line, '\n') == NULL && !feof(file)) {
+      invalid = 1;
+      break;
+    }
+    if (line_is_marker(line, BMX_CONFIG_BEGIN_MARKER)) {
+      if (in_managed_block || found_begin || found_end) {
+        invalid = 1;
+        break;
+      }
+      found_begin = 1;
+      in_managed_block = 1;
+      continue;
+    }
+    if (line_is_marker(line, BMX_CONFIG_END_MARKER)) {
+      if (!in_managed_block || found_end) {
+        invalid = 1;
+        break;
+      }
+      found_end = 1;
+      in_managed_block = 0;
+      continue;
+    }
+
+    text = trim(line);
+    if (text[0] == '\0' || text[0] == '#') {
+      continue;
+    }
+    equals = strchr(text, '=');
+    if (equals == NULL) {
+      continue;
+    }
+    *equals = '\0';
+    key = trim(text);
+    value_text = trim(equals + 1);
+    field = overclock_field_for_key(key);
+    if (!overclock_key_conflicts_with_menu(key)) {
+      continue;
+    }
+    if (!in_managed_block) {
+      conflict = 1;
+      continue;
+    }
+    if (field == 0) {
+      invalid = 1;
+      break;
+    }
+    if ((config->present & field) != 0 ||
+        parse_signed_int(value_text, &value) != 0) {
+      invalid = 1;
+      break;
+    }
+    config->present |= field;
+    overclock_set_value(config, field, value);
+  }
+
+  if (ferror(file)) {
+    invalid = 1;
+  }
+  fclose(file);
+  if (invalid || in_managed_block || !found_begin || !found_end ||
+      !overclock_config_valid(config, circle_get_model())) {
+    memset(config, 0, sizeof(*config));
+    return BMX_OVERCLOCK_READ_INVALID;
+  }
+  if (conflict) {
+    memset(config, 0, sizeof(*config));
+    return BMX_OVERCLOCK_READ_CONFLICT;
+  }
+  return BMX_OVERCLOCK_READ_OK;
 }
 
 void switch_safe(void) {

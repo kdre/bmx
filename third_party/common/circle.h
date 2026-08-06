@@ -337,6 +337,15 @@ extern void emu_mouse_button_middle(int pressed);
 extern void emu_mouse_wheel_up(int pressed);
 extern void emu_mouse_wheel_down(int pressed);
 
+// Raw mouse monitor. Input is consumed while this mode is active.
+extern int emu_wants_raw_mouse(void);
+extern void emu_set_raw_mouse(int left, int right, int middle,
+                              int delta_x, int delta_y, int wheel_move);
+
+// Raw GPIO monitor. GPIO actions are consumed while this mode is active.
+extern int emu_wants_raw_gpio(void);
+extern void emu_set_raw_gpio(uint32_t levels, uint32_t outputs);
+
 // Queue a joystick latch event for the main loop. Interrupt safe.
 extern void emu_joy_interrupt_abs(int port, int device,
                                   int js_up,
@@ -372,6 +381,15 @@ extern void emu_set_demo_mode(int is_demo);
 
 // Test whether the UI is currently activated or not.
 extern int emu_is_ui_activated(void);
+
+// Test whether menu text input should use the German host-keyboard layout.
+extern int emu_ui_uses_german_keyboard_layout(void);
+
+// Raw keyboard monitor. Input is consumed while this mode is active.
+extern int emu_wants_raw_keyboard(void);
+extern void emu_set_raw_keyboard(unsigned device,
+                                 unsigned char modifiers,
+                                 const unsigned char raw_keys[6]);
 
 // Send a key press/release to the UI. Should be called only when ui
 // is activated.

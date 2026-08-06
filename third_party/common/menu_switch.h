@@ -46,6 +46,23 @@
 #define BMC64_SWITCH_ERROR_KERNEL_MISSING 1024
 #define BMC64_SWITCH_ERROR_SELECTOR_INVALID 2048
 
+#define BMX_OVERCLOCK_ARM_FREQ (1U << 0)
+#define BMX_OVERCLOCK_CORE_FREQ (1U << 1)
+#define BMX_OVERCLOCK_V3D_FREQ (1U << 2)
+#define BMX_OVERCLOCK_VOLTAGE_DELTA (1U << 3)
+#define BMX_OVERCLOCK_TEMP_LIMIT (1U << 4)
+#define BMX_OVERCLOCK_ALL (BMX_OVERCLOCK_ARM_FREQ | \
+                           BMX_OVERCLOCK_CORE_FREQ | \
+                           BMX_OVERCLOCK_V3D_FREQ | \
+                           BMX_OVERCLOCK_VOLTAGE_DELTA | \
+                           BMX_OVERCLOCK_TEMP_LIMIT)
+
+typedef enum {
+  BMX_OVERCLOCK_READ_OK = 0,
+  BMX_OVERCLOCK_READ_INVALID = 1,
+  BMX_OVERCLOCK_READ_CONFLICT = 2,
+} BMXOverclockReadStatus;
+
 typedef enum {
   BMC64_VIDEO_STANDARD_UNKNOWN,
   BMC64_VIDEO_STANDARD_NTSC,
@@ -146,6 +163,15 @@ struct bmx_boot_plan {
   char managed_cmdline_keys[BMX_MAX_MANAGED_CMDLINE_KEYS][KEY_LEN];
 };
 
+struct bmx_overclock_config {
+  unsigned present;
+  int arm_freq_mhz;
+  int core_freq_mhz;
+  int v3d_freq_mhz;
+  int over_voltage_delta_uv;
+  int temp_limit_c;
+};
+
 int load_machine_config(struct bmx_machine_config **config);
 void free_machine_config(struct bmx_machine_config *config);
 
@@ -159,12 +185,20 @@ const char *bmx_video_standard_name(BMC64VideoStandard standard);
 const char *bmx_video_output_name(BMC64VideoOut output);
 
 int switch_read_active_video_mode(char *mode_id, size_t mode_id_size);
+int switch_read_overclock_config(struct bmx_overclock_config *config);
 
 void bmx_boot_plan_init(struct bmx_boot_plan *plan);
 int bmx_boot_plan_manage_cmdline_key(struct bmx_boot_plan *plan,
                                      const char *key);
 int bmx_boot_plan_set_cmdline_option(struct bmx_boot_plan *plan,
                                      const char *key, const char *value);
+int bmx_boot_plan_set_developer_mode(struct bmx_boot_plan *plan, int enabled);
+int bmx_boot_plan_set_developer_password(struct bmx_boot_plan *plan,
+                                         const char *password);
+int bmx_boot_plan_set_developer_log_buffer_kb(struct bmx_boot_plan *plan,
+                                              unsigned buffer_kb);
+int bmx_boot_plan_add_overclock(struct bmx_boot_plan *plan,
+                               const struct bmx_overclock_config *config);
 
 int switch_check_selection(const struct bmx_machine *machine,
                            BMC64C64Core c64_core);

@@ -30,12 +30,17 @@ public:
     virtual bool Close() = 0;
 };
 
+typedef void (*UpdateCooperativeYield)(void *context);
+
 class UpdateWriteFile {
 public:
     virtual ~UpdateWriteFile() {}
     virtual bool Write(ByteView bytes) = 0;
     // Sync must make all previously written file data durable.
-    virtual bool Sync() = 0;
+    // Implementations which perform a long verification pass invoke yield
+    // between bounded chunks when a callback is supplied.
+    virtual bool Sync(UpdateCooperativeYield yield = 0,
+                      void *yield_context = 0) = 0;
     virtual bool Close() = 0;
 };
 

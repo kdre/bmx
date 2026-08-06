@@ -102,7 +102,9 @@ ViceOptions::ViceOptions(void)
     : m_TagCommandLine(), m_pOptions(nullptr),
       m_nMachineTiming(MACHINE_TIMING_PAL_HDMI),
       m_bDemoEnabled(false), m_bSerialEnabled(false),
-      m_bGPIOOutputsEnabled(false), m_disk_volume{0}, m_nCyclesPerSecond(0),
+      m_bGPIOOutputsEnabled(false), m_bDeveloperModeEnabled(false),
+      m_developerLogBufferKB(BMX_DEVELOPER_LOG_BUFFER_DEFAULT_KB),
+      m_disk_volume{0}, m_nCyclesPerSecond(0),
       m_audioOut(VCHIQSoundDestinationAuto), m_bDPIEnabled(false),
       m_nFramebufferWidth(0), m_nFramebufferHeight(0),
       m_nFramebufferDepth(16),
@@ -125,6 +127,7 @@ ViceOptions::ViceOptions(void)
   m_networkTestHost[0] = '\0';
   m_networkWifiSSID[0] = '\0';
   m_networkWifiPSK[0] = '\0';
+  m_developerPassword[0] = '\0';
   strcpy(m_networkWifiCountry, "DE");
   strcpy(m_disk_volume, "SD");
   m_rs232NetTarget[0] = '\0';
@@ -172,6 +175,21 @@ ViceOptions::ViceOptions(void)
         m_bGPIOOutputsEnabled = true;
       } else {
         m_bGPIOOutputsEnabled = false;
+      }
+    } else if (strcmp(pOption, "developer_mode") == 0) {
+      m_bDeveloperModeEnabled = strcmp(pValue, "true") == 0 ||
+                                strcmp(pValue, "1") == 0;
+    } else if (strcmp(pOption, "developer_password") == 0) {
+      DecodeOptionValue(pValue);
+      strncpy(m_developerPassword, pValue,
+              sizeof m_developerPassword - 1);
+      m_developerPassword[sizeof m_developerPassword - 1] = '\0';
+    } else if (strcmp(pOption, "developer_log_buffer_kb") == 0) {
+      unsigned value = GetDecimal(pValue);
+      if (value >= BMX_DEVELOPER_LOG_BUFFER_MIN_KB &&
+          value <= BMX_DEVELOPER_LOG_BUFFER_MAX_KB &&
+          value % BMX_DEVELOPER_LOG_BUFFER_STEP_KB == 0U) {
+        m_developerLogBufferKB = value;
       }
     } else if (strcmp(pOption, "cycles_per_refresh") == 0 || strcmp(pOption, "cycles_per_second") == 0) {
       // This was named incorrectly in earlier versions. Keeping the old bad name working.
@@ -385,6 +403,18 @@ bool ViceOptions::DemoEnabled(void) const { return m_bDemoEnabled; }
 bool ViceOptions::SerialEnabled(void) const { return m_bSerialEnabled; }
 
 bool ViceOptions::GPIOOutputsEnabled(void) const { return m_bGPIOOutputsEnabled; }
+
+bool ViceOptions::DeveloperModeEnabled(void) const {
+  return m_bDeveloperModeEnabled;
+}
+
+const char *ViceOptions::GetDeveloperPassword(void) const {
+  return m_developerPassword;
+}
+
+unsigned ViceOptions::GetDeveloperLogBufferKB(void) const {
+  return m_developerLogBufferKB;
+}
 
 bool ViceOptions::DPIEnabled(void) const { return m_bDPIEnabled; }
 

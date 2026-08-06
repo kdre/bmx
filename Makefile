@@ -131,12 +131,24 @@ endif
 TARGET ?= $(BUILD_DIR)/$(TARGET_BASENAME)
 .DEFAULT_GOAL := $(TARGET).img
 
-BMC64_OBJS = main.o kernel.o usb_keyboard_state.o viceoptions.o viceapp.o \
+BMC64_OBJS = main.o kernel.o mouse_input.o usb_keyboard_state.o viceoptions.o viceapp.o \
              crt_pi_idx.o crt_pi_rgb.o \
              vicesound.o new_io.o errno_stubs.o async_network.o \
              config/runtime_config.o machines/machine_descriptor.o \
              network/network_manager.o \
              platform/platform.o vice_api.o \
+             remote/circle_discovery_responder.o \
+             remote/circle_http_transport.o remote/command_mailbox.o \
+             remote/developer_discovery_codec.o \
+             remote/developer_file_transaction.o \
+             remote/developer_log_device.o remote/developer_log_ring.o \
+             remote/circle_usb_diagnostic_adapter.o \
+             remote/developer_usb_diagnostic.o \
+             remote/developer_router.o remote/developer_ui_router.o \
+             remote/http_parser.o \
+             remote/http_response_writer.o remote/http_router.o \
+             remote/http_server.o remote/http_types.o \
+             remote/remote_service.o \
              update/build_info.o update/body_sinks.o \
              update/circle_secure_stream.o \
              update/config_migration.o update/config_schema.o \

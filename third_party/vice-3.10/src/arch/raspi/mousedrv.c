@@ -28,6 +28,8 @@
 
 #include <stdio.h>
 
+#include "emux_api.h"
+#include "joyport.h"
 #include "resources.h"
 
 #define MOUSE_SENSITIVITY_DEFAULT 100
@@ -38,6 +40,7 @@
 static int mouse_pending_x;
 static int mouse_pending_y;
 static int mouse_sensitivity = MOUSE_SENSITIVITY_DEFAULT;
+static int bmx_mouse_type = BMX_MOUSE_TYPE_DEFAULT;
 static int mouse_resources_registered;
 static mouse_func_t mouse_funcs;
 
@@ -51,10 +54,44 @@ static int set_mouse_sensitivity(int value, void *param) {
   return 0;
 }
 
+static int set_bmx_mouse_type(int value, void *param) {
+  (void)param;
+
+  if (value < 0 || value >= BMX_MOUSE_TYPE_NUM) {
+    return -1;
+  }
+  bmx_mouse_type = value;
+  return 0;
+}
+
 static const resource_int_t mouse_resources_int[] = {
     {"MouseSensitivity", MOUSE_SENSITIVITY_DEFAULT, RES_EVENT_SAME, NULL,
      &mouse_sensitivity, set_mouse_sensitivity, NULL},
+    {"BMXMouseType", BMX_MOUSE_TYPE_DEFAULT, RES_EVENT_SAME, NULL,
+     &bmx_mouse_type, set_bmx_mouse_type, NULL},
     RESOURCE_INT_LIST_END};
+
+int mousedrv_get_mouse_type(void) { return bmx_mouse_type; }
+
+int mousedrv_mouse_type_to_joyport_id(int type) {
+  switch (type) {
+    case BMX_MOUSE_TYPE_1351:
+      return JOYPORT_ID_MOUSE_1351;
+    case BMX_MOUSE_TYPE_NEOS:
+      return JOYPORT_ID_MOUSE_NEOS;
+    case BMX_MOUSE_TYPE_AMIGA:
+      return JOYPORT_ID_MOUSE_AMIGA;
+    case BMX_MOUSE_TYPE_CX22:
+      return JOYPORT_ID_MOUSE_CX22;
+    case BMX_MOUSE_TYPE_ST:
+      return JOYPORT_ID_MOUSE_ST;
+    case BMX_MOUSE_TYPE_SMART:
+      return JOYPORT_ID_MOUSE_SMART;
+    case BMX_MOUSE_TYPE_MICROMYS:
+    default:
+      return JOYPORT_ID_MOUSE_MICROMYS;
+  }
+}
 
 static int take_scaled_mouse_delta(float *delta_x, float *delta_y) {
   int raw_x = __atomic_exchange_n(&mouse_pending_x, 0, __ATOMIC_ACQ_REL);

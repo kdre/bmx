@@ -74,6 +74,11 @@ void kbd_set_hotkey_function(unsigned int slot, long key, int function) {
 #define LEGACY_KCMP(x) (strcmp(keyname, x) == 0)
 
 signed long kbd_arch_keyname_to_keynum(char *keyname) {
+  signed long canonical = keycode_from_vkm_token(keyname);
+  if (canonical >= 0) {
+    return canonical;
+  }
+
   if (strlen(keyname) == 1) {
     switch (keyname[0]) {
     case 'a':
@@ -206,7 +211,10 @@ signed long kbd_arch_keyname_to_keynum(char *keyname) {
     return (long)KEYCODE_Insert;
   } else if (KCMP("SingleQuote") || LEGACY_KCMP("semicolon")) {
     return (long)KEYCODE_SingleQuote;
-  } else if (KCMP("Tab")) {
+  } else if (LEGACY_KCMP("Apostrophe")) {
+    return (long)KEYCODE_SingleQuote;
+  } else if (KCMP("Tab") || LEGACY_KCMP("ISO_Left_Tab") ||
+             LEGACY_KCMP("KP_Tab")) {
     return (long)KEYCODE_Tab;
   } else if (KCMP("Control_L")) {
     return (long)KEYCODE_LeftControl;
@@ -246,8 +254,14 @@ signed long kbd_arch_keyname_to_keynum(char *keyname) {
     return (long)KEYCODE_F10;
   } else if (KCMP("F11")) {
     return (long)KEYCODE_F11;
+  } else if (KCMP("F12")) {
+    return (long)KEYCODE_F12;
   } else if (KCMP("ScrollLock")) {
     return (long)KEYCODE_ScrollLock;
+  } else if (KCMP("Pause")) {
+    return (long)KEYCODE_Pause;
+  } else if (KCMP("NumLock")) {
+    return (long)KEYCODE_NumLock;
   } else if (KCMP("KP_Divide")) {
     return (long)KEYCODE_KP_Divide;
   } else if (KCMP("KP_Decimal")) {
@@ -255,6 +269,8 @@ signed long kbd_arch_keyname_to_keynum(char *keyname) {
   } else if (KCMP("KP_Multiply")) {
     return (long)KEYCODE_KP_Multiply;
   } else if (KCMP("KP_Subtract")) {
+    return (long)KEYCODE_KP_Subtract;
+  } else if (LEGACY_KCMP("LP_Subtract")) {
     return (long)KEYCODE_KP_Subtract;
   } else if (KCMP("KP_Add")) {
     return (long)KEYCODE_KP_Add;
@@ -282,9 +298,17 @@ signed long kbd_arch_keyname_to_keynum(char *keyname) {
     return (long)KEYCODE_KP0;
   } else if (KCMP("KP_BackSlash")) {
     return (long)KEYCODE_KP_BackSlash;
+  } else if (LEGACY_KCMP("KP_Separator")) {
+    return (long)KEYCODE_KP_Decimal;
+  } else if (LEGACY_KCMP("Page_Down")) {
+    return (long)KEYCODE_PageDown;
+  } else if (LEGACY_KCMP("Clear")) {
+    return (long)KEYCODE_NumLock;
+  } else if (KCMP("Application")) {
+    return (long)KEYCODE_Application;
   }
 
-  return 0;
+  return -1;
 }
 
 const char *kbd_arch_keynum_to_keyname(signed long keynum) { return 0; }

@@ -45,6 +45,8 @@ libarch_a_SOURCES = \
 	../shared/archdep_rmdir.c \
 	mousedrv.h \
 	mousedrv.c \
+	bmx_palette.h \
+	bmx_palette.c \
 	missing.c \
 	videoarch.h \
 	videoarch.c \

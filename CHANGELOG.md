@@ -1,3 +1,45 @@
+Version 2026.08.06
+------------------
+* New features
+  * Added a Raspberry Pi 4/5 overclocking menu. If something goes wrong, you 
+    have to manually edit config.txt! USE AT YOUR OWN RISK!
+  * Added a developer mode to BMX which can be enabled/disabled in the system
+    menu. When enabled a rest interface and a web ui is available to support 
+    development and diagnostics (still work in progress). Nothing will ever
+    leave your network!
+  * Generic USB HID-Interfaces are now routed to the mouse, gamepad, or 
+    touchscreen driver based on their HID Application Collections. 
+  * Added a selectable VICE mouse type. Micromys is the default.
+  * Added a Mouse monitor for movement, supported buttons, and wheel input
+    (depending on the selected mouse type).
+  * Added a Keyboard monitor showing raw HID usages, exact `.vkm` tokens,
+    modifiers, held keys, the active mapping entry, and its emulated key.
+  * Added per-machine `user_pos.vkm` and `user_pos_de.vkm` files that can be 
+    modified by users, These files are not overwritten during an online update.
+  * Positional DE and Positional US keyboard mappings are now called 
+    "Positional". The layout DE or US can be selected with the "USB Keyboard
+    Layout" setting.
+  * Palettes are now loaded from sdcard (SYS:/palettes, USER:/palettes) and
+    marked with [S]ys, [U]ser or [B]uiltin in the BMX menu. The one and only
+    builtin palette is "VICE".
+  * The 'Configure custom GPIO' menu setting shows the mapping of config options
+    #1 - #4. Only config #5 can be edited.
+  * Added a GPIO monitor showing the status of the configurable GPIO pins.
+  * GPIO outputs can be enabled in the GPIO menu. Manual editing of 
+    cmdline.txt is not necessary.
+
+* Bugfix
+  * The host keyboard was interpreted as US during entries (e.g filenames). Now
+    it repects the keyboard mapping (in the sense that z and y are swapped).
+  * Fixed erratic 1351 mouse movement in GEOS 128 by backporting the VICE
+    r46014 POT glitch-emulation correction.
+  * Saved keyboard mappings were not correctly restored after a reboot. It
+    always started with the Positional DE mapping.
+  * Fixed a false "Custom keymap unavailable" error when cycling from
+    PETSCIIBOARD to Custom.
+  * Multi-report USB HID mouse devices were not handled correctly. Reports are
+    now decoded according to their HID report descriptors.
+
 Version 2026.07.31
 ------------------
 * New features
@@ -16,7 +58,7 @@ Version 2026.07.31
   * Pi 4/400: Obtaining an IP address via DHCP could be delayed because an 
     already established PHY link was not detected until a later polling cycle.
   * Multiple registered keyboards were not handled correctly. There was only one
-    internal state for all keyboards so that key presses and releases were not   
+    internal state for all keyboards so that key presses and releases were not
     interpreted correctly.
   * Provided by user aminch: Fix for 8BitDo Numpad 8 mapping.
   * install_sd.sh did not write the kernel image with the correct extension.

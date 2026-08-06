@@ -49,6 +49,7 @@
 
 // RASPI includes
 #include "emux_api.h"
+#include "bmx_palette.h"
 #include "demo.h"
 #include "joy.h"
 #include "kbd.h"
@@ -186,7 +187,10 @@ static void raspi_set_poty_or(int port, uint8_t value) {
 }
 
 // Called by menu when palette changes
-void emux_change_palette(int display_num, int palette_index) {
+int emux_change_palette(int display_num, int palette_index) {
+  if (bmx_palette_select(display_num, palette_index) != 0) {
+    return -1;
+  }
   canvas_state[display_num].palette_index = palette_index;
   // This will call set_palette below to get called after color controls
   // have been applied to the palette.
@@ -199,6 +203,24 @@ void emux_change_palette(int display_num, int palette_index) {
   set_filter(display_num, VIDEO_FILTER_CRT);
   video_color_update_palette(canvases[display_num]);
   set_filter(display_num, current_filter);
+  return 0;
+}
+
+int emux_apply_palette_setting(int display_num) {
+  int result = bmx_palette_apply_configured(display_num);
+  int current_filter = get_filter(display_num);
+  set_filter(display_num, VIDEO_FILTER_CRT);
+  video_color_update_palette(canvases[display_num]);
+  set_filter(display_num, current_filter);
+  return result;
+}
+
+int emux_set_palette_setting(int display_num, const char *setting) {
+  return bmx_palette_set_setting(display_num, setting);
+}
+
+const char *emux_get_palette_setting(int display_num) {
+  return bmx_palette_get_setting(display_num);
 }
 
 // Called when a color setting has changed
@@ -667,11 +689,15 @@ void vsyncarch_sleep(unsigned long delay) {
 palette_t *raspi_video_load_palette(int num_entries, char *name) {
   palette_t *palette = palette_create(num_entries, NULL);
   unsigned int *pal;
+  int display = strcmp(name, "RASPI2") == 0 ? 1 : 0;
+  if (bmx_palette_copy_active(display, palette) == 0) {
+    return palette;
+  }
   // RASPI2 is for VDC
-  if (strcmp(name, "RASPI2") == 0) {
-     pal = raspi_get_palette(1, canvas_state[1].palette_index);
+  if (display == 1) {
+     pal = raspi_get_palette(1, 0);
   } else {
-     pal = raspi_get_palette(0, canvas_state[0].palette_index);
+     pal = raspi_get_palette(0, 0);
   }
   for (int i = 0; i < num_entries; i++) {
     palette->entries[i].red = pal[i * 3];

@@ -48,6 +48,7 @@ void palette_shutdown(void);
 palette_t *palette_create(unsigned int num_entries, const char *entry_names[]);
 void palette_free(palette_t *p);
 int palette_load(const char *file_name, const char *subpath, palette_t *palette_return);
+int palette_load_path(const char *path, palette_t *palette_return);
 int palette_save(const char *file_name, const palette_t *palette);
 
 /* palette info for GUIs */

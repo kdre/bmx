@@ -27,6 +27,8 @@
 #ifndef RASPI_KEYCODES_H
 #define RASPI_KEYCODES_H
 
+#include <stddef.h>
+
 // These are set according to the keyboard mapping for each emualtor
 // so the UI and other functions know what keys the user wanted these
 // to be instead of hard coded values.
@@ -154,5 +156,18 @@ typedef void (*raw_keycode_func_t)(long key);
 
 extern raw_keycode_func_t raw_keycode_func;
 const char* keycode_to_string(long keycode);
+
+// Format the exact token accepted in the first column of a BMX/VICE .vkm
+// file. Unknown byte-sized HID usages are represented as HID_XX.
+// Returns 1 on success and 0 if keycode cannot be represented.
+int keycode_format_vkm_token(long keycode, char *buffer, size_t buffer_size);
+
+// Parse a canonical token produced by keycode_format_vkm_token().
+// Returns -1 when the token is unknown.
+long keycode_from_vkm_token(const char *token);
+
+// USB boot-keyboard usages describe physical key positions.  Translate the
+// positions whose labels differ before the menu turns them into text.
+long keycode_for_ui_layout(long keycode, int german_layout);
 
 #endif

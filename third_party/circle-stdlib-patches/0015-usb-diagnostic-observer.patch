@@ -1,0 +1,765 @@
+diff --git a/libs/circle/include/circle/usb/usbdevice.h b/libs/circle/include/circle/usb/usbdevice.h
+index d188be6..1eaf457 100644
+--- a/libs/circle/include/circle/usb/usbdevice.h
++++ b/libs/circle/include/circle/usb/usbdevice.h
+@@ -124,6 +124,8 @@ private:
+ 	CUSBConfigurationParser *m_pConfigParser;
+ 
+ 	CUSBFunction *m_pFunction[USBDEV_MAX_FUNCTIONS];
++	boolean m_bDiagnosticEnumerationComplete;
++	boolean m_bDiagnosticConfigurationReported;
+ 
+ #if RASPPI >= 4
+ 	unsigned m_nRootHubPortID;
+diff --git a/libs/circle/include/circle/usb/usbdevicefactory.h b/libs/circle/include/circle/usb/usbdevicefactory.h
+index b0ca55f..5663652 100644
+--- a/libs/circle/include/circle/usb/usbdevicefactory.h
++++ b/libs/circle/include/circle/usb/usbdevicefactory.h
+@@ -36,6 +36,7 @@ class CUSBDeviceFactory
+ {
+ public:
+ 	static CUSBFunction *GetDevice (CUSBFunction *pParent, CString *pName);
++	static CUSBFunction *GetDiagnosticHIDDevice (CUSBFunction *pParent);
+ 
+ private:
+ 	// for "int3-0-0" devices
+diff --git a/libs/circle/include/circle/usb/usbdiagnosticobserver.h b/libs/circle/include/circle/usb/usbdiagnosticobserver.h
+new file mode 100644
+index 0000000..7ac0b3e
+--- /dev/null
++++ b/libs/circle/include/circle/usb/usbdiagnosticobserver.h
+@@ -0,0 +1,87 @@
++//
++// usbdiagnosticobserver.h
++//
++// Circle - A C++ bare metal environment for Raspberry Pi
++// Copyright (C) 2014-2026  R. Stange <rsta2@gmx.net>
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with this program.  If not, see <http://www.gnu.org/licenses/>.
++//
++#ifndef _circle_usb_usbdiagnosticobserver_h
++#define _circle_usb_usbdiagnosticobserver_h
++
++#include <circle/usb/usb.h>
++#include <circle/types.h>
++
++class CUSBDevice;
++
++struct TUSBDiagnosticDeviceInfo
++{
++	const CUSBDevice *pDevice;	// callback-only identity token
++	unsigned nHostController;	// 0-based host index (always 0 on Raspberry Pi 4)
++	unsigned nRootHubPort;		// 1-based xHCI root port ID
++	u32 nRouteString;		// xHCI route, first downstream port in low nibble
++	u8 ucAddress;			// xHCI slot ID on Raspberry Pi 4 and later
++	TUSBSpeed Speed;
++};
++
++enum TUSBDiagnosticDeviceEvent
++{
++	USBDeviceEventConnected,
++	USBDeviceEventEnumerationComplete,
++	USBDeviceEventEnumerationFailed,
++	USBDeviceEventConfigurationComplete,
++	USBDeviceEventConfigurationFailed,
++	USBDeviceEventRemoved
++};
++
++// The observer is optional and owned by the caller. Install or remove it only
++// from task level while no USB callback can be in progress. Descriptor and
++// product buffers are valid only until their callback returns. OnUSBHIDReport
++// may run at IRQ level and must not allocate, block or format output.
++class CUSBDiagnosticObserver
++{
++public:
++	virtual ~CUSBDiagnosticObserver (void) {}
++
++	virtual void OnUSBDeviceEvent (const TUSBDiagnosticDeviceInfo &Info,
++				       TUSBDiagnosticDeviceEvent Event) {}
++
++	// String descriptors are deliberately not reported. nResult is the
++	// received byte count, or a negative value when the request failed.
++	virtual void OnUSBDescriptor (const TUSBDiagnosticDeviceInfo &Info,
++				      u8 ucType, u8 ucIndex, u16 usIndex,
++				      const void *pBuffer, unsigned nRequested,
++				      int nResult) {}
++
++	// Product has already been decoded by Circle. It may be empty and must be
++	// copied by the observer if it is needed after this callback returns.
++	virtual void OnUSBProduct (const TUSBDiagnosticDeviceInfo &Info,
++				   const char *pProduct) {}
++
++	// Called only after all normal drivers rejected a HID interface. Returning
++	// TRUE enables a passive interrupt-IN diagnostic function for this interface.
++	virtual boolean WantHIDFallback (const TUSBDiagnosticDeviceInfo &Info,
++					 const TUSBInterfaceDescriptor &Interface)
++	{
++		return FALSE;
++	}
++
++	// pReport is owned by the HID driver and remains valid only for this call.
++	// This callback may execute at IRQ level.
++	virtual void OnUSBHIDReport (const TUSBDiagnosticDeviceInfo &Info,
++				     u8 ucInterface, u8 ucEndpoint,
++				     const u8 *pReport, unsigned nLength) {}
++};
++
++#endif
+diff --git a/libs/circle/include/circle/usb/usbhiddevice.h b/libs/circle/include/circle/usb/usbhiddevice.h
+index 403c9e7..85a02c0 100644
+--- a/libs/circle/include/circle/usb/usbhiddevice.h
++++ b/libs/circle/include/circle/usb/usbhiddevice.h
+@@ -33,12 +33,15 @@ public:
+ 	CUSBHIDDevice (CUSBFunction *pFunction, unsigned nMaxReportSize = 0);
+ 	~CUSBHIDDevice (void);
+ 
+-	boolean ConfigureHID (unsigned nMaxReportSize = 0);
++	boolean ConfigureHID (unsigned nMaxReportSize = 0, boolean bSetProtocol = TRUE);
+ 
+ protected:
+ 	// has to be called from Configure() in derived class, when initialization is done
+ 	boolean StartRequest (void);
+ 
++	// called after each completed report before another request is submitted
++	virtual boolean ShouldRestartRequest (void);
++
+ 	// is called, when report arrives
+ 	virtual void ReportHandler (const u8 *pReport,
+ 				    unsigned nReportSize) = 0;		// pReport is 0 on failure
+diff --git a/libs/circle/include/circle/usb/usbhiddiagnostic.h b/libs/circle/include/circle/usb/usbhiddiagnostic.h
+new file mode 100644
+index 0000000..2613882
+--- /dev/null
++++ b/libs/circle/include/circle/usb/usbhiddiagnostic.h
+@@ -0,0 +1,38 @@
++//
++// usbhiddiagnostic.h
++//
++// Circle - A C++ bare metal environment for Raspberry Pi
++// Copyright (C) 2014-2026  R. Stange <rsta2@gmx.net>
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with this program.  If not, see <http://www.gnu.org/licenses/>.
++//
++#ifndef _circle_usb_usbhiddiagnostic_h
++#define _circle_usb_usbhiddiagnostic_h
++
++#include <circle/usb/usbhiddevice.h>
++
++class CUSBHIDDiagnosticDevice : public CUSBHIDDevice
++{
++public:
++	CUSBHIDDiagnosticDevice (CUSBFunction *pFunction);
++
++	boolean Configure (void) override;
++
++protected:
++	boolean ShouldRestartRequest (void) override;
++
++	void ReportHandler (const u8 *pReport, unsigned nReportSize) override;
++};
++
++#endif
+diff --git a/libs/circle/include/circle/usb/usbhostcontroller.h b/libs/circle/include/circle/usb/usbhostcontroller.h
+index 71c5239..13d174b 100644
+--- a/libs/circle/include/circle/usb/usbhostcontroller.h
++++ b/libs/circle/include/circle/usb/usbhostcontroller.h
+@@ -24,6 +24,7 @@
+ #include <circle/usb/usb.h>
+ #include <circle/usb/usbendpoint.h>
+ #include <circle/usb/usbrequest.h>
++#include <circle/usb/usbdiagnosticobserver.h>
+ #include <circle/ptrlist.h>
+ #include <circle/spinlock.h>
+ #include <circle/types.h>
+@@ -35,12 +36,20 @@
+ class CUSBHCIRootPort;
+ class CUSBStandardHub;
+ class CUSBDevice;
++class CUSBDeviceFactory;
++class CUSBHIDDevice;
++class CUSBHIDDiagnosticDevice;
+ 
+ class CUSBHostController : public CUSBController	/// Base class of USB host controllers
+ {
+ public:
+ 	CUSBHostController (boolean bPlugAndPlay);
+ 	virtual ~CUSBHostController (void);
++
++	// pObserver is owned by the caller. Call only at task level while no USB
++	// callback can be active. Pass 0 to disable diagnostics.
++	void SetDiagnosticObserver (CUSBDiagnosticObserver *pObserver,
++				    unsigned nHostController = 0);
+ 	
+ 	// returns resulting length or < 0 on failure
+ 	int GetDescriptor (CUSBEndpoint *pEndpoint,
+@@ -96,6 +105,30 @@ private:
+ 	friend class CUSBStandardHub;
+ 
+ private:
++	void NotifyDiagnosticDeviceEvent (CUSBDevice *pDevice,
++					  TUSBDiagnosticDeviceEvent Event) const;
++	void NotifyDiagnosticDescriptor (CUSBDevice *pDevice,
++					 u8 ucType, u8 ucIndex, u16 usIndex,
++					 const void *pBuffer, unsigned nRequested,
++					 int nResult) const;
++	void NotifyDiagnosticProduct (CUSBDevice *pDevice, const char *pProduct) const;
++	boolean WantDiagnosticHIDFallback (CUSBDevice *pDevice,
++					  const TUSBInterfaceDescriptor &Interface) const;
++	void NotifyDiagnosticHIDReport (CUSBDevice *pDevice,
++					u8 ucInterface, u8 ucEndpoint,
++					const u8 *pReport, unsigned nLength) const;
++
++	friend class CUSBDevice;
++	friend class CUSBDeviceFactory;
++	friend class CUSBHIDDevice;
++	friend class CUSBHIDDiagnosticDevice;
++
++	void GetDiagnosticDeviceInfo (CUSBDevice *pDevice,
++				      TUSBDiagnosticDeviceInfo *pInfo) const;
++
++	CUSBDiagnosticObserver *m_pDiagnosticObserver;
++	unsigned m_nDiagnosticHostController;
++
+ 	boolean m_bPlugAndPlay;
+ 	boolean m_bFirstUpdateCall;
+ 
+diff --git a/libs/circle/include/circle/usb/usbsubsystem.h b/libs/circle/include/circle/usb/usbsubsystem.h
+index 5923786..d4c9f7c 100644
+--- a/libs/circle/include/circle/usb/usbsubsystem.h
++++ b/libs/circle/include/circle/usb/usbsubsystem.h
+@@ -26,6 +26,7 @@
+ #include <circle/usb/usb.h>
+ #include <circle/usb/usbendpoint.h>
+ #include <circle/usb/usbcontroller.h>
++#include <circle/usb/usbdiagnosticobserver.h>
+ #include <circle/usb/xhcisharedmemallocator.h>
+ #include <circle/usb/xhcidevice.h>
+ #include <circle/types.h>
+@@ -41,6 +42,8 @@ public:
+ 
+ 	boolean UpdatePlugAndPlay (void) override;
+ 
++	void SetDiagnosticObserver (CUSBDiagnosticObserver *pObserver);
++
+ 	int GetDescriptor (CUSBEndpoint *pEndpoint,
+ 			   unsigned char ucType, unsigned char ucIndex,
+ 			   void *pBuffer, unsigned nBufSize,
+diff --git a/libs/circle/lib/usb/Makefile b/libs/circle/lib/usb/Makefile
+index 4ee44e8..c849c97 100644
+--- a/libs/circle/lib/usb/Makefile
++++ b/libs/circle/lib/usb/Makefile
+@@ -28,7 +28,7 @@ OBJS	= lan7800.o smsc951x.o usbbluetooth.o usbcdcethernet.o usbfloppydevice.o \
+ 	  usbconfigparser.o usbdevice.o usbdevicefactory.o usbendpoint.o usbfunction.o \
+ 	  usbgamepad.o usbgamepad8bitdo.o usbgamepad8bitdoum2.o usbgamepad8bitdoxinput.o usbgamepadps3.o usbgamepadps4.o usbgamepadstandard.o \
+ 	  usbgamepadswitchpro.o usbgamepadxbox360.o usbgamepadxboxone.o \
+-	  usbhidapplication.o usbhiddevice.o usbhostcontroller.o \
++	  usbhidapplication.o usbhiddevice.o usbhiddiagnostic.o usbhostcontroller.o \
+ 	  usbkeyboard.o usbkeyboard8bitdo.o usbmassdevice.o usbmidi.o usbmidihost.o usbmouse.o usbmouseparser.o usbprinter.o usbrequest.o \
+ 	  usbstandardhub.o usbstring.o usbserial.o usbserialhost.o usbserialch341.o usbserialcp210x.o \
+ 	  usbserialpl2303.o usbserialft231x.o usbserialcdc.o usbtouchscreen.o dwhciregister.o
+diff --git a/libs/circle/lib/usb/usbdevice.cpp b/libs/circle/lib/usb/usbdevice.cpp
+index dbc710c..b5c3329 100644
+--- a/libs/circle/lib/usb/usbdevice.cpp
++++ b/libs/circle/lib/usb/usbdevice.cpp
+@@ -51,7 +51,9 @@ CUSBDevice::CUSBDevice (CUSBHostController *pHost, TUSBSpeed Speed, CUSBHCIRootP
+ 	m_pTTHubDevice (0),
+ 	m_pDeviceDesc (0),
+ 	m_pConfigDesc (0),
+-	m_pConfigParser (0)
++	m_pConfigParser (0),
++	m_bDiagnosticEnumerationComplete (FALSE),
++	m_bDiagnosticConfigurationReported (FALSE)
+ {
+ 	assert (m_pHost != 0);
+ 	assert (m_pRootPort != 0);
+@@ -69,6 +71,8 @@ CUSBDevice::CUSBDevice (CUSBHostController *pHost, TUSBSpeed Speed, CUSBHCIRootP
+ 	{
+ 		m_pFunction[nFunction] = 0;
+ 	}
++
++	m_pHost->NotifyDiagnosticDeviceEvent (this, USBDeviceEventConnected);
+ }
+ 
+ CUSBDevice::CUSBDevice (CUSBHostController *pHost, TUSBSpeed Speed,
+@@ -82,7 +86,9 @@ CUSBDevice::CUSBDevice (CUSBHostController *pHost, TUSBSpeed Speed,
+ 	m_pEndpoint0 (0),
+ 	m_pDeviceDesc (0),
+ 	m_pConfigDesc (0),
+-	m_pConfigParser (0)
++	m_pConfigParser (0),
++	m_bDiagnosticEnumerationComplete (FALSE),
++	m_bDiagnosticConfigurationReported (FALSE)
+ {
+ 	assert (m_pHost != 0);
+ 	assert (m_pHub != 0);
+@@ -120,6 +126,8 @@ CUSBDevice::CUSBDevice (CUSBHostController *pHost, TUSBSpeed Speed,
+ 	{
+ 		m_pFunction[nFunction] = 0;
+ 	}
++
++	m_pHost->NotifyDiagnosticDeviceEvent (this, USBDeviceEventConnected);
+ }
+ 
+ CUSBDevice::~CUSBDevice (void)
+@@ -127,6 +135,16 @@ CUSBDevice::~CUSBDevice (void)
+ 	assert (m_pHost != 0);
+ 	m_pHost->CancelDeviceTransactions (this);
+ 
++	if (!m_bDiagnosticEnumerationComplete)
++	{
++		m_pHost->NotifyDiagnosticDeviceEvent (this, USBDeviceEventEnumerationFailed);
++	}
++	else if (!m_bDiagnosticConfigurationReported)
++	{
++		m_pHost->NotifyDiagnosticDeviceEvent (this, USBDeviceEventConfigurationFailed);
++	}
++	m_pHost->NotifyDiagnosticDeviceEvent (this, USBDeviceEventRemoved);
++
+ 	for (unsigned nFunction = 0; nFunction < USBDEV_MAX_FUNCTIONS; nFunction++)
+ 	{
+ 		delete (m_pFunction[nFunction]);
+@@ -362,6 +380,7 @@ boolean CUSBDevice::Initialize (void)
+ 	{
+ 		Product = USBString.Get ();
+ 	}
++	m_pHost->NotifyDiagnosticProduct (this, Product.c_str ());
+ 
+ 	CString SerialNumber;
+ 	if (   m_pDeviceDesc->iSerialNumber != 0
+@@ -437,6 +456,12 @@ boolean CUSBDevice::Initialize (void)
+ 			}
+ 		}
+ 
++		if (pChild == 0)
++		{
++			pChild = CUSBDeviceFactory::GetDiagnosticHIDDevice (
++				m_pFunction[nFunction]);
++		}
++
+ 		delete m_pFunction[nFunction];
+ 		m_pFunction[nFunction] = 0;
+ 
+@@ -493,6 +518,9 @@ boolean CUSBDevice::Initialize (void)
+ 		return FALSE;
+ 	}
+ 
++	m_bDiagnosticEnumerationComplete = TRUE;
++	m_pHost->NotifyDiagnosticDeviceEvent (this, USBDeviceEventEnumerationComplete);
++
+ 	return TRUE;
+ }
+ 
+@@ -526,6 +554,11 @@ boolean CUSBDevice::Configure (void)
+ 		}
+ 	}
+ 	
++	m_bDiagnosticConfigurationReported = TRUE;
++	m_pHost->NotifyDiagnosticDeviceEvent (
++		this, bResult ? USBDeviceEventConfigurationComplete
++			      : USBDeviceEventConfigurationFailed);
++
+ 	return bResult;
+ }
+ 
+diff --git a/libs/circle/lib/usb/usbdevicefactory.cpp b/libs/circle/lib/usb/usbdevicefactory.cpp
+index b91589e..43982f4 100644
+--- a/libs/circle/lib/usb/usbdevicefactory.cpp
++++ b/libs/circle/lib/usb/usbdevicefactory.cpp
+@@ -55,6 +55,7 @@
+ #include <circle/usb/usbserialpl2303.h>
+ #include <circle/usb/usbserialft231x.h>
+ #include <circle/usb/usbtouchscreen.h>
++#include <circle/usb/usbhiddiagnostic.h>
+ 
+ CUSBFunction *CUSBDeviceFactory::GetDevice (CUSBFunction *pParent, CString *pName)
+ {
+@@ -364,6 +365,27 @@ CUSBFunction *CUSBDeviceFactory::GetGenericHIDDevice (CUSBFunction *pParent)
+ 	return 0;
+ }
+ 
++CUSBFunction *CUSBDeviceFactory::GetDiagnosticHIDDevice (CUSBFunction *pParent)
++{
++	assert (pParent != 0);
++
++	const TUSBInterfaceDescriptor *pInterface = pParent->GetInterfaceDescriptor ();
++	assert (pInterface != 0);
++	if (pInterface->bInterfaceClass != 3)
++	{
++		return 0;
++	}
++
++	CUSBHostController *pHost = pParent->GetHost ();
++	assert (pHost != 0);
++	if (!pHost->WantDiagnosticHIDFallback (pParent->GetDevice (), *pInterface))
++	{
++		return 0;
++	}
++
++	return new CUSBHIDDiagnosticDevice (pParent);
++}
++
+ boolean CUSBDeviceFactory::FindDeviceID (CString *pName, const TUSBDeviceID *pIDTable)
+ {
+ 	while (   pIDTable->usVendorID != 0
+diff --git a/libs/circle/lib/usb/usbhiddevice.cpp b/libs/circle/lib/usb/usbhiddevice.cpp
+index 7ca87b1..8665527 100644
+--- a/libs/circle/lib/usb/usbhiddevice.cpp
++++ b/libs/circle/lib/usb/usbhiddevice.cpp
+@@ -51,7 +51,7 @@ CUSBHIDDevice::~CUSBHIDDevice (void)
+ 	m_pReportEndpoint = 0;
+ }
+ 
+-boolean CUSBHIDDevice::ConfigureHID (unsigned nMaxReportSize)
++boolean CUSBHIDDevice::ConfigureHID (unsigned nMaxReportSize, boolean bSetProtocol)
+ {
+ 	if (GetNumEndpoints () < 1)
+ 	{
+@@ -104,7 +104,8 @@ boolean CUSBHIDDevice::ConfigureHID (unsigned nMaxReportSize)
+ 		return FALSE;
+ 	}
+ 
+-	if (   GetInterfaceClass ()    == 3	// HID class
++	if (   bSetProtocol
++	    && GetInterfaceClass ()    == 3	// HID class
+ 	    && GetInterfaceSubClass () == 1	// boot class
+ 	    && GetInterfaceProtocol () > 0)
+ 	{
+@@ -122,6 +123,10 @@ boolean CUSBHIDDevice::ConfigureHID (unsigned nMaxReportSize)
+ 
+ 	if (m_nMaxReportSize == 0)
+ 	{
++		if (nMaxReportSize == 0)
++		{
++			nMaxReportSize = m_pReportEndpoint->GetMaxPacketSize ();
++		}
+ 		m_nMaxReportSize = nMaxReportSize;
+ 		assert (m_nMaxReportSize > 0);
+ 
+@@ -207,6 +212,11 @@ boolean CUSBHIDDevice::StartRequest (void)
+ 	return GetHost ()->SubmitAsyncRequest (pURB);
+ }
+ 
++boolean CUSBHIDDevice::ShouldRestartRequest (void)
++{
++	return TRUE;
++}
++
+ void CUSBHIDDevice::CompletionRoutine (CUSBRequest *pURB)
+ {
+ 	assert (pURB != 0);
+@@ -215,6 +225,15 @@ void CUSBHIDDevice::CompletionRoutine (CUSBRequest *pURB)
+ 
+ 	if (pURB->GetStatus () != 0)
+ 	{
++		u8 ucEndpoint = m_pReportEndpoint->GetNumber ();
++		if (m_pReportEndpoint->IsDirectionIn ())
++		{
++			ucEndpoint |= 0x80;
++		}
++		GetHost ()->NotifyDiagnosticHIDReport (
++			GetDevice (), GetInterfaceNumber (), ucEndpoint,
++			m_pReportBuffer, pURB->GetResultLength ());
++
+ 		ReportHandler (m_pReportBuffer, pURB->GetResultLength ());
+ 	}
+ 	else
+@@ -235,6 +254,7 @@ void CUSBHIDDevice::CompletionRoutine (CUSBRequest *pURB)
+ 	delete pURB;
+ 
+ 	if (   bRestart
++	    && ShouldRestartRequest ()
+ 	    && !StartRequest ())
+ 	{
+ 		CLogger::Get ()->Write (FromUSBHID, LogError, "Cannot restart request");
+diff --git a/libs/circle/lib/usb/usbhiddiagnostic.cpp b/libs/circle/lib/usb/usbhiddiagnostic.cpp
+new file mode 100644
+index 0000000..dd1db95
+--- /dev/null
++++ b/libs/circle/lib/usb/usbhiddiagnostic.cpp
+@@ -0,0 +1,93 @@
++//
++// usbhiddiagnostic.cpp
++//
++// Circle - A C++ bare metal environment for Raspberry Pi
++// Copyright (C) 2014-2026  R. Stange <rsta2@gmx.net>
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with this program.  If not, see <http://www.gnu.org/licenses/>.
++//
++#include <circle/usb/usbhiddiagnostic.h>
++#include <circle/usb/usbhid.h>
++#include <circle/usb/usbhostcontroller.h>
++#include <circle/logger.h>
++#include <circle/util.h>
++#include <assert.h>
++
++#define USBHIDDIAGNOSTIC_MAX_REPORT_DESCRIPTOR_SIZE	4096
++
++static const char FromUSBHIDDiagnostic[] = "usbhiddiag";
++
++CUSBHIDDiagnosticDevice::CUSBHIDDiagnosticDevice (CUSBFunction *pFunction)
++:	CUSBHIDDevice (pFunction)
++{
++}
++
++boolean CUSBHIDDiagnosticDevice::Configure (void)
++{
++	CUSBFunction TempFunction (this);
++	const TUSBHIDDescriptor *pHIDDesc =
++		(const TUSBHIDDescriptor *) TempFunction.GetDescriptor (DESCRIPTOR_HID);
++	if (   pHIDDesc == 0
++	    || pHIDDesc->bLength < sizeof *pHIDDesc
++	    || pHIDDesc->wReportDescriptorLength == 0
++	    || pHIDDesc->wReportDescriptorLength > USBHIDDIAGNOSTIC_MAX_REPORT_DESCRIPTOR_SIZE)
++	{
++		CLogger::Get ()->Write (FromUSBHIDDiagnostic, LogWarning,
++				       "Invalid HID report descriptor length");
++
++		return FALSE;
++	}
++
++	unsigned nReportDescriptorLength = pHIDDesc->wReportDescriptorLength;
++	DMA_BUFFER (u8, ReportDescriptor, nReportDescriptorLength);
++	if (GetHost ()->GetDescriptor (GetEndpoint0 (),
++				 pHIDDesc->bReportDescriptorType, DESCRIPTOR_INDEX_DEFAULT,
++				 ReportDescriptor, nReportDescriptorLength,
++				 REQUEST_IN | REQUEST_TO_INTERFACE, GetInterfaceNumber ())
++	    != (int) nReportDescriptorLength)
++	{
++		CLogger::Get ()->Write (FromUSBHIDDiagnostic, LogWarning,
++				       "Cannot get HID report descriptor");
++
++		return FALSE;
++	}
++
++	// Do not select a HID protocol or send output reports. The fallback only
++	// observes the interface's existing interrupt-IN stream.
++	if (!ConfigureHID (0, FALSE))
++	{
++		return FALSE;
++	}
++
++	return StartRequest ();
++}
++
++boolean CUSBHIDDiagnosticDevice::ShouldRestartRequest (void)
++{
++	const TUSBInterfaceDescriptor *pInterface = GetInterfaceDescriptor ();
++	assert (pInterface != 0);
++
++	// A request may still be pending when a diagnostic session ends. Recheck
++	// the observer after it completes so that request is never chained into a
++	// dormant reader.
++	return GetHost ()->WantDiagnosticHIDFallback (GetDevice (), *pInterface);
++}
++
++void CUSBHIDDiagnosticDevice::ReportHandler (const u8 *pReport, unsigned nReportSize)
++{
++	(void) pReport;
++	(void) nReportSize;
++
++	// The generic observer tap in CUSBHIDDevice has already copied the report.
++}
+diff --git a/libs/circle/lib/usb/usbhostcontroller.cpp b/libs/circle/lib/usb/usbhostcontroller.cpp
+index 5fa62c5..d967d12 100644
+--- a/libs/circle/lib/usb/usbhostcontroller.cpp
++++ b/libs/circle/lib/usb/usbhostcontroller.cpp
+@@ -20,6 +20,7 @@
+ #include <circle/usb/usbhostcontroller.h>
+ #include <circle/usb/usbhcirootport.h>
+ #include <circle/usb/usbstandardhub.h>
++#include <circle/usb/usbhid.h>
+ #include <circle/timer.h>
+ #include <assert.h>
+ 
+@@ -41,7 +42,9 @@ CUSBHostController *CUSBHostController::s_pThis = 0;
+ #endif
+ 
+ CUSBHostController::CUSBHostController (boolean bPlugAndPlay)
+-:	m_bPlugAndPlay (bPlugAndPlay),
++:	m_pDiagnosticObserver (0),
++	m_nDiagnosticHostController (0),
++	m_bPlugAndPlay (bPlugAndPlay),
+ 	m_bFirstUpdateCall (TRUE)
+ {
+ #if RASPPI <= 4
+@@ -49,6 +52,13 @@ CUSBHostController::CUSBHostController (boolean bPlugAndPlay)
+ #endif
+ }
+ 
++void CUSBHostController::SetDiagnosticObserver (CUSBDiagnosticObserver *pObserver,
++					     unsigned nHostController)
++{
++	m_nDiagnosticHostController = nHostController;
++	m_pDiagnosticObserver = pObserver;
++}
++
+ CUSBHostController::~CUSBHostController (void)
+ {
+ #if RASPPI <= 4
+@@ -64,10 +74,109 @@ int CUSBHostController::GetDescriptor (CUSBEndpoint	*pEndpoint,
+ 				       unsigned char	 ucRequestType,
+ 				       unsigned short	 wIndex)
+ {
+-	return ControlMessage (pEndpoint,
+-			       ucRequestType, GET_DESCRIPTOR,
+-			       (ucType << 8) | ucIndex, wIndex,
+-			       pBuffer, nBufSize);
++	int nResult = ControlMessage (pEndpoint,
++				      ucRequestType, GET_DESCRIPTOR,
++				      (ucType << 8) | ucIndex, wIndex,
++				      pBuffer, nBufSize);
++
++	if (   ucType == DESCRIPTOR_DEVICE
++	    || ucType == DESCRIPTOR_CONFIGURATION
++	    || ucType == DESCRIPTOR_REPORT)
++	{
++		assert (pEndpoint != 0);
++		NotifyDiagnosticDescriptor (pEndpoint->GetDevice (), ucType, ucIndex, wIndex,
++					    nResult > 0 ? pBuffer : 0, nBufSize, nResult);
++	}
++
++	return nResult;
++}
++
++void CUSBHostController::GetDiagnosticDeviceInfo (CUSBDevice *pDevice,
++					       TUSBDiagnosticDeviceInfo *pInfo) const
++{
++	assert (pDevice != 0);
++	assert (pInfo != 0);
++
++	pInfo->pDevice = pDevice;
++	pInfo->nHostController = m_nDiagnosticHostController;
++#if RASPPI >= 4
++	pInfo->nRootHubPort = pDevice->GetRootHubPortID ();
++	pInfo->nRouteString = pDevice->GetRouteString ();
++#else
++	pInfo->nRootHubPort = 1;
++	pInfo->nRouteString = 0;
++#endif
++	pInfo->ucAddress = pDevice->GetAddress ();
++	pInfo->Speed = pDevice->GetSpeed ();
++}
++
++void CUSBHostController::NotifyDiagnosticDeviceEvent (
++	CUSBDevice *pDevice, TUSBDiagnosticDeviceEvent Event) const
++{
++	if (m_pDiagnosticObserver == 0)
++	{
++		return;
++	}
++
++	TUSBDiagnosticDeviceInfo Info;
++	GetDiagnosticDeviceInfo (pDevice, &Info);
++	m_pDiagnosticObserver->OnUSBDeviceEvent (Info, Event);
++}
++
++void CUSBHostController::NotifyDiagnosticDescriptor (
++	CUSBDevice *pDevice, u8 ucType, u8 ucIndex, u16 usIndex,
++	const void *pBuffer, unsigned nRequested, int nResult) const
++{
++	if (m_pDiagnosticObserver == 0)
++	{
++		return;
++	}
++
++	TUSBDiagnosticDeviceInfo Info;
++	GetDiagnosticDeviceInfo (pDevice, &Info);
++	m_pDiagnosticObserver->OnUSBDescriptor (Info, ucType, ucIndex, usIndex,
++					       pBuffer, nRequested, nResult);
++}
++
++void CUSBHostController::NotifyDiagnosticProduct (CUSBDevice *pDevice,
++						       const char *pProduct) const
++{
++	if (m_pDiagnosticObserver == 0)
++	{
++		return;
++	}
++
++	TUSBDiagnosticDeviceInfo Info;
++	GetDiagnosticDeviceInfo (pDevice, &Info);
++	m_pDiagnosticObserver->OnUSBProduct (Info, pProduct);
++}
++
++boolean CUSBHostController::WantDiagnosticHIDFallback (
++	CUSBDevice *pDevice, const TUSBInterfaceDescriptor &Interface) const
++{
++	if (m_pDiagnosticObserver == 0)
++	{
++		return FALSE;
++	}
++
++	TUSBDiagnosticDeviceInfo Info;
++	GetDiagnosticDeviceInfo (pDevice, &Info);
++	return m_pDiagnosticObserver->WantHIDFallback (Info, Interface);
++}
++
++void CUSBHostController::NotifyDiagnosticHIDReport (
++	CUSBDevice *pDevice, u8 ucInterface, u8 ucEndpoint,
++	const u8 *pReport, unsigned nLength) const
++{
++	if (m_pDiagnosticObserver == 0)
++	{
++		return;
++	}
++
++	TUSBDiagnosticDeviceInfo Info;
++	GetDiagnosticDeviceInfo (pDevice, &Info);
++	m_pDiagnosticObserver->OnUSBHIDReport (Info, ucInterface, ucEndpoint,
++					      pReport, nLength);
+ }
+ 
+ boolean CUSBHostController::SetAddress (CUSBEndpoint *pEndpoint, u8 ucDeviceAddress)
+diff --git a/libs/circle/lib/usb/usbsubsystem.cpp b/libs/circle/lib/usb/usbsubsystem.cpp
+index f1bf0f9..39881d3 100644
+--- a/libs/circle/lib/usb/usbsubsystem.cpp
++++ b/libs/circle/lib/usb/usbsubsystem.cpp
+@@ -101,6 +101,15 @@ boolean CUSBSubSystem::UpdatePlugAndPlay (void)
+ 	return bResult;
+ }
+ 
++void CUSBSubSystem::SetDiagnosticObserver (CUSBDiagnosticObserver *pObserver)
++{
++	for (unsigned i = 0; i < NumDevices; i++)
++	{
++		assert (m_pXHCIDevice[i]);
++		m_pXHCIDevice[i]->SetDiagnosticObserver (pObserver, i);
++	}
++}
++
+ int CUSBSubSystem::GetDescriptor (CUSBEndpoint *pEndpoint,
+ 				  unsigned char ucType, unsigned char ucIndex,
+ 				  void *pBuffer, unsigned nBufSize,

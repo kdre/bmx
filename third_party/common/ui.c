@@ -355,6 +355,12 @@ static void ui_type_char(char ch) {
 static void ui_key_pressed(long key) {
   struct menu_item *cur = menu_cursor_item[current_menu];
 
+  // The USB keycode is a physical key position.  VICE applies the selected
+  // keymap for emulated input; apply its host-layout choice here as well so
+  // menu text and quick navigation use the labels printed on the keyboard.
+  key = keycode_for_ui_layout(
+      key, emu_ui_uses_german_keyboard_layout());
+
   // Anything other than left/right will reset transparency
   // and render current item only flags. They are applicable
   // only while the user is on the item they were triggered

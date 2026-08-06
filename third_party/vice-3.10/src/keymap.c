@@ -118,6 +118,7 @@ int key_flags_caps = 0;   /* default is locked! */
 
 /* Is the resource code ready to load the keymap?  */
 static int load_keymap_ok = 0;
+static int keyboard_keymap_parse_errors = 0;
 
 static int machine_keyboard_mapping = 0;
 static int machine_keyboard_type = 0;
@@ -315,7 +316,9 @@ static void keyboard_keyword_include(void)
     char *key;
 
     key = strtok(NULL, " \t");
-    keyboard_parse_keymap(key, 1);
+    if (key == NULL || keyboard_parse_keymap(key, 1) < 0) {
+        keyboard_keymap_parse_errors++;
+    }
 }
 
 static void keyboard_keysym_undef(signed long sym)
@@ -338,13 +341,18 @@ static void keyboard_keysym_undef(signed long sym)
 static void keyboard_keyword_undef(void)
 {
     char *key;
+    signed long sym;
 
     /* TODO: this only unsets from the main table, not for joysticks
      *       inventing another keyword to reset joysticks only is perhaps a
      *       good idea.
      */
     key = strtok(NULL, " \t");
-    keyboard_keysym_undef(kbd_arch_keyname_to_keynum(key));
+    if (key == NULL || (sym = kbd_arch_keyname_to_keynum(key)) < 0) {
+        keyboard_keymap_parse_errors++;
+        return;
+    }
+    keyboard_keysym_undef(sym);
 }
 
 static void keyboard_parse_keyword(char *buffer, int line, const char *filename)
@@ -353,6 +361,12 @@ static void keyboard_parse_keyword(char *buffer, int line, const char *filename)
     char *key;
 
     key = strtok(buffer + 1, " \t:");
+
+    if (key == NULL) {
+        log_error(keyboard_log, "%s:%d: Empty keyword.", filename, line);
+        keyboard_keymap_parse_errors++;
+        return;
+    }
 
     if (!strcmp(key, "LSHIFT")) {
         ret = keyboard_keyword_lshift();
@@ -378,10 +392,12 @@ static void keyboard_parse_keyword(char *buffer, int line, const char *filename)
         keyboard_keyword_undef();
     } else {
         log_error(keyboard_log, "%s:%d: unknown keyword (%s).", filename, line, key);
+        keyboard_keymap_parse_errors++;
     }
 
     if (ret) {
         log_error(keyboard_log, "%s:%d: Bad keyword (%s).", filename, line, key);
+        keyboard_keymap_parse_errors++;
     }
 }
 
@@ -460,7 +476,7 @@ static int keyboard_parse_set_neg_row(signed long sym, int row, int col, int shi
 
 static void keyboard_parse_entry(char *buffer, int line, const char *filename)
 {
-    char *key, *p;
+    char *key, *p, *end;
     signed long sym;
     long row;
     int col;
@@ -474,19 +490,59 @@ static void keyboard_parse_entry(char *buffer, int line, const char *filename)
 
     if (sym < 0) {
         log_error(keyboard_log, "Could not find key `%s'!", key);
+        keyboard_keymap_parse_errors++;
         return;
     }
 
     p = strtok(NULL, " \t,");
+    if (p == NULL) {
+        log_error(keyboard_log, "%s:%d: Missing row for keysym `%s'.",
+                  filename, line, key);
+        keyboard_keymap_parse_errors++;
+        return;
+    }
     if (p != NULL) {
-        row = strtol(p, NULL, 0);
+        row = strtol(p, &end, 0);
+        if (end == p || *end != '\0') {
+            log_error(keyboard_log, "%s:%d: Invalid row for keysym `%s'.",
+                      filename, line, key);
+            keyboard_keymap_parse_errors++;
+            return;
+        }
         p = strtok(NULL, " \t,");
+        if (p == NULL) {
+            log_error(keyboard_log, "%s:%d: Missing column for keysym `%s'.",
+                      filename, line, key);
+            keyboard_keymap_parse_errors++;
+            return;
+        }
         if (p != NULL) {
-            col = (int)strtol(p, NULL, 0);
+            long parsed_col = strtol(p, &end, 0);
+            if (end == p || *end != '\0') {
+                log_error(keyboard_log, "%s:%d: Invalid column for keysym `%s'.",
+                          filename, line, key);
+                keyboard_keymap_parse_errors++;
+                return;
+            }
+            col = (int)parsed_col;
             p = strtok(NULL, " \t");
+            if (p == NULL && row >= 0) {
+                log_error(keyboard_log, "%s:%d: Missing flags for keysym `%s'.",
+                          filename, line, key);
+                keyboard_keymap_parse_errors++;
+                return;
+            }
             if (p != NULL || row < 0) {
                 if (p != NULL) {
-                    shift = (int)strtol(p, NULL, 0);
+                    long parsed_shift = strtol(p, &end, 0);
+                    if (end == p || *end != '\0') {
+                        log_error(keyboard_log,
+                                  "%s:%d: Invalid flags for keysym `%s'.",
+                                  filename, line, key);
+                        keyboard_keymap_parse_errors++;
+                        return;
+                    }
+                    shift = (int)parsed_shift;
                 }
 
                 if (row >= 0) {
@@ -494,12 +550,14 @@ static void keyboard_parse_entry(char *buffer, int line, const char *filename)
                         log_error(keyboard_log,
                                   "%s:%d: Bad row/column value (%ld/%d) for keysym `%s'.",
                                   filename, line, row, col, key);
+                        keyboard_keymap_parse_errors++;
                     }
                 } else {
                     if (keyboard_parse_set_neg_row(sym, (int)row, col, shift) < 0) {
                         log_error(keyboard_log,
                                   "%s:%d: Bad row/column value (%ld/%d) for keysym `%s'.",
                                   filename, line, row, col, key);
+                        keyboard_keymap_parse_errors++;
                     }
                 }
 
@@ -754,6 +812,10 @@ static int keyboard_parse_keymap(const char *filename, int child)
 
     check_modifiers(filename);
 
+    if (keyboard_keymap_parse_errors != 0) {
+        DBG(("<keyboard_parse_keymap ERROR"));
+        return -1;
+    }
     DBG(("<keyboard_parse_keymap OK"));
     return 0;
 }
@@ -771,6 +833,7 @@ static int keyboard_keymap_load(const char *filename)
     }
 
     keyboard_keyconvmap_alloc();
+    keyboard_keymap_parse_errors = 0;
 
     DBG(("<keyboard_keymap_load -> keyboard_parse_keymap"));
     return keyboard_parse_keymap(filename, 0);

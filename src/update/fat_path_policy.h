@@ -33,6 +33,13 @@ FatPathValidationStatus ValidateFatRelativePath(
     const char *path,
     size_t maximum_path_bytes = kFatReleasePathMaximumBytes);
 
+// Developer uploads intentionally do not inherit the portable release-name
+// subset above. This accepts the full configured FatFs/OEM byte range while
+// still rejecting traversal, alternate separators, names FatFs cannot store,
+// and paths which would be normalized to a different target.
+FatPathValidationStatus ValidateDeveloperFatRelativePath(
+    const char *path, size_t maximum_path_bytes);
+
 }  // namespace update
 }  // namespace bmx
 

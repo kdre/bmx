@@ -38,6 +38,7 @@
 // RASPI includes
 #include "circle.h"
 #include "emux_api.h"
+#include "../bmx_palette.h"
 #include "menu.h"
 #include "ui.h"
 #include "keycodes.h"
@@ -157,14 +158,12 @@ int emux_get_color_saturation(int display_num) {
 }
 
 struct menu_item* emux_add_palette_options(int menu_id, struct menu_item* parent) {
-  struct menu_item* palette_item =
-      ui_menu_add_multiple_choice(menu_id, parent, "Color Palette");
-  palette_item->num_choices = 3;
-  palette_item->value = 0;
-  strcpy(palette_item->choices[0], "YAPE (PAL)");
-  strcpy(palette_item->choices[1], "YAPE (NTSC)");
-  strcpy(palette_item->choices[2], "Colodore (PAL)");
-  return palette_item;
+  static const char *const legacy_files[] = {
+      NULL, "yape-ntsc.vpl", "colodore_ted.vpl"};
+  return bmx_palette_create_menu(
+      menu_id, parent, 0, "yape-pal", "YAPE (PAL)", "TED", 128, "PLUS4",
+      raspi_get_palette(0, 0), legacy_files,
+      sizeof(legacy_files) / sizeof(legacy_files[0]));
 }
 
 void cartridge_freeze(void) { }

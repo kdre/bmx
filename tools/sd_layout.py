@@ -1843,19 +1843,25 @@ def device_projection_document(layout: SdLayout | str | Path) -> dict[str, objec
                 matcher_origins.setdefault(key, set()).add(rule.provenance)
         if "/" in rule.target and not rule.target.startswith("**/"):
             directories.add(rule.target.split("/", 1)[0])
-    # Exact mappings already accepted by one broader matcher of the same mode
-    # do not change target semantics and must not trigger a kernel rebuild.
+    # Exact mappings already accepted by the winning broader matcher of the
+    # same mode do not change target semantics and must not trigger a kernel
+    # rebuild. Merely finding any same-mode matcher is insufficient: a more
+    # specific conflicting matcher may win first (for example *.vkm replace
+    # inside a broadly preserved machine directory).
     normalized: list[dict[str, object]] = []
     values = list(matchers.values())
     _validate_device_matcher_scopes(values, matcher_boards, matcher_origins)
     for matcher in values:
-        if matcher["kind"] == "exact-path" and any(
-            other is not matcher
-            and other["mode"] == matcher["mode"]
-            and _device_matcher_matches(other, str(matcher["value"]))
-            for other in values
-        ):
-            continue
+        if matcher["kind"] == "exact-path":
+            broader = [
+                other for other in values
+                if other is not matcher
+                and _device_matcher_matches(other, str(matcher["value"]))
+            ]
+            if broader:
+                winner = min(broader, key=_device_matcher_order_key)
+                if winner["mode"] == matcher["mode"]:
+                    continue
         normalized.append(matcher)
     normalized.sort(key=lambda item: (
         *_device_matcher_order_key(item), str(item["mode"]),

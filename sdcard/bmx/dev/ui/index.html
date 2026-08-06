@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>BMX Developer</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/bmx/dev/ui/app.css">
+  <script type="module" src="/bmx/dev/ui/app.mjs"></script>
+</head>
+<body>
+  <header>
+    <div>
+      <p class="eyebrow">Lokales Entwicklerwerkzeug</p>
+      <h1>BMX Developer</h1>
+    </div>
+    <span id="connection-state" class="state state-offline">Nicht verbunden</span>
+  </header>
+
+  <main>
+    <p class="warning">
+      Diese Seite und die REST-API laufen unverschlüsselt im lokalen Netz.
+      Aktiviere den Developer Mode nur in einem vertrauenswürdigen Netzwerk.
+    </p>
+
+    <section aria-labelledby="connection-title">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">Verbindung</p>
+          <h2 id="connection-title">Dieses BMX</h2>
+        </div>
+        <code id="device-address"></code>
+      </div>
+      <div class="controls compact">
+        <label class="grow">
+          Developer-Passwort
+          <input id="password" type="password" autocomplete="off"
+                 maxlength="63" placeholder="leer, falls keines gesetzt ist">
+        </label>
+        <button id="connect" type="button">Verbinden</button>
+        <button id="forget-password" type="button" class="secondary">Passwort löschen</button>
+      </div>
+      <p id="connection-message" class="message" aria-live="polite"></p>
+    </section>
+
+    <section aria-labelledby="status-title">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">REST-Status</p>
+          <h2 id="status-title">System</h2>
+        </div>
+        <div class="controls compact section-actions">
+          <button id="refresh-status" type="button" class="secondary">Aktualisieren</button>
+          <button id="download-diagnostic-report" type="button">
+            Diagnosebericht herunterladen
+          </button>
+        </div>
+      </div>
+      <dl id="status-grid" class="status-grid">
+        <div><dt>Board</dt><dd id="status-board">–</dd></div>
+        <div><dt>Maschine</dt><dd id="status-machine">–</dd></div>
+        <div><dt>Laufzeit</dt><dd id="status-uptime">–</dd></div>
+        <div><dt>Netzwerk</dt><dd id="status-network">–</dd></div>
+        <div><dt>RAM gesamt</dt><dd id="status-ram">–</dd></div>
+        <div><dt>Freier Heap</dt><dd id="status-heap">–</dd></div>
+        <div><dt>Heap Low frei</dt><dd id="status-heap-low">–</dd></div>
+        <div><dt>Heap High frei</dt><dd id="status-heap-high">–</dd></div>
+        <div><dt>ARM-Takt</dt><dd id="status-arm-clock">–</dd></div>
+        <div><dt>Emulatorzyklen</dt><dd id="status-emu-cycles">–</dd></div>
+        <div><dt>Temperatur</dt><dd id="status-temperature">–</dd></div>
+        <div><dt>Drosselungstakt</dt><dd id="status-throttle-clock">–</dd></div>
+        <div><dt>Logpuffer</dt><dd id="status-log-buffer">–</dd></div>
+      </dl>
+      <p class="privacy-warning">
+        Der Diagnosebericht wird ausschließlich in diesem Browser erzeugt und
+        nicht hochgeladen. Er enthält den verfügbaren Logpuffer und USB-
+        Produktnamen. Prüfe die Datei, bevor du sie weitergibst.
+      </p>
+      <p id="diagnostic-report-message" class="message" aria-live="polite"></p>
+      <details>
+        <summary>Rohdaten</summary>
+        <pre id="status-json" class="json-output">Noch keine Statusdaten.</pre>
+      </details>
+    </section>
+
+    <section aria-labelledby="logs-title">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">UART-äquivalent</p>
+          <h2 id="logs-title">Live-Log</h2>
+        </div>
+        <span id="log-state" class="state state-offline">Gestoppt</span>
+      </div>
+      <div class="controls">
+        <button id="start-logs" type="button">Starten</button>
+        <button id="stop-logs" type="button" class="secondary" disabled>Stoppen</button>
+        <button id="download-logs" type="button" class="secondary" disabled>Rohdaten herunterladen</button>
+        <button id="clear-logs" type="button" class="secondary">Leeren</button>
+      </div>
+      <p id="log-message" class="message" aria-live="polite"></p>
+      <pre id="log-output" class="log-output" tabindex="0"></pre>
+    </section>
+
+    <section aria-labelledby="usb-diagnostic-title">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">USB-Descriptoren + Live-Eingaben</p>
+          <h2 id="usb-diagnostic-title">USB Diagnostic</h2>
+        </div>
+        <span id="usb-state" class="state state-offline">Nicht geladen</span>
+      </div>
+
+      <p class="privacy-warning">
+        USB-Eingabereports können Tastendrücke, Mausbewegungen und Controller-Eingaben
+        enthalten. Gib während der Diagnose keine Passwörter oder vertraulichen
+        Texte ein. Jeder Start muss nochmals bestätigt werden.
+      </p>
+
+      <div class="usb-workflows">
+        <article class="workflow-card">
+          <h3>Neues Gerät erfassen</h3>
+          <p>
+            Starte zuerst die Diagnose und stecke das zu untersuchende Gerät
+            anschließend ein. Bereits vorhandene Geräte bilden die Baseline.
+          </p>
+          <button id="usb-start-new" type="button" disabled>
+            Diagnose starten
+          </button>
+        </article>
+
+        <article class="workflow-card">
+          <h3>Eingestecktes Gerät analysieren</h3>
+          <p>
+            Wähle das Gerät anhand von USB-Hostcontroller, physischem Port und
+            Route. Bereits von BMX unterstützte HID-Geräte werden sofort
+            mitgeschnitten. Auch gespeicherte, derzeit nicht verbundene Pfade
+            bleiben auswählbar. Einen solchen Pfad oder ein vor dem Start
+            verworfenes, nicht unterstütztes HID-Gerät musst du nach dem Start
+            am angezeigten Host, Port und derselben Route neu einstecken.
+          </p>
+          <label>
+            Bekanntes USB-Gerät
+            <select id="usb-device" disabled>
+              <option value="">Geräteliste laden …</option>
+            </select>
+          </label>
+          <div class="controls compact usb-device-controls">
+            <button id="usb-refresh-devices" type="button" class="secondary" disabled>
+              Geräteliste aktualisieren
+            </button>
+            <button id="usb-start-connected" type="button" disabled>
+              Ausgewähltes Gerät analysieren
+            </button>
+          </div>
+        </article>
+      </div>
+
+      <p id="usb-instruction" class="usb-instruction" aria-live="polite">
+        Verbinde dich zuerst mit BMX.
+      </p>
+
+      <dl class="status-grid usb-status-grid">
+        <div><dt>Restzeit</dt><dd id="usb-remaining">–</dd></div>
+        <div><dt>Geräte</dt><dd id="usb-devices-seen">–</dd></div>
+        <div><dt>Descriptorbytes</dt><dd id="usb-descriptor-bytes">–</dd></div>
+        <div><dt>Eingabereports</dt><dd id="usb-input-reports">–</dd></div>
+        <div><dt>Verlorene Reports</dt><dd id="usb-input-dropped">–</dd></div>
+        <div><dt>Identische gefiltert</dt><dd id="usb-input-duplicates">–</dd></div>
+        <div><dt>Schnelle Änderungen verdichtet</dt><dd id="usb-input-coalesced">–</dd></div>
+        <div><dt>Abgeschnitten</dt><dd id="usb-truncated">–</dd></div>
+      </dl>
+
+      <div class="controls">
+        <button id="usb-stop" type="button" class="secondary" disabled>
+          Diagnose stoppen
+        </button>
+        <button id="usb-download" type="button" class="secondary" disabled>
+          Diagnosebericht herunterladen
+        </button>
+      </div>
+      <p id="usb-message" class="message" aria-live="polite"></p>
+      <details open>
+        <summary>Während der Diagnose empfangener Logausschnitt</summary>
+        <pre id="usb-output" class="log-output diagnostic-output" tabindex="0"></pre>
+      </details>
+    </section>
+
+    <section aria-labelledby="deploy-title">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">Hashvergleich + PUT</p>
+          <h2 id="deploy-title">Datei deployen</h2>
+        </div>
+      </div>
+      <div class="deploy-grid">
+        <label>
+          Lokale Datei
+          <input id="deploy-file" type="file">
+        </label>
+        <label>
+          Ziel auf BMX
+          <input id="deploy-destination" type="text" spellcheck="false"
+                 placeholder="SYS:/kernel.img">
+        </label>
+      </div>
+      <label class="check-row">
+        <input id="deploy-reboot" type="checkbox">
+        Nach erfolgreichem Deploy rebooten und auf BMX warten
+      </label>
+      <div class="controls">
+        <button id="deploy" type="button">Prüfen und deployen</button>
+        <progress id="deploy-progress" max="100" value="0"></progress>
+      </div>
+      <p id="deploy-message" class="message" aria-live="polite"></p>
+    </section>
+
+    <section aria-labelledby="reboot-title">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">Systemaktion</p>
+          <h2 id="reboot-title">BMX rebooten</h2>
+        </div>
+        <button id="reboot" type="button" class="danger">Reboot und warten</button>
+      </div>
+      <p id="reboot-message" class="message" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <footer>
+    Die Oberfläche kommuniziert ausschließlich mit <code>/bmx/dev/v1</code>
+    auf diesem Gerät. Es werden keine Daten ins Internet übertragen.
+  </footer>
+</body>
+</html>

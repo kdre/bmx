@@ -1,0 +1,8 @@
+# BMX user keyboard map (DE base). This file is preserved by updates.
+# Select Keyboard > USB Keyboard Layout > DE and Mapping > Custom, then reload.
+# Keyboard > Monitor shows the exact token for the first column.
+!INCLUDE rpi_pos_de.vkm
+
+# To replace an existing token, undefine it first, then add its new target:
+# !UNDEF HID_68
+# HID_68 0 0 8

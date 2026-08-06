@@ -175,10 +175,15 @@ private:
   void ApplyUSBDeviceInfo();
   void ApplyUSBAudioChange();
   void PublishCurrentSoundOutput();
+  void ProcessRemoteCommand();
   void DispatchUSBKeyboardState();
+  void ReleaseDispatchedUSBKeyboardState();
+  bool EndRawKeyboardMonitor();
+  void RemoveUSBKeyboardDevice(unsigned slot);
   static void MouseRemovedHandler(CDevice *pDevice, void *pContext);
   static void KeyRemovedHandler(CDevice *pDevice, void *pContext);
   static void GamePadRemovedHandler(CDevice *pDevice, void *pContext);
+  int ReadGPIOInput(int pinIndex);
   int ReadDebounced(int pinIndex);
   void ScanKeyboard();
   void ReadJoystick(int device, int gpioConfig);
@@ -189,6 +194,9 @@ private:
   ViceSound *mViceSound;
   USBPlugAndPlayTask *mUSBPlugAndPlayTask;
   bmc64::USBKeyboardState mUSBKeyboardState;
+  bool mRawKeyboardMonitorActive;
+  bool mRawKeyboardSuppressed[bmc64::USBKeyboardState::UsageCount];
+  unsigned char mRawKeyboardSuppressedModifiers;
   USBKeyboardContext mUSBKeyboardContexts[MAX_USB_DEVICES];
   CUSBKeyboardDevice *volatile mUSBKeyboards[MAX_USB_DEVICES];
   CMouseDevice *volatile mUSBMouse;
@@ -213,6 +221,9 @@ private:
 
   // Used for custom gpio configs that have joy assignments
   int gpio_prev_state[NUM_GPIO_PINS];
+  unsigned char gpio_input_armed[NUM_GPIO_PINS];
+  int gpio_joystick_prev[2][5];
+  unsigned char gpio_joystick_armed[2][7];
 
   FrameBufferLayer fbl[FB_NUM_LAYERS];
 };

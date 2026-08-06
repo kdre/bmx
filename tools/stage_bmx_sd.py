@@ -75,6 +75,7 @@ class StageError(ValueError):
 class StageContext:
     board: str
     profile: str
+    developer_mode: bool
     omit_roms: bool
     kernel_dir: Path
     stage_dir: Path
@@ -232,6 +233,20 @@ def _append_first_line_option(raw: str, option: str) -> str:
     return first + " " + option + separator + rest
 
 
+def _set_first_line_option(raw: str, key: str, value: str | None) -> str:
+    first, separator, rest = raw.partition("\n")
+    if not separator:
+        raise StageError("cmdline.txt has no complete first line")
+    options = [
+        option
+        for option in first.split()
+        if option.partition("=")[0] != key
+    ]
+    if value is not None:
+        options.append(f"{key}={value}")
+    return " ".join(options) + separator + rest
+
+
 def render_config_and_cmdline(
     context: StageContext,
     contract: KernelContract,
@@ -275,10 +290,13 @@ def render_config_and_cmdline(
             cmdline = _append_first_line_option(cmdline, "gpiofanpin=45")
         if context.profile == "debug" and "enable_uart=1\n" not in config:
             config += "\nenable_uart=1\nuart_2ndstage=1\ndtoverlay=uart0-pi5\n"
-        config += "\n[pi5]\narm_64bit=1\n"
+        config += "\ninitial_turbo=0\n\n[pi5]\narm_64bit=1\n"
 
     if context.profile == "debug" and "enable_serial=" not in cmdline:
         cmdline = _append_first_line_option(cmdline, "enable_serial=1")
+    cmdline = _set_first_line_option(
+        cmdline, "developer_mode", "1" if context.developer_mode else None,
+    )
 
     active = _replace_kernel_with_selector(config, kernel_name, "bmx-active-kernel.txt")
     selector = f"# BMX-KERNEL-SELECTOR-V2\nkernel={kernel_name}\n"
@@ -454,6 +472,16 @@ def parse_args(argv: Sequence[str] | None = None) -> StageContext:
     parser.add_argument("--board", choices=BOARDS, required=True)
     parser.add_argument("--profile", choices=("release", "debug"))
     parser.add_argument("--debug-uart", action="store_true")
+    developer_mode = parser.add_mutually_exclusive_group()
+    developer_mode.add_argument(
+        "--developer-mode", dest="developer_mode", action="store_true",
+        help="stage developer_mode=1 in cmdline.txt (local default)",
+    )
+    developer_mode.add_argument(
+        "--no-developer-mode", dest="developer_mode", action="store_false",
+        help="remove developer_mode from cmdline.txt",
+    )
+    parser.set_defaults(developer_mode=True)
     parser.add_argument("--omit-roms", action="store_true")
     parser.add_argument("--kernel-dir", type=Path)
     parser.add_argument("--stage-dir", type=Path)
@@ -482,6 +510,7 @@ def parse_args(argv: Sequence[str] | None = None) -> StageContext:
     return StageContext(
         board=args.board,
         profile=profile,
+        developer_mode=args.developer_mode,
         omit_roms=args.omit_roms,
         kernel_dir=kernel_dir,
         stage_dir=stage_dir,

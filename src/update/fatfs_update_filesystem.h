@@ -22,11 +22,19 @@ static const size_t kFatFsUpdateFileSystemReadHandles = 2U;
 static const size_t kFatFsUpdateFileSystemWriteHandles = 1U;
 static const size_t kFatFsUpdateFileSystemVerifyBufferBytes = 4096U;
 
+enum class FatFsUpdatePathPolicy : uint8_t {
+    PortableRelease = 0,
+    Developer
+};
+
 // This adapter is intentionally synchronous and single-caller.  It allocates
 // no memory and retains ownership of a bounded pool of FIL handles.
 class FatFsUpdateFileSystem : public UpdateFileSystem {
 public:
-    explicit FatFsUpdateFileSystem(const char *volume = "SYS:");
+    explicit FatFsUpdateFileSystem(
+        const char *volume = "SYS:",
+        FatFsUpdatePathPolicy path_policy =
+            FatFsUpdatePathPolicy::PortableRelease);
     ~FatFsUpdateFileSystem();
 
     // Accepts only a volume designator such as "SYS:" or "SYS:/".  A
@@ -71,7 +79,8 @@ private:
     public:
         WriteHandle();
         bool Write(ByteView bytes);
-        bool Sync();
+        bool Sync(UpdateCooperativeYield yield,
+                  void *yield_context);
         bool Close();
 
     private:
@@ -90,13 +99,16 @@ private:
 
     bool Resolve(const char *relative_path, char *absolute_path,
                  size_t capacity) const;
-    bool VerifySyncedWrite(WriteHandle &handle);
+    bool VerifySyncedWrite(WriteHandle &handle,
+                           UpdateCooperativeYield yield,
+                           void *yield_context);
     bool AnyHandleOpen() const;
 
     FatFsUpdateFileSystem(const FatFsUpdateFileSystem &);
     FatFsUpdateFileSystem &operator=(const FatFsUpdateFileSystem &);
 
     bool configured_;
+    FatFsUpdatePathPolicy path_policy_;
     char volume_root_[20U];
     ReadHandle read_handles_[kFatFsUpdateFileSystemReadHandles];
     WriteHandle write_handles_[kFatFsUpdateFileSystemWriteHandles];

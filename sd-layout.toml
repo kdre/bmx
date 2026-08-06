@@ -148,6 +148,68 @@ from = "vice_data/PET/gtk3_pos.vkm"
 to = "pet/gtk3_pos.vkm"
 mode = "replace"
 
+# End-user keyboard maps are seeded on first install and never overwritten by
+# updates. Stock rpi_*.vkm files below remain release-managed.
+[[both.file]]
+from = "raspi_keymaps/c64/user_pos.vkm"
+to = "c64/user_pos.vkm"
+mode = "keep"
+
+[[both.file]]
+from = "raspi_keymaps/c64/user_pos_de.vkm"
+to = "c64/user_pos_de.vkm"
+mode = "keep"
+
+[[both.file]]
+from = "raspi_keymaps/c64/user_pos.vkm"
+to = "scpu64/user_pos.vkm"
+mode = "keep"
+
+[[both.file]]
+from = "raspi_keymaps/c64/user_pos_de.vkm"
+to = "scpu64/user_pos_de.vkm"
+mode = "keep"
+
+[[both.file]]
+from = "raspi_keymaps/c128/user_pos.vkm"
+to = "c128/user_pos.vkm"
+mode = "keep"
+
+[[both.file]]
+from = "raspi_keymaps/c128/user_pos_de.vkm"
+to = "c128/user_pos_de.vkm"
+mode = "keep"
+
+[[both.file]]
+from = "raspi_keymaps/vic20/user_pos.vkm"
+to = "vic20/user_pos.vkm"
+mode = "keep"
+
+[[both.file]]
+from = "raspi_keymaps/vic20/user_pos_de.vkm"
+to = "vic20/user_pos_de.vkm"
+mode = "keep"
+
+[[both.file]]
+from = "raspi_keymaps/plus4/user_pos.vkm"
+to = "plus4/user_pos.vkm"
+mode = "keep"
+
+[[both.file]]
+from = "raspi_keymaps/plus4/user_pos_de.vkm"
+to = "plus4/user_pos_de.vkm"
+mode = "keep"
+
+[[both.file]]
+from = "raspi_keymaps/pet/user_pos.vkm"
+to = "pet/user_pos.vkm"
+mode = "keep"
+
+[[both.file]]
+from = "raspi_keymaps/pet/user_pos_de.vkm"
+to = "pet/user_pos_de.vkm"
+mode = "keep"
+
 [[both.file]]
 from = "raspi_keymaps/c64/rpi_maxi_pos.vkm"
 to = "c64/rpi_maxi_pos.vkm"
@@ -418,6 +480,28 @@ from = "sdcard/modem/hayes_long_connect.wav"
 to = "modem/hayes_long_connect.wav"
 mode = "replace"
 
+# The developer browser client is stored once on the SD card and shared by
+# every machine kernel. The kernel only contains its fixed HTTP router.
+[[both.file]]
+from = "sdcard/bmx/dev/ui/index.html"
+to = "bmx/dev/ui/index.html"
+mode = "replace"
+
+[[both.file]]
+from = "sdcard/bmx/dev/ui/app.css"
+to = "bmx/dev/ui/app.css"
+mode = "replace"
+
+[[both.file]]
+from = "sdcard/bmx/dev/ui/core.mjs"
+to = "bmx/dev/ui/core.mjs"
+mode = "replace"
+
+[[both.file]]
+from = "sdcard/bmx/dev/ui/app.mjs"
+to = "bmx/dev/ui/app.mjs"
+mode = "replace"
+
 [[both.tree]]
 from = "wlan"
 to = "firmware"
@@ -622,6 +706,51 @@ optional = true
 to = "kernel_2712.img.intro"
 mode = "kernel"
 optional = true
+
+# BMX system palettes.  Each tree selects only the former menu palettes that
+# are no longer compiled into the kernels.  Additional files placed below the
+# target directories remain unmanaged and are discovered at runtime.
+[[both.tree]]
+from = "vice_data/C64"
+to = "palettes/C64"
+mode = "replace"
+include = ["c64hq.vpl", "c64s.vpl", "ccs64.vpl", "cjam.vpl", "colodore.vpl", "community-colors.vpl", "deekay.vpl", "frodo.vpl", "godot.vpl", "pc64.vpl", "pepto-ntsc-sony.vpl", "pepto-ntsc.vpl", "pepto-pal.vpl", "pepto-palold.vpl", "ptoing.vpl", "rgb.vpl"]
+
+[[both.tree]]
+from = "vice_data/SCPU64"
+to = "palettes/SCPU64"
+mode = "replace"
+include = ["c64hq.vpl", "c64s.vpl", "ccs64.vpl", "cjam.vpl", "colodore.vpl", "community-colors.vpl", "deekay.vpl", "frodo.vpl", "godot.vpl", "pc64.vpl", "pepto-ntsc-sony.vpl", "pepto-ntsc.vpl", "pepto-pal.vpl", "pepto-palold.vpl", "ptoing.vpl", "rgb.vpl"]
+
+[[both.tree]]
+from = "vice_data/C128"
+to = "palettes/C128/VICII"
+mode = "replace"
+include = ["c64hq.vpl", "c64s.vpl", "ccs64.vpl", "cjam.vpl", "colodore.vpl", "community-colors.vpl", "deekay.vpl", "frodo.vpl", "godot.vpl", "pc64.vpl", "pepto-ntsc-sony.vpl", "pepto-ntsc.vpl", "pepto-pal.vpl", "pepto-palold.vpl", "ptoing.vpl", "rgb.vpl"]
+
+[[both.tree]]
+from = "vice_data/C128"
+to = "palettes/C128/VDC"
+mode = "replace"
+include = ["vdc_comp.vpl"]
+
+[[both.tree]]
+from = "vice_data/VIC20"
+to = "palettes/VIC20"
+mode = "replace"
+include = ["colodore_vic.vpl", "mike-ntsc.vpl", "mike-pal.vpl"]
+
+[[both.tree]]
+from = "vice_data/PLUS4"
+to = "palettes/PLUS4"
+mode = "replace"
+include = ["colodore_ted.vpl", "yape-ntsc.vpl"]
+
+[[both.tree]]
+from = "vice_data/PET"
+to = "palettes/PET"
+mode = "replace"
+include = ["amber.vpl", "white.vpl"]
 
 # Optional ROM payload.  Release staging leaves feature "roms" disabled and
 # emits MISSING-ROMS.txt; a manual full image enables it.  Missing individual
@@ -986,6 +1115,55 @@ mode = "replace"
 to = "pet"
 include = ["*.vkm"]
 mode = "replace"
+
+# User keymaps override the managed *.vkm device policy above.
+[[both.file]]
+to = "c64/user_pos.vkm"
+mode = "keep"
+
+[[both.file]]
+to = "c64/user_pos_de.vkm"
+mode = "keep"
+
+[[both.file]]
+to = "scpu64/user_pos.vkm"
+mode = "keep"
+
+[[both.file]]
+to = "scpu64/user_pos_de.vkm"
+mode = "keep"
+
+[[both.file]]
+to = "c128/user_pos.vkm"
+mode = "keep"
+
+[[both.file]]
+to = "c128/user_pos_de.vkm"
+mode = "keep"
+
+[[both.file]]
+to = "vic20/user_pos.vkm"
+mode = "keep"
+
+[[both.file]]
+to = "vic20/user_pos_de.vkm"
+mode = "keep"
+
+[[both.file]]
+to = "plus4/user_pos.vkm"
+mode = "keep"
+
+[[both.file]]
+to = "plus4/user_pos_de.vkm"
+mode = "keep"
+
+[[both.file]]
+to = "pet/user_pos.vkm"
+mode = "keep"
+
+[[both.file]]
+to = "pet/user_pos_de.vkm"
+mode = "keep"
 
 [[both.tree]]
 to = "c64"

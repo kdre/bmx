@@ -1,0 +1,1412 @@
+diff --git a/libs/circle/include/circle/usb/usbmouse.h b/libs/circle/include/circle/usb/usbmouse.h
+index 63426dd..9fd45c1 100644
+--- a/libs/circle/include/circle/usb/usbmouse.h
++++ b/libs/circle/include/circle/usb/usbmouse.h
+@@ -21,32 +21,10 @@
+ #define _circle_usb_usbmouse_h
+ 
+ #include <circle/usb/usbhiddevice.h>
++#include <circle/usb/usbmouseparser.h>
+ #include <circle/input/mouse.h>
+ #include <circle/types.h>
+ 
+-enum TMouseReportType
+-{
+-	MouseItemButtons,
+-	MouseItemXAxis,
+-	MouseItemYAxis,
+-	MouseItemWheel,
+-
+-	MouseItemCount
+-};
+-
+-struct TMouseReportItem
+-{
+-	unsigned bitSize;
+-	unsigned bitOffset;
+-};
+-
+-struct TMouseReport
+-{
+-	unsigned id;
+-	unsigned byteSize;
+-	TMouseReportItem items[MouseItemCount];
+-};
+-
+ class CUSBMouseDevice : public CUSBHIDDevice
+ {
+ public:
+@@ -57,17 +35,10 @@ public:
+ 
+ private:
+ 	void ReportHandler (const u8 *pReport, unsigned nReportSize);
+-	void DecodeReport (void);
+-	u32 ExtractUnsigned (const void *buffer, u32 offset, u32 length);
+-	s32 ExtractSigned (const void *buffer, u32 offset, u32 length);
+ 
+ private:
+ 	CMouseDevice *m_pMouseDevice;
+-
+-	u8 *m_pHIDReportDescriptor;
+-	u16 m_usReportDescriptorLength;
+-
+-	TMouseReport m_MouseReport;
++	CUSBMouseReportParser m_ReportParser;
+ };
+ 
+ #endif
+diff --git a/libs/circle/include/circle/usb/usbmouseparser.h b/libs/circle/include/circle/usb/usbmouseparser.h
+new file mode 100644
+index 0000000..5ef0553
+--- /dev/null
++++ b/libs/circle/include/circle/usb/usbmouseparser.h
+@@ -0,0 +1,99 @@
++//
++// usbmouseparser.h
++//
++// Circle - A C++ bare metal environment for Raspberry Pi
++// Copyright (C) 2014-2026  R. Stange <rsta2@gmx.net>
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with this program.  If not, see <http://www.gnu.org/licenses/>.
++//
++#ifndef _circle_usb_usbmouseparser_h
++#define _circle_usb_usbmouseparser_h
++
++#include <circle/types.h>
++
++struct TUSBMouseReportData
++{
++	unsigned Buttons;
++	s32 X;
++	s32 Y;
++	s32 Wheel;
++};
++
++class CUSBMouseReportParser
++{
++public:
++	CUSBMouseReportParser (void);
++	~CUSBMouseReportParser (void);
++
++	boolean Parse (const u8 *pDescriptor, unsigned nDescriptorSize);
++
++	// Returns FALSE for unknown, non-mouse or malformed input reports.
++	boolean Decode (const u8 *pReport, unsigned nReportSize, TUSBMouseReportData *pData);
++
++	unsigned GetMaxInputReportSize (void) const;
++	unsigned GetButtonCount (void) const;
++	boolean HasWheel (void) const;
++	boolean UsesReportIDs (void) const;
++
++private:
++	static const unsigned MaxButtons = 5;
++	static const unsigned MaxReportIDs = 256;
++
++	struct TReportItem
++	{
++		unsigned BitOffset;
++		unsigned BitSize;
++		boolean Present;
++		boolean Relative;
++	};
++
++	struct TReportLayout
++	{
++		u8 ReportID;
++		unsigned ByteSize;
++		TReportItem Button[MaxButtons];
++		TReportItem X;
++		TReportItem Y;
++		TReportItem Wheel;
++	};
++
++	boolean ParsePass (const u8 *pDescriptor, unsigned nDescriptorSize,
++			   boolean bStoreLayouts, u32 *pInputBits, u8 *pInputSeen,
++			   u8 *pMouseReportIDs, boolean *pUsesReportIDs);
++
++	TReportLayout *FindLayout (u8 uchReportID);
++	const TReportLayout *FindLayout (u8 uchReportID) const;
++
++	static u32 ExtractUnsigned (const u8 *pBuffer, unsigned nBitOffset,
++				    unsigned nBitSize);
++	static s32 ExtractSigned (const u8 *pBuffer, unsigned nBitOffset,
++				 unsigned nBitSize);
++
++	void Reset (void);
++
++private:
++	TReportLayout *m_pLayouts;
++	unsigned m_nLayoutCount;
++	unsigned m_nMaxInputReportSize;
++	unsigned m_nButtonCount;
++	unsigned m_nButtonState;
++	boolean m_bHasWheel;
++	boolean m_bUsesReportIDs;
++
++private:
++	CUSBMouseReportParser (const CUSBMouseReportParser &rParser);
++	CUSBMouseReportParser &operator= (const CUSBMouseReportParser &rParser);
++};
++
++#endif
+diff --git a/libs/circle/lib/usb/Makefile b/libs/circle/lib/usb/Makefile
+index 6f41e49..186c939 100644
+--- a/libs/circle/lib/usb/Makefile
++++ b/libs/circle/lib/usb/Makefile
+@@ -29,7 +29,7 @@ OBJS	= lan7800.o smsc951x.o usbbluetooth.o usbcdcethernet.o usbfloppydevice.o \
+ 	  usbgamepad.o usbgamepad8bitdo.o usbgamepad8bitdoum2.o usbgamepad8bitdoxinput.o usbgamepadps3.o usbgamepadps4.o usbgamepadstandard.o \
+ 	  usbgamepadswitchpro.o usbgamepadxbox360.o usbgamepadxboxone.o \
+ 	  usbhiddevice.o usbhostcontroller.o \
+-	  usbkeyboard.o usbkeyboard8bitdo.o usbmassdevice.o usbmidi.o usbmidihost.o usbmouse.o usbprinter.o usbrequest.o \
++	  usbkeyboard.o usbkeyboard8bitdo.o usbmassdevice.o usbmidi.o usbmidihost.o usbmouse.o usbmouseparser.o usbprinter.o usbrequest.o \
+ 	  usbstandardhub.o usbstring.o usbserial.o usbserialhost.o usbserialch341.o usbserialcp210x.o \
+ 	  usbserialpl2303.o usbserialft231x.o usbserialcdc.o usbtouchscreen.o dwhciregister.o
+ 
+diff --git a/libs/circle/lib/usb/usbmouse.cpp b/libs/circle/lib/usb/usbmouse.cpp
+index 9cac434..a813515 100644
+--- a/libs/circle/lib/usb/usbmouse.cpp
++++ b/libs/circle/lib/usb/usbmouse.cpp
+@@ -6,7 +6,7 @@
+ //
+ // USB mouse wheel support including HID report parser:
+ // Copyright (C) 2020  H. Kocevar <hinxx@protonmail.com>
+-// 
++//
+ // This program is free software: you can redistribute it and/or modify
+ // it under the terms of the GNU General Public License as published by
+ // the Free Software Foundation, either version 3 of the License, or
+@@ -25,32 +25,11 @@
+ #include <circle/logger.h>
+ #include <assert.h>
+ 
+-// HID Report Items from HID 1.11 Section 6.2.2
+-#define HID_USAGE_PAGE      0x04
+-#define HID_USAGE           0x08
+-#define HID_COLLECTION      0xA0
+-#define HID_END_COLLECTION  0xC0
+-#define HID_REPORT_COUNT    0x94
+-#define HID_REPORT_SIZE     0x74
+-#define HID_INPUT           0x80
+-#define HID_REPORT_ID       0x84
+-
+-// HID Report Usage Pages from HID Usage Tables 1.12 Section 3, Table 1
+-#define HID_USAGE_PAGE_BUTTONS         0x09
+-
+-// HID Report Usages from HID Usage Tables 1.12 Section 4, Table 6
+-#define HID_USAGE_POINTER   0x01
+-#define HID_USAGE_MOUSE     0x02
+-#define HID_USAGE_X         0x30
+-#define HID_USAGE_Y         0x31
+-#define HID_USAGE_WHEEL     0x38
+-
+ static const char FromUSBMouse[] = "umouse";
+ 
+ CUSBMouseDevice::CUSBMouseDevice (CUSBFunction *pFunction)
+ :	CUSBHIDDevice (pFunction),
+-	m_pMouseDevice (0),
+-	m_pHIDReportDescriptor (0)
++	m_pMouseDevice (0)
+ {
+ }
+ 
+@@ -58,9 +37,6 @@ CUSBMouseDevice::~CUSBMouseDevice (void)
+ {
+ 	delete m_pMouseDevice;
+ 	m_pMouseDevice = 0;
+-
+-	delete [] m_pHIDReportDescriptor;
+-	m_pHIDReportDescriptor = 0;
+ }
+ 
+ boolean CUSBMouseDevice::Configure (void)
+@@ -74,39 +50,40 @@ boolean CUSBMouseDevice::Configure (void)
+ 		return FALSE;
+ 	}
+ 
+-	m_usReportDescriptorLength = pHIDDesc->wReportDescriptorLength;
+-	m_pHIDReportDescriptor = new u8[m_usReportDescriptorLength];
+-	assert (m_pHIDReportDescriptor != 0);
++	u16 usReportDescriptorLength = pHIDDesc->wReportDescriptorLength;
++	u8 *pHIDReportDescriptor = new u8[usReportDescriptorLength];
++	assert (pHIDReportDescriptor != 0);
+ 
+ 	if (   GetHost ()->GetDescriptor (GetEndpoint0 (),
+ 					  pHIDDesc->bReportDescriptorType, DESCRIPTOR_INDEX_DEFAULT,
+-					  m_pHIDReportDescriptor, m_usReportDescriptorLength,
++					  pHIDReportDescriptor, usReportDescriptorLength,
+ 					  REQUEST_IN | REQUEST_TO_INTERFACE, GetInterfaceNumber ())
+-	    != m_usReportDescriptorLength)
++	    != usReportDescriptorLength)
+ 	{
+ 		CLogger::Get ()->Write (FromUSBMouse, LogError, "Cannot get HID report descriptor");
++		delete [] pHIDReportDescriptor;
+ 
+ 		return FALSE;
+ 	}
+ 
+-	DecodeReport ();
+-
+-	// ignoring unsupported HID interface
+-	if (m_MouseReport.byteSize == 0)
++	boolean bParsed = m_ReportParser.Parse (pHIDReportDescriptor, usReportDescriptorLength);
++	delete [] pHIDReportDescriptor;
++	if (!bParsed)
+ 	{
++		CLogger::Get ()->Write (FromUSBMouse, LogError, "Invalid HID mouse report descriptor");
++
+ 		return FALSE;
+ 	}
+ 
+-	if (!CUSBHIDDevice::ConfigureHID (m_MouseReport.byteSize))
++	if (!CUSBHIDDevice::ConfigureHID (m_ReportParser.GetMaxInputReportSize ()))
+ 	{
+ 		CLogger::Get ()->Write (FromUSBMouse, LogError, "Cannot configure HID device");
+ 
+ 		return FALSE;
+ 	}
+ 
+-	
+-	m_pMouseDevice = new CMouseDevice(m_MouseReport.items[MouseItemButtons].bitSize,
+-					  m_MouseReport.items[MouseItemWheel].bitSize != 0, this);
++	m_pMouseDevice = new CMouseDevice (m_ReportParser.GetButtonCount (),
++					  m_ReportParser.HasWheel (), this);
+ 	assert (m_pMouseDevice != 0);
+ 
+ 	return StartRequest ();
+@@ -114,273 +91,30 @@ boolean CUSBMouseDevice::Configure (void)
+ 
+ void CUSBMouseDevice::ReportHandler (const u8 *pReport, unsigned nReportSize)
+ {
+-	if (   pReport != 0
+-	    && nReportSize == m_MouseReport.byteSize)
++	TUSBMouseReportData Data;
++	if (   m_pMouseDevice == 0
++	    || !m_ReportParser.Decode (pReport, nReportSize, &Data))
+ 	{
+-		if (m_pMouseDevice != 0)
+-		{
+-			u32 ucHIDButtons = 0;
+-			s32 xMove = 0;
+-			s32 yMove = 0;
+-			s32 wheelMove = 0;
+-			TMouseReportItem *item = &m_MouseReport.items[MouseItemButtons];
+-			ucHIDButtons = ExtractUnsigned(pReport, item->bitOffset, item->bitSize);
+-			item = &m_MouseReport.items[MouseItemXAxis];
+-			xMove = ExtractSigned(pReport, item->bitOffset, item->bitSize);
+-			if (xMove > 127)
+-				xMove = 127;
+-			if (xMove < -127)
+-				xMove = -127;
+-			item = &m_MouseReport.items[MouseItemYAxis];
+-			yMove = ExtractSigned(pReport, item->bitOffset, item->bitSize);
+-			if (yMove > 127)
+-				yMove = 127;
+-			if (yMove < -127)
+-				yMove = -127;
+-			item = &m_MouseReport.items[MouseItemWheel];
+-			wheelMove = ExtractSigned(pReport, item->bitOffset, item->bitSize);
+-
+-			u32 nButtons = 0;
+-			if (ucHIDButtons & USBHID_BUTTON1)
+-			{
+-				nButtons |= MOUSE_BUTTON_LEFT;
+-			}
+-			if (ucHIDButtons & USBHID_BUTTON2)
+-			{
+-				nButtons |= MOUSE_BUTTON_RIGHT;
+-			}
+-			if (ucHIDButtons & USBHID_BUTTON3)
+-			{
+-				nButtons |= MOUSE_BUTTON_MIDDLE;
+-			}
+-			if (ucHIDButtons & USBHID_BUTTON4)
+-			{
+-				nButtons |= MOUSE_BUTTON_SIDE1;
+-			}
+-			if (ucHIDButtons & USBHID_BUTTON5)
+-			{
+-				nButtons |= MOUSE_BUTTON_SIDE2;
+-			}
+-
+-			m_pMouseDevice->ReportHandler (nButtons, xMove, yMove, wheelMove);
+-		}
+-	}
+-}
+-
+-u32 CUSBMouseDevice::ExtractUnsigned(const void *buffer, u32 offset, u32 length)
+-{
+-	assert(buffer != 0);
+-	assert(length <= 32);
+-
+-	if (length == 0)
+-	{
+-		return 0;
++		return;
+ 	}
+ 
+-	u8 *bits = (u8 *)buffer;
+-	unsigned shift = offset % 8;
+-	offset = offset / 8;
+-	bits = bits + offset;
+-	unsigned number = bits[0];
+-	if (length > 8) number |= (u16) bits[1] << 8;
+-	if (length > 16) number |= (u32) bits[2] << 16;
+-	offset = shift;
+-
+-	unsigned result = 0;
+-	if (length > 24)
+-	{
+-		result = (((1 << 24) - 1) & (number >> offset));
+-		bits = bits + 3;
+-		length = length - 24;
+-		number = bits[0];
+-		if (length > 8) number |= (u16) bits[1] << 8;
+-		if (length > 16) number |= (u32) bits[2] << 16;
+-		unsigned result2 = (((1 << length) - 1) & (number >> offset));
+-		result = (result2 << 24) | result;
+-	}
+-	else
++	if (Data.X > MOUSE_DISPLACEMENT_MAX)
+ 	{
+-		result = (((1 << length) - 1) & (number >> offset));
++		Data.X = MOUSE_DISPLACEMENT_MAX;
+ 	}
+-
+-	return result;
+-}
+-
+-s32 CUSBMouseDevice::ExtractSigned(const void *buffer, u32 offset, u32 length)
+-{
+-	assert(buffer != 0);
+-	assert(length <= 32);
+-
+-	unsigned result = ExtractUnsigned(buffer, offset, length);
+-	if ((length == 0) || (length == 32))
++	else if (Data.X < MOUSE_DISPLACEMENT_MIN)
+ 	{
+-		return result;
++		Data.X = MOUSE_DISPLACEMENT_MIN;
+ 	}
+ 
+-	if (result & (1 << (length - 1)))
++	if (Data.Y > MOUSE_DISPLACEMENT_MAX)
+ 	{
+-		result |= 0xffffffff - ((1 << length) - 1);
++		Data.Y = MOUSE_DISPLACEMENT_MAX;
+ 	}
+-
+-	return result;
+-}
+-
+-void CUSBMouseDevice::DecodeReport (void)
+-{
+-	s32 item, arg;
+-	u32 offset = 0, size = 0, count = 0;
+-	u32 id = 0;
+-	u32 nCollections = 0;
+-	u32 itemIndex = 0;
+-	boolean parse = FALSE;
+-	boolean foundMouseUsage = FALSE;
+-	u32 itemIndexes[MouseItemCount] = {0};
+-
+-	assert (m_pHIDReportDescriptor != 0);
+-	s8 *pHIDReportDescriptor = (s8 *) m_pHIDReportDescriptor;
+-
+-	for (u16 usReportDescriptorLength = m_usReportDescriptorLength; usReportDescriptorLength > 0; )
++	else if (Data.Y < MOUSE_DISPLACEMENT_MIN)
+ 	{
+-		item = *pHIDReportDescriptor++;
+-		usReportDescriptorLength--;
+-
+-		switch(item & 0x03)
+-		{
+-		case 0:
+-			arg = 0;
+-			break;
+-		case 1:
+-			arg = *pHIDReportDescriptor++;
+-			usReportDescriptorLength--;
+-			break;
+-		case 2:
+-			arg = *pHIDReportDescriptor++ & 0xFF;
+-			arg = arg | (*pHIDReportDescriptor++ << 8);
+-			usReportDescriptorLength -= 2;
+-			break;
+-		default:
+-			arg = *pHIDReportDescriptor++;
+-			arg = arg | (*pHIDReportDescriptor++ << 8);
+-			arg = arg | (*pHIDReportDescriptor++ << 16);
+-			arg = arg | (*pHIDReportDescriptor++ << 24);
+-			usReportDescriptorLength -= 4;
+-			break;
+-		}
+-
+-		switch(item & 0xFC)
+-		{
+-		case HID_COLLECTION:
+-			nCollections++;
+-			break;
+-		case HID_END_COLLECTION:
+-			nCollections--;
+-			if (nCollections == 0)
+-				parse = FALSE;
+-			break;
+-		case HID_USAGE:
+-			if (arg == HID_USAGE_MOUSE)
+-			{
+-				foundMouseUsage = TRUE;
+-			}
+-			else if (arg == HID_USAGE_POINTER)
+-			{
+-				if (id == 0)
+-				{
+-					parse = true;
+-				}
+-			}
+-			break;
+-		case HID_REPORT_ID:
+-			if (foundMouseUsage)
+-			{
+-				if (id == 0)
+-				{
+-					id = arg;
+-					offset += 8;
+-					parse = TRUE;
+-				}
+-				else
+-				{
+-					if ((u32)arg != id)
+-					{
+-						parse = FALSE;
+-					}
+-					else
+-					{
+-						parse = TRUE;
+-					}
+-				}
+-			}
+-			break;
+-		}
+-
+-		if (! parse)
+-			continue;
+-
+-		switch(item & 0xFC)
+-		{
+-		case HID_USAGE_PAGE:
+-			switch(arg)
+-			{
+-			case HID_USAGE_PAGE_BUTTONS:
+-				itemIndexes[itemIndex] = MouseItemButtons;
+-				itemIndex++;
+-				break;
+-			}
+-			break;
+-		case HID_USAGE:
+-			switch(arg)
+-			{
+-			case HID_USAGE_X:
+-				itemIndexes[itemIndex] = MouseItemXAxis;
+-				itemIndex++;
+-				break;
+-			case HID_USAGE_Y:
+-				itemIndexes[itemIndex] = MouseItemYAxis;
+-				itemIndex++;
+-				break;
+-			case HID_USAGE_WHEEL:
+-				itemIndexes[itemIndex] = MouseItemWheel;
+-				itemIndex++;
+-				break;
+-			}
+-			break;
+-		case HID_REPORT_SIZE:
+-			size = arg;
+-			break;
+-		case HID_REPORT_COUNT:
+-			count = arg;
+-			break;
+-		case HID_INPUT:
+-			if ((arg & 0x03) == 0x02)
+-			{
+-				u32 bitOffset = offset;
+-				u32 bitSize = 0;
+-				u32 index = 0;
+-				u32 item = 0;
+-				assert(itemIndex < MouseItemCount);
+-				while (index < itemIndex)
+-				{
+-					item = itemIndexes[index];
+-					assert(item < MouseItemCount);
+-					bitSize = size;
+-					if (item == MouseItemButtons)
+-					{
+-						bitSize = count;
+-					}
+-					m_MouseReport.items[item].bitSize = bitSize;
+-					m_MouseReport.items[item].bitOffset = bitOffset;
+-					bitOffset += bitSize;
+-					index++;
+-				}
+-				itemIndex = 0;
+-			}
+-
+-			offset += count * size;
+-			break;
+-		}
++		Data.Y = MOUSE_DISPLACEMENT_MIN;
+ 	}
+ 
+-	m_MouseReport.id = id;
+-	m_MouseReport.byteSize = (offset + 7) / 8;
++	m_pMouseDevice->ReportHandler (Data.Buttons, Data.X, Data.Y, Data.Wheel);
+ }
+diff --git a/libs/circle/lib/usb/usbmouseparser.cpp b/libs/circle/lib/usb/usbmouseparser.cpp
+new file mode 100644
+index 0000000..23b6a14
+--- /dev/null
++++ b/libs/circle/lib/usb/usbmouseparser.cpp
+@@ -0,0 +1,833 @@
++//
++// usbmouseparser.cpp
++//
++// Circle - A C++ bare metal environment for Raspberry Pi
++// Copyright (C) 2014-2026  R. Stange <rsta2@gmx.net>
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with this program.  If not, see <http://www.gnu.org/licenses/>.
++//
++#include <circle/usb/usbmouseparser.h>
++#include <string.h>
++
++namespace
++{
++
++// HID 1.11, section 6.2.2
++enum
++{
++	HIDItemLong		= 0xFE,
++
++	HIDTypeMain		= 0,
++	HIDTypeGlobal		= 1,
++	HIDTypeLocal		= 2,
++
++	HIDMainInput		= 8,
++	HIDMainOutput		= 9,
++	HIDMainCollection	= 10,
++	HIDMainFeature		= 11,
++	HIDMainEndCollection	= 12,
++
++	HIDGlobalUsagePage	= 0,
++	HIDGlobalReportSize	= 7,
++	HIDGlobalReportID	= 8,
++	HIDGlobalReportCount	= 9,
++	HIDGlobalPush		= 10,
++	HIDGlobalPop		= 11,
++
++	HIDLocalUsage		= 0,
++	HIDLocalUsageMinimum	= 1,
++	HIDLocalUsageMaximum	= 2,
++	HIDLocalDelimiter	= 10,
++
++	HIDCollectionApplication = 1,
++
++	HIDInputConstant	= 1 << 0,
++	HIDInputVariable	= 1 << 1,
++	HIDInputRelative	= 1 << 2,
++
++	HIDUsagePageGenericDesktop = 0x01,
++	HIDUsagePageButton	= 0x09,
++
++	HIDUsageMouse		= 0x02,
++	HIDUsageX		= 0x30,
++	HIDUsageY		= 0x31,
++	HIDUsageWheel		= 0x38,
++
++	MaxDescriptorSize	= 4096,
++	MaxInputReportSize	= 4096,
++	MaxLocalUsages		= 64,
++	MaxCollectionDepth	= 16,
++	MaxGlobalStackDepth	= 8
++};
++
++struct TGlobalState
++{
++	u32 UsagePage;
++	u32 ReportSize;
++	u32 ReportCount;
++	u8 ReportID;
++};
++
++struct TLocalUsage
++{
++	u32 Value;
++	u8 Size;
++};
++
++struct TLocalState
++{
++	TLocalUsage Usage[MaxLocalUsages];
++	unsigned UsageCount;
++	boolean UsageOverflow;
++	TLocalUsage UsageMinimum;
++	boolean HasUsageMinimum;
++	unsigned DelimiterDepth;
++	unsigned DelimiterBranch;
++};
++
++struct TCollectionState
++{
++	boolean MouseApplication;
++};
++
++static void ResetLocalState (TLocalState *pLocal)
++{
++	memset (pLocal, 0, sizeof *pLocal);
++}
++
++static u32 CompleteUsage (const TLocalUsage &Usage, u32 nUsagePage)
++{
++	if (Usage.Size <= 2)
++	{
++		return (nUsagePage << 16) | (Usage.Value & 0xFFFF);
++	}
++
++	return Usage.Value;
++}
++
++static boolean AddLocalUsage (TLocalState *pLocal, u32 nValue, u8 uchSize)
++{
++	if (pLocal->DelimiterBranch > 1)
++	{
++		return TRUE;
++	}
++
++	if (pLocal->UsageCount >= MaxLocalUsages)
++	{
++		pLocal->UsageOverflow = TRUE;
++		return TRUE;
++	}
++
++	pLocal->Usage[pLocal->UsageCount].Value = nValue;
++	pLocal->Usage[pLocal->UsageCount].Size = uchSize;
++	pLocal->UsageCount++;
++
++	return TRUE;
++}
++
++static boolean AddUsageRange (TLocalState *pLocal, u32 nMaximum, u8 uchMaximumSize,
++			      u32 nUsagePage)
++{
++	if (!pLocal->HasUsageMinimum)
++	{
++		return FALSE;
++	}
++
++	u32 nMinimum = CompleteUsage (pLocal->UsageMinimum, nUsagePage);
++	TLocalUsage Maximum = {nMaximum, uchMaximumSize};
++	nMaximum = CompleteUsage (Maximum, nUsagePage);
++	pLocal->HasUsageMinimum = FALSE;
++
++	if (nMaximum < nMinimum)
++	{
++		return FALSE;
++	}
++
++	u32 nCount = nMaximum - nMinimum + 1;
++	if (nCount > MaxLocalUsages - pLocal->UsageCount)
++	{
++		pLocal->UsageOverflow = TRUE;
++		nCount = MaxLocalUsages - pLocal->UsageCount;
++	}
++
++	for (u32 i = 0; i < nCount; i++)
++	{
++		if (!AddLocalUsage (pLocal, nMinimum + i, 4))
++		{
++			return FALSE;
++		}
++	}
++
++	return TRUE;
++}
++
++static u32 GetLocalUsage (const TLocalState &Local, unsigned nIndex, u32 nUsagePage)
++{
++	if (Local.UsageCount == 0)
++	{
++		return 0;
++	}
++
++	if (nIndex >= Local.UsageCount)
++	{
++		nIndex = Local.UsageCount - 1;
++	}
++
++	return CompleteUsage (Local.Usage[nIndex], nUsagePage);
++}
++
++}
++
++CUSBMouseReportParser::CUSBMouseReportParser (void)
++:	m_pLayouts (0),
++	m_nLayoutCount (0),
++	m_nMaxInputReportSize (0),
++	m_nButtonCount (0),
++	m_nButtonState (0),
++	m_bHasWheel (FALSE),
++	m_bUsesReportIDs (FALSE)
++{
++}
++
++CUSBMouseReportParser::~CUSBMouseReportParser (void)
++{
++	Reset ();
++}
++
++void CUSBMouseReportParser::Reset (void)
++{
++	delete [] m_pLayouts;
++	m_pLayouts = 0;
++	m_nLayoutCount = 0;
++	m_nMaxInputReportSize = 0;
++	m_nButtonCount = 0;
++	m_nButtonState = 0;
++	m_bHasWheel = FALSE;
++	m_bUsesReportIDs = FALSE;
++}
++
++boolean CUSBMouseReportParser::Parse (const u8 *pDescriptor, unsigned nDescriptorSize)
++{
++	Reset ();
++
++	if (   pDescriptor == 0
++	    || nDescriptorSize == 0
++	    || nDescriptorSize > MaxDescriptorSize)
++	{
++		return FALSE;
++	}
++
++	u32 InputBits[MaxReportIDs];
++	u8 InputSeen[MaxReportIDs];
++	u8 MouseReportIDs[MaxReportIDs];
++	boolean bUsesReportIDs = FALSE;
++
++	if (!ParsePass (pDescriptor, nDescriptorSize, FALSE, InputBits, InputSeen,
++			MouseReportIDs, &bUsesReportIDs))
++	{
++		return FALSE;
++	}
++
++	unsigned nLayoutCount = 0;
++	for (unsigned nID = 0; nID < MaxReportIDs; nID++)
++	{
++		if (InputSeen[nID])
++		{
++			unsigned nByteSize = (InputBits[nID] + 7) / 8;
++			if (bUsesReportIDs)
++			{
++				nByteSize++;
++			}
++
++			if (   nByteSize == 0
++			    || nByteSize > MaxInputReportSize)
++			{
++				return FALSE;
++			}
++
++			if (nByteSize > m_nMaxInputReportSize)
++			{
++				m_nMaxInputReportSize = nByteSize;
++			}
++		}
++
++		if (MouseReportIDs[nID])
++		{
++			nLayoutCount++;
++		}
++	}
++
++	if (nLayoutCount == 0 || m_nMaxInputReportSize == 0)
++	{
++		Reset ();
++		return FALSE;
++	}
++
++	m_pLayouts = new TReportLayout[nLayoutCount];
++	if (m_pLayouts == 0)
++	{
++		Reset ();
++		return FALSE;
++	}
++	memset (m_pLayouts, 0, sizeof (TReportLayout) * nLayoutCount);
++	m_nLayoutCount = nLayoutCount;
++	m_bUsesReportIDs = bUsesReportIDs;
++
++	unsigned nLayout = 0;
++	for (unsigned nID = 0; nID < MaxReportIDs; nID++)
++	{
++		if (!MouseReportIDs[nID])
++		{
++			continue;
++		}
++
++		m_pLayouts[nLayout].ReportID = (u8) nID;
++		m_pLayouts[nLayout].ByteSize = (InputBits[nID] + 7) / 8
++						    + (bUsesReportIDs ? 1 : 0);
++		nLayout++;
++	}
++
++	u32 VerifyInputBits[MaxReportIDs];
++	u8 VerifyInputSeen[MaxReportIDs];
++	u8 VerifyMouseReportIDs[MaxReportIDs];
++	boolean bVerifyUsesReportIDs = FALSE;
++	if (!ParsePass (pDescriptor, nDescriptorSize, TRUE, VerifyInputBits, VerifyInputSeen,
++			VerifyMouseReportIDs, &bVerifyUsesReportIDs))
++	{
++		Reset ();
++		return FALSE;
++	}
++
++	if (   bVerifyUsesReportIDs != m_bUsesReportIDs
++	    || memcmp (InputBits, VerifyInputBits, sizeof InputBits) != 0
++	    || memcmp (InputSeen, VerifyInputSeen, sizeof InputSeen) != 0
++	    || memcmp (MouseReportIDs, VerifyMouseReportIDs, sizeof MouseReportIDs) != 0)
++	{
++		Reset ();
++		return FALSE;
++	}
++
++	boolean bHasX = FALSE;
++	boolean bHasY = FALSE;
++	for (unsigned i = 0; i < m_nLayoutCount; i++)
++	{
++		TReportLayout *pLayout = &m_pLayouts[i];
++		for (unsigned nButton = 0; nButton < MaxButtons; nButton++)
++		{
++			if (pLayout->Button[nButton].Present && m_nButtonCount < nButton + 1)
++			{
++				m_nButtonCount = nButton + 1;
++			}
++		}
++
++		bHasX |= pLayout->X.Present && pLayout->X.Relative;
++		bHasY |= pLayout->Y.Present && pLayout->Y.Relative;
++		m_bHasWheel |= pLayout->Wheel.Present && pLayout->Wheel.Relative;
++	}
++
++	if (!bHasX || !bHasY)
++	{
++		Reset ();
++		return FALSE;
++	}
++
++	return TRUE;
++}
++
++boolean CUSBMouseReportParser::ParsePass (const u8 *pDescriptor, unsigned nDescriptorSize,
++					 boolean bStoreLayouts, u32 *pInputBits,
++					 u8 *pInputSeen, u8 *pMouseReportIDs,
++					 boolean *pUsesReportIDs)
++{
++	memset (pInputBits, 0, sizeof (u32) * MaxReportIDs);
++	memset (pInputSeen, 0, sizeof (u8) * MaxReportIDs);
++	memset (pMouseReportIDs, 0, sizeof (u8) * MaxReportIDs);
++	*pUsesReportIDs = FALSE;
++
++	TGlobalState Global;
++	memset (&Global, 0, sizeof Global);
++	TGlobalState GlobalStack[MaxGlobalStackDepth];
++	unsigned nGlobalStackDepth = 0;
++
++	TLocalState Local;
++	ResetLocalState (&Local);
++
++	TCollectionState Collection[MaxCollectionDepth];
++	unsigned nCollectionDepth = 0;
++	boolean bNumberedInputSeen = FALSE;
++	boolean bUnnumberedInputSeen = FALSE;
++
++	while (nDescriptorSize > 0)
++	{
++		u8 uchPrefix = *pDescriptor++;
++		nDescriptorSize--;
++
++		if (uchPrefix == HIDItemLong)
++		{
++			if (nDescriptorSize < 2)
++			{
++				return FALSE;
++			}
++
++			unsigned nLongSize = pDescriptor[0];
++			pDescriptor += 2;       // data size and long item tag
++			nDescriptorSize -= 2;
++			if (nLongSize > nDescriptorSize)
++			{
++				return FALSE;
++			}
++
++			pDescriptor += nLongSize;
++			nDescriptorSize -= nLongSize;
++			continue;
++		}
++
++		unsigned nSizeCode = uchPrefix & 0x03;
++		unsigned nItemSize = nSizeCode == 3 ? 4 : nSizeCode;
++		if (nItemSize > nDescriptorSize)
++		{
++			return FALSE;
++		}
++
++		u32 nValue = 0;
++		for (unsigned i = 0; i < nItemSize; i++)
++		{
++			nValue |= (u32) pDescriptor[i] << (i * 8);
++		}
++		pDescriptor += nItemSize;
++		nDescriptorSize -= nItemSize;
++
++		unsigned nType = (uchPrefix >> 2) & 0x03;
++		unsigned nTag = (uchPrefix >> 4) & 0x0F;
++
++		if (nType == HIDTypeGlobal)
++		{
++			switch (nTag)
++			{
++			case HIDGlobalUsagePage:
++				Global.UsagePage = nValue;
++				break;
++
++			case HIDGlobalReportSize:
++				if (nValue > 256)
++				{
++					return FALSE;
++				}
++				Global.ReportSize = nValue;
++				break;
++
++			case HIDGlobalReportID:
++				if (nValue == 0 || nValue >= MaxReportIDs)
++				{
++					return FALSE;
++				}
++				Global.ReportID = (u8) nValue;
++				break;
++
++			case HIDGlobalReportCount:
++				if (nValue > MaxInputReportSize * 8)
++				{
++					return FALSE;
++				}
++				Global.ReportCount = nValue;
++				break;
++
++			case HIDGlobalPush:
++				if (nGlobalStackDepth >= MaxGlobalStackDepth)
++				{
++					return FALSE;
++				}
++				GlobalStack[nGlobalStackDepth++] = Global;
++				break;
++
++			case HIDGlobalPop:
++				if (nGlobalStackDepth == 0)
++				{
++					return FALSE;
++				}
++				Global = GlobalStack[--nGlobalStackDepth];
++				break;
++
++			case 1:     // Logical Minimum
++			case 2:     // Logical Maximum
++			case 3:     // Physical Minimum
++			case 4:     // Physical Maximum
++			case 5:     // Unit Exponent
++			case 6:     // Unit
++				break;
++
++			default:
++				return FALSE;
++			}
++
++			continue;
++		}
++
++		if (nType == HIDTypeLocal)
++		{
++			switch (nTag)
++			{
++			case HIDLocalUsage:
++				if (!AddLocalUsage (&Local, nValue, (u8) nItemSize))
++				{
++					return FALSE;
++				}
++				break;
++
++			case HIDLocalUsageMinimum:
++				Local.UsageMinimum.Value = nValue;
++				Local.UsageMinimum.Size = (u8) nItemSize;
++				Local.HasUsageMinimum = TRUE;
++				break;
++
++			case HIDLocalUsageMaximum:
++				if (!AddUsageRange (&Local, nValue, (u8) nItemSize, Global.UsagePage))
++				{
++					return FALSE;
++				}
++				break;
++
++			case HIDLocalDelimiter:
++				if (nValue != 0)
++				{
++					if (Local.DelimiterDepth != 0)
++					{
++						return FALSE;
++					}
++					Local.DelimiterDepth++;
++					Local.DelimiterBranch++;
++				}
++				else
++				{
++					if (Local.DelimiterDepth == 0)
++					{
++						return FALSE;
++					}
++					Local.DelimiterDepth--;
++				}
++				break;
++
++			default:
++				break;
++			}
++
++			continue;
++		}
++
++		if (nType != HIDTypeMain)
++		{
++			continue;
++		}
++
++		boolean bMouseApplication = nCollectionDepth > 0
++					    ? Collection[nCollectionDepth-1].MouseApplication
++					    : FALSE;
++
++		switch (nTag)
++		{
++		case HIDMainCollection:
++			if (   nCollectionDepth >= MaxCollectionDepth
++			    || Local.DelimiterDepth != 0)
++			{
++				return FALSE;
++			}
++
++			if (nValue == HIDCollectionApplication)
++			{
++				u32 nUsage = GetLocalUsage (Local, 0, Global.UsagePage);
++				bMouseApplication = nUsage
++					== ((u32) HIDUsagePageGenericDesktop << 16 | HIDUsageMouse);
++			}
++
++			Collection[nCollectionDepth++].MouseApplication = bMouseApplication;
++			break;
++
++		case HIDMainEndCollection:
++			if (nCollectionDepth == 0)
++			{
++				return FALSE;
++			}
++			nCollectionDepth--;
++			break;
++
++		case HIDMainInput:
++		{
++			u8 uchReportID = Global.ReportID;
++			if (uchReportID != 0)
++			{
++				bNumberedInputSeen = TRUE;
++			}
++			else
++			{
++				bUnnumberedInputSeen = TRUE;
++			}
++			if (bNumberedInputSeen && bUnnumberedInputSeen)
++			{
++				return FALSE;
++			}
++
++			u64 nFieldBits = (u64) Global.ReportSize * Global.ReportCount;
++			if (   nFieldBits > MaxInputReportSize * 8
++			    || pInputBits[uchReportID] > MaxInputReportSize * 8 - nFieldBits)
++			{
++				return FALSE;
++			}
++
++			pInputSeen[uchReportID] = 1;
++			boolean bVariableData = !(nValue & HIDInputConstant)
++						&& (nValue & HIDInputVariable);
++			if (bMouseApplication && bVariableData)
++			{
++				if (Local.UsageOverflow)
++				{
++					return FALSE;
++				}
++
++				unsigned nPrefixBits = uchReportID != 0 ? 8 : 0;
++				for (u32 i = 0; i < Global.ReportCount; i++)
++				{
++					u32 nUsage = GetLocalUsage (Local, i, Global.UsagePage);
++					u32 nUsagePage = nUsage >> 16;
++					u32 nUsageID = nUsage & 0xFFFF;
++					boolean bSupported = FALSE;
++					if (   nUsagePage == HIDUsagePageButton
++					    && nUsageID >= 1 && nUsageID <= MaxButtons)
++					{
++						bSupported = TRUE;
++					}
++					else if (   nUsagePage == HIDUsagePageGenericDesktop
++						 && (   nUsageID == HIDUsageX
++						     || nUsageID == HIDUsageY
++						     || nUsageID == HIDUsageWheel))
++					{
++						bSupported = TRUE;
++					}
++
++					if (!bSupported)
++					{
++						continue;
++					}
++
++					if (Global.ReportSize == 0 || Global.ReportSize > 32)
++					{
++						return FALSE;
++					}
++
++					pMouseReportIDs[uchReportID] = 1;
++					if (!bStoreLayouts)
++					{
++						continue;
++					}
++
++					TReportLayout *pLayout = FindLayout (uchReportID);
++					if (pLayout == 0)
++					{
++						return FALSE;
++					}
++
++					TReportItem *pItem = 0;
++					if (nUsagePage == HIDUsagePageButton)
++					{
++						pItem = &pLayout->Button[nUsageID - 1];
++					}
++					else if (nUsageID == HIDUsageX)
++					{
++						pItem = &pLayout->X;
++					}
++					else if (nUsageID == HIDUsageY)
++					{
++						pItem = &pLayout->Y;
++					}
++					else if (nUsageID == HIDUsageWheel)
++					{
++						pItem = &pLayout->Wheel;
++					}
++
++					if (pItem != 0 && !pItem->Present)
++					{
++						pItem->BitOffset = pInputBits[uchReportID] + nPrefixBits
++								 + i * Global.ReportSize;
++						pItem->BitSize = Global.ReportSize;
++						pItem->Present = TRUE;
++						pItem->Relative = (nValue & HIDInputRelative) != 0;
++					}
++				}
++			}
++
++			pInputBits[uchReportID] += (u32) nFieldBits;
++			break;
++		}
++
++		case HIDMainOutput:
++		case HIDMainFeature:
++			break;
++
++		default:
++			break;
++		}
++
++		ResetLocalState (&Local);
++	}
++
++	if (   nCollectionDepth != 0
++	    || nGlobalStackDepth != 0
++	    || Local.DelimiterDepth != 0)
++	{
++		return FALSE;
++	}
++
++	*pUsesReportIDs = bNumberedInputSeen;
++	return TRUE;
++}
++
++CUSBMouseReportParser::TReportLayout *CUSBMouseReportParser::FindLayout (u8 uchReportID)
++{
++	for (unsigned i = 0; i < m_nLayoutCount; i++)
++	{
++		if (m_pLayouts[i].ReportID == uchReportID)
++		{
++			return &m_pLayouts[i];
++		}
++	}
++
++	return 0;
++}
++
++const CUSBMouseReportParser::TReportLayout *CUSBMouseReportParser::FindLayout (u8 uchReportID) const
++{
++	for (unsigned i = 0; i < m_nLayoutCount; i++)
++	{
++		if (m_pLayouts[i].ReportID == uchReportID)
++		{
++			return &m_pLayouts[i];
++		}
++	}
++
++	return 0;
++}
++
++boolean CUSBMouseReportParser::Decode (const u8 *pReport, unsigned nReportSize,
++				      TUSBMouseReportData *pData)
++{
++	if (pReport == 0 || pData == 0 || nReportSize == 0)
++	{
++		return FALSE;
++	}
++
++	u8 uchReportID = m_bUsesReportIDs ? pReport[0] : 0;
++	const TReportLayout *pLayout = FindLayout (uchReportID);
++	if (pLayout == 0 || nReportSize != pLayout->ByteSize)
++	{
++		return FALSE;
++	}
++
++	pData->X = 0;
++	pData->Y = 0;
++	pData->Wheel = 0;
++
++	for (unsigned nButton = 0; nButton < MaxButtons; nButton++)
++	{
++		const TReportItem &Item = pLayout->Button[nButton];
++		if (!Item.Present)
++		{
++			continue;
++		}
++
++		unsigned nMask = 1 << nButton;
++		if (ExtractUnsigned (pReport, Item.BitOffset, Item.BitSize) != 0)
++		{
++			m_nButtonState |= nMask;
++		}
++		else
++		{
++			m_nButtonState &= ~nMask;
++		}
++	}
++
++	if (pLayout->X.Present && pLayout->X.Relative)
++	{
++		pData->X = ExtractSigned (pReport, pLayout->X.BitOffset, pLayout->X.BitSize);
++	}
++	if (pLayout->Y.Present && pLayout->Y.Relative)
++	{
++		pData->Y = ExtractSigned (pReport, pLayout->Y.BitOffset, pLayout->Y.BitSize);
++	}
++	if (pLayout->Wheel.Present && pLayout->Wheel.Relative)
++	{
++		pData->Wheel = ExtractSigned (pReport, pLayout->Wheel.BitOffset,
++					      pLayout->Wheel.BitSize);
++	}
++
++	pData->Buttons = m_nButtonState;
++	return TRUE;
++}
++
++u32 CUSBMouseReportParser::ExtractUnsigned (const u8 *pBuffer, unsigned nBitOffset,
++					    unsigned nBitSize)
++{
++	if (nBitSize == 0 || nBitSize > 32)
++	{
++		return 0;
++	}
++
++	u32 nResult = 0;
++	for (unsigned i = 0; i < nBitSize; i++)
++	{
++		unsigned nSourceBit = nBitOffset + i;
++		if (pBuffer[nSourceBit / 8] & (1 << (nSourceBit % 8)))
++		{
++			nResult |= (u32) 1 << i;
++		}
++	}
++
++	return nResult;
++}
++
++s32 CUSBMouseReportParser::ExtractSigned (const u8 *pBuffer, unsigned nBitOffset,
++					 unsigned nBitSize)
++{
++	u32 nResult = ExtractUnsigned (pBuffer, nBitOffset, nBitSize);
++	if (nBitSize == 0 || nBitSize >= 32)
++	{
++		return (s32) nResult;
++	}
++
++	u32 nSign = (u32) 1 << (nBitSize - 1);
++	if (nResult & nSign)
++	{
++		nResult |= ~((nSign << 1) - 1);
++	}
++
++	return (s32) nResult;
++}
++
++unsigned CUSBMouseReportParser::GetMaxInputReportSize (void) const
++{
++	return m_nMaxInputReportSize;
++}
++
++unsigned CUSBMouseReportParser::GetButtonCount (void) const
++{
++	return m_nButtonCount;
++}
++
++boolean CUSBMouseReportParser::HasWheel (void) const
++{
++	return m_bHasWheel;
++}
++
++boolean CUSBMouseReportParser::UsesReportIDs (void) const
++{
++	return m_bUsesReportIDs;
++}

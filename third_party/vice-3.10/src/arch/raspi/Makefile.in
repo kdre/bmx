@@ -112,7 +112,8 @@ libarch_a_LIBADD =
 am_libarch_a_OBJECTS = archdep.$(OBJEXT) archdep_chdir.$(OBJEXT) \
 	archdep_current_dir.$(OBJEXT) archdep_dir.$(OBJEXT) \
 	archdep_getcwd.$(OBJEXT) archdep_mkdir.$(OBJEXT) \
-	archdep_rmdir.$(OBJEXT) mousedrv.$(OBJEXT) missing.$(OBJEXT) \
+	archdep_rmdir.$(OBJEXT) mousedrv.$(OBJEXT) bmx_palette.$(OBJEXT) \
+	missing.$(OBJEXT) \
 	videoarch.$(OBJEXT) \
 	vice_menu_cart_osd.$(OBJEXT) vice_overlay.$(OBJEXT) \
 	vice_api.$(OBJEXT)
@@ -482,6 +483,8 @@ libarch_a_SOURCES = \
 	../shared/archdep_rmdir.c \
 	mousedrv.h \
 	mousedrv.c \
+	bmx_palette.h \
+	bmx_palette.c \
 	missing.c \
 	videoarch.h \
 	videoarch.c \
@@ -544,6 +547,7 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/archdep_getcwd.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/archdep_mkdir.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/archdep_rmdir.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/bmx_palette.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/missing.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mousedrv.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/vice_api.Po@am__quote@

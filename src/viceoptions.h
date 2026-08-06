@@ -16,6 +16,7 @@
 #ifndef _vice_options_h
 #define _vice_options_h
 
+#include "developer_settings.h"
 #include "sound_types.h"
 #include <circle/bcmpropertytags.h>
 #include <circle/cputhrottle.h>
@@ -29,6 +30,7 @@
 #define NETWORK_WIFI_SSID_LEN 64
 #define NETWORK_WIFI_PSK_LEN 64
 #define NETWORK_WIFI_COUNTRY_LEN 3
+#define DEVELOPER_PASSWORD_LEN (BMX_DEVELOPER_PASSWORD_MAX_LEN + 1U)
 
 enum TBmxNetworkAdapter {
   BMX_NETWORK_OFF = 0,
@@ -65,6 +67,9 @@ public:
   bool DemoEnabled(void) const;
   bool SerialEnabled(void) const;
   bool GPIOOutputsEnabled(void) const;
+  bool DeveloperModeEnabled(void) const;
+  const char *GetDeveloperPassword(void) const;
+  unsigned GetDeveloperLogBufferKB(void) const;
   const char *GetDiskVolume(void) const;
   unsigned long GetCyclesPerSecond(void) const;
   TVCHIQSoundDestination GetAudioOut(void) const;
@@ -124,6 +129,9 @@ private:
   bool m_bDemoEnabled;
   bool m_bSerialEnabled;
   bool m_bGPIOOutputsEnabled;
+  bool m_bDeveloperModeEnabled;
+  char m_developerPassword[DEVELOPER_PASSWORD_LEN];
+  unsigned m_developerLogBufferKB;
   char m_disk_volume[VOLUME_NAME_LEN];
   unsigned long m_nCyclesPerSecond;
   TVCHIQSoundDestination m_audioOut;

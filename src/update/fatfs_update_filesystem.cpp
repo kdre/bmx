@@ -45,12 +45,17 @@ bool NormalizeVolume(const char *volume, char output[20U])
     return true;
 }
 
-bool ValidateRelativePath(const char *path, size_t *length)
+bool ValidateRelativePath(const char *path, size_t *length,
+                          FatFsUpdatePathPolicy policy)
 {
-    if (length == 0 ||
-        ValidateFatRelativePath(
-            path, kFatFsUpdateFileSystemRelativePathBytes) !=
-            FatPathValidationStatus::Ok) {
+    if (length == 0) return false;
+    const FatPathValidationStatus status =
+        policy == FatFsUpdatePathPolicy::Developer
+            ? ValidateDeveloperFatRelativePath(
+                  path, kFatFsUpdateFileSystemRelativePathBytes)
+            : ValidateFatRelativePath(
+                  path, kFatFsUpdateFileSystemRelativePathBytes);
+    if (status != FatPathValidationStatus::Ok) {
         return false;
     }
     *length = strlen(path);
@@ -329,9 +334,11 @@ bool FatFsUpdateFileSystem::WriteHandle::Write(ByteView bytes)
 #endif
 }
 
-bool FatFsUpdateFileSystem::WriteHandle::Sync()
+bool FatFsUpdateFileSystem::WriteHandle::Sync(
+    UpdateCooperativeYield yield, void *yield_context)
 {
-    return open_ && owner_ != 0 && owner_->VerifySyncedWrite(*this);
+    return open_ && owner_ != 0 &&
+           owner_->VerifySyncedWrite(*this, yield, yield_context);
 }
 
 bool FatFsUpdateFileSystem::WriteHandle::Close()
@@ -351,9 +358,10 @@ bool FatFsUpdateFileSystem::WriteHandle::Close()
     return ok;
 }
 
-FatFsUpdateFileSystem::FatFsUpdateFileSystem(const char *volume)
-    : configured_(false), volume_root_(), read_handles_(), write_handles_(),
-      verify_buffer_()
+FatFsUpdateFileSystem::FatFsUpdateFileSystem(
+    const char *volume, FatFsUpdatePathPolicy path_policy)
+    : configured_(false), path_policy_(path_policy), volume_root_(),
+      read_handles_(), write_handles_(), verify_buffer_()
 {
     (void)Configure(volume);
 }
@@ -405,7 +413,9 @@ bool FatFsUpdateFileSystem::Resolve(const char *relative_path,
     if (!configured_ || absolute_path == 0 || capacity == 0U) return false;
     absolute_path[0] = '\0';
     size_t relative_size = 0U;
-    if (!ValidateRelativePath(relative_path, &relative_size)) return false;
+    if (!ValidateRelativePath(relative_path, &relative_size, path_policy_)) {
+        return false;
+    }
     const size_t root_size = strlen(volume_root_);
     if (root_size > SIZE_MAX - relative_size ||
         root_size + relative_size >= capacity) {
@@ -608,7 +618,9 @@ bool FatFsUpdateFileSystem::GetVolumeSize(uint64_t *bytes)
 #endif
 }
 
-bool FatFsUpdateFileSystem::VerifySyncedWrite(WriteHandle &handle)
+bool FatFsUpdateFileSystem::VerifySyncedWrite(
+    WriteHandle &handle, UpdateCooperativeYield yield,
+    void *yield_context)
 {
     if (!configured_ || !handle.open_ || handle.owner_ != this) return false;
 #if BMX_UPDATE_FILESYSTEM_HAS_FATFS
@@ -646,6 +658,7 @@ bool FatFsUpdateFileSystem::VerifySyncedWrite(WriteHandle &handle)
         ok = ReadExact(&verification, verify_buffer_, count) &&
              actual_hash.Update(verify_buffer_, count);
         remaining -= count;
+        if (ok && yield != 0) yield(yield_context);
     }
     uint8_t extra = 0U;
     UINT extra_size = 0U;

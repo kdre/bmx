@@ -524,7 +524,8 @@ bool IsKnownConfigManagedKey(const Slice &key)
         "kernel", "disable_overscan", "sdtv_mode", "hdmi_group",
         "hdmi_group:0", "hdmi_mode", "hdmi_mode:0", "hdmi_timings",
         "hdmi_cvt", "enable_dpi_lcd", "display_default_lcd", "dpi_group",
-        "dpi_mode", "dpi_timings", "dpi_output_format"
+        "dpi_mode", "dpi_timings", "dpi_output_format", "arm_freq",
+        "core_freq", "v3d_freq", "over_voltage_delta", "temp_limit"
     };
     for (size_t i = 0U; i < sizeof(keys) / sizeof(keys[0]); ++i) {
         if (SliceEquals(key, keys[i])) return true;

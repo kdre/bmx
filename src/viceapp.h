@@ -47,6 +47,11 @@
 #include <string.h>
 
 #include "network/network_manager.h"
+#include "remote/circle_usb_diagnostic_adapter.h"
+#include "remote/developer_log_device.h"
+#include "remote/developer_log_ring.h"
+#include "remote/developer_usb_diagnostic.h"
+#include "remote/remote_service.h"
 #include "update/update_service.h"
 #include "viceemulatorcore.h"
 
@@ -217,9 +222,40 @@ public:
         // BMC64 diagnostics use GPIO14/15 on the 40-pin header instead.
         , mSerial(0, FALSE, 0)
 #endif
-        {}
+        , mDeveloperLogRing(nullptr), mDeveloperLogDevice(nullptr)
+        {
+          if (mViceOptions.DeveloperModeEnabled()) {
+            const size_t log_capacity =
+                static_cast<size_t>(mViceOptions.GetDeveloperLogBufferKB()) *
+                1024U;
+            mDeveloperLogRing =
+                new bmx::remote::DeveloperLogRing(log_capacity);
+            if (mDeveloperLogRing != nullptr && mDeveloperLogRing->valid()) {
+              CDevice *target = mViceOptions.SerialEnabled()
+                                    ? static_cast<CDevice *>(&mSerial)
+                                    : static_cast<CDevice *>(&mNullDevice);
+              mDeveloperLogDevice = new bmx::remote::DeveloperLogDevice(
+                  target, mDeveloperLogRing);
+            }
+            if (mDeveloperLogRing != nullptr && mDeveloperLogRing->valid() &&
+                mDeveloperLogDevice != nullptr) {
+              bmx::remote::SetDeveloperLogRing(mDeveloperLogRing);
+            } else {
+              delete mDeveloperLogDevice;
+              delete mDeveloperLogRing;
+              mDeveloperLogDevice = nullptr;
+              mDeveloperLogRing = nullptr;
+            }
+          }
+        }
 
-  virtual ~ViceApp(void) {}
+  virtual ~ViceApp(void) {
+    if (bmx::remote::GetDeveloperLogRing() == mDeveloperLogRing) {
+      bmx::remote::SetDeveloperLogRing(nullptr);
+    }
+    delete mDeveloperLogDevice;
+    delete mDeveloperLogRing;
+  }
 
   virtual bool Initialize(void);
   virtual void Cleanup(void) {}
@@ -242,6 +278,8 @@ protected:
   CNullDevice mNullDevice;
   CExceptionHandler mExceptionHandler;
   CInterruptSystem mInterrupt;
+  bmx::remote::DeveloperLogRing *mDeveloperLogRing;
+  bmx::remote::DeveloperLogDevice *mDeveloperLogDevice;
 };
 
 class ViceScreenApp : public ViceApp {
@@ -304,7 +342,8 @@ class ViceStdioApp : public ViceScreenApp {
 public:
   ViceStdioApp(const char *kernel)
       : ViceScreenApp(kernel), mUSBHCII(&mInterrupt, &mTimer, TRUE),
-        mEMMC(&mInterrupt, &mTimer, &mActLED)
+        mEMMC(&mInterrupt, &mTimer, &mActLED), mRemoteService(nullptr),
+        mDeveloperUsbDiagnostic(nullptr), mCircleUsbDiagnosticAdapter(nullptr)
         {}
 
   virtual bool Initialize(void);
@@ -340,11 +379,18 @@ protected:
   bool mSYSFileSystemMounted = false;
   bool mSDFileSystemMounted = false;
   bool mUSBFileSystemMounted[3] = {false, false, false};
+  bmx::remote::RemoteService *mRemoteService;
+  bmx::remote::DeveloperUsbDiagnostic *mDeveloperUsbDiagnostic;
+  bmx::remote::CircleUsbDiagnosticAdapter *mCircleUsbDiagnosticAdapter;
 
   int mBootStatWhat[MAX_BOOTSTAT_LINES];
   char *mBootStatFile[MAX_BOOTSTAT_LINES];
   int mBootStatSize[MAX_BOOTSTAT_LINES];
   char mTimingOption[8];
+
+protected:
+  void StartDeveloperService(void);
+  void StopDeveloperService(void);
 };
 
 #endif

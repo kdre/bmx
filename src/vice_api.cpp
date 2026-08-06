@@ -33,6 +33,18 @@ const char *Basename(const char *path) {
   return last_slash == nullptr ? path : last_slash + 1;
 }
 
+bool HasSavedViceSettings() {
+  const char *paths[] = {"/vicerc", "/vice.ini"};
+  for (const char *path : paths) {
+    FILE *file = std::fopen(path, "rb");
+    if (file != nullptr) {
+      std::fclose(file);
+      return true;
+    }
+  }
+  return false;
+}
+
 const char *Rs232InterfaceKey(TBmxRs232Interface interface) {
   switch (interface) {
     case BMX_RS232_INTERFACE_UP9600:
@@ -115,7 +127,7 @@ void RunMainProgram(const char *timing_option,
   rs232net_load_phonebook(options->GetRs232NetMode() == BMX_RS232_MODE_HAYES
                               ? options->GetRs232NetPhonebook()
                               : nullptr);
-  if (machine.default_keymap != nullptr) {
+  if (machine.default_keymap != nullptr && !HasSavedViceSettings()) {
     argv[argc++] = (char *)"-keymap";
     argv[argc++] = (char *)"3";
     argv[argc++] = (char *)"-poskeymap";
@@ -246,3 +258,30 @@ void RunMainProgram(const char *timing_option,
 }
 
 }  // namespace bmc64::vice
+
+extern "C" int emux_developer_mode_enabled(void) {
+  ViceOptions *options = ViceOptions::Get();
+  return options != nullptr && options->DeveloperModeEnabled() ? 1 : 0;
+}
+
+extern "C" int emux_get_developer_password(char *password,
+                                             unsigned password_size) {
+  ViceOptions *options = ViceOptions::Get();
+  if (password == nullptr || password_size == 0 || options == nullptr) {
+    return 0;
+  }
+  const char *configured = options->GetDeveloperPassword();
+  const size_t size = std::strlen(configured);
+  if (size >= password_size) {
+    password[0] = '\0';
+    return 0;
+  }
+  std::memcpy(password, configured, size + 1);
+  return 1;
+}
+
+extern "C" unsigned emux_get_developer_log_buffer_kb(void) {
+  ViceOptions *options = ViceOptions::Get();
+  return options != nullptr ? options->GetDeveloperLogBufferKB()
+                            : BMX_DEVELOPER_LOG_BUFFER_DEFAULT_KB;
+}

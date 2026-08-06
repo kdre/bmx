@@ -28,6 +28,7 @@
 
 #include <math.h>
 #include <assert.h>
+#include <limits.h>
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -111,6 +112,13 @@ extern void poweroff(void);
 #define NETWORK_REBOOT_MSG "Network changes require reboot.\n" \
                            "Save and reboot now?"
 
+#define OVERCLOCK_RECOVERY_MSG \
+    "If the next boot fails, remove arm_freq, core_freq, v3d_freq, " \
+    "over_voltage_delta and temp_limit from the BMX-managed block in " \
+    "config.txt using another computer."
+
+#define BMX_OVERCLOCK_AUTO_CHOICE INT_MIN
+
 typedef enum {
   MACHINE_EMULATOR_X64,
   MACHINE_EMULATOR_X64SC,
@@ -137,12 +145,34 @@ static struct menu_item *machine_standard_item;
 static struct menu_item *machine_output_item;
 static struct menu_item *machine_mode_item;
 
+static struct bmx_overclock_config overclock_state;
+static struct bmx_overclock_config overclock_saved_state;
+static int overclock_load_status = BMX_OVERCLOCK_READ_INVALID;
+static struct menu_item *overclock_folder_item;
+static struct menu_item *overclock_status_item;
+static struct menu_item *overclock_arm_item;
+static struct menu_item *overclock_voltage_item;
+static struct menu_item *overclock_temp_item;
+static struct menu_item *overclock_core_item;
+static struct menu_item *overclock_v3d_item;
+static struct menu_item *overclock_current_arm_item;
+static struct menu_item *overclock_current_temp_item;
+static struct menu_item *overclock_restore_item;
+static struct menu_item *overclock_apply_item;
+
 static int machine_change_pending(void);
 static const struct bmx_machine *machine_selected_machine(void);
 static const struct bmx_machine_mode *machine_selected_mode(void);
 static BMC64C64Core machine_selected_c64_core(void);
 static void machine_target_description(char *message, size_t message_size);
 static void machine_selection_changed(struct menu_item *item);
+static int machine_supports_mouse_type(void);
+static int overclock_change_pending(void);
+static void overclock_menu_changed(struct menu_item *item);
+static void overclock_restore_defaults(void);
+static void show_overclock_config_error(void);
+static void build_overclock_menu(struct menu_item *parent);
+static void refresh_overclock_diagnostics(void);
 
 // For filename filters
 typedef enum {
@@ -182,6 +212,17 @@ static int default_disk_drive = 8;
 // Lower byte is BTN_ASSIGN_ constant. Upper byte is port or other arg.
 unsigned int gpio_bindings[NUM_GPIO_PINS];
 
+static int gpio_userport_config_available(void) {
+  return circle_gpio_outputs_enabled() &&
+         emux_machine_class != BMC64_MACHINE_CLASS_PLUS4EMU &&
+         emux_machine_class != BMC64_MACHINE_CLASS_PLUS4;
+}
+
+static int gpio_userport_machine_supported(void) {
+  return emux_machine_class != BMC64_MACHINE_CLASS_PLUS4EMU &&
+         emux_machine_class != BMC64_MACHINE_CLASS_PLUS4;
+}
+
 struct menu_item *drive_sounds_item;
 struct menu_item *drive_sounds_vol_item;
 struct menu_item *hotkey_cf1_item;
@@ -204,6 +245,69 @@ static char current_usb_audio_product[BMX_USB_PRODUCT_STRING_SIZE];
 static char detected_keyboard_product[MAX_USB_DEVICES]
                                      [BMX_USB_PRODUCT_STRING_SIZE];
 static char detected_mouse_product[BMX_USB_PRODUCT_STRING_SIZE];
+
+#define KEYBOARD_MONITOR_REPORT_KEYS 6
+
+static unsigned keyboard_monitor_enabled;
+static unsigned char keyboard_monitor_report_modifiers[MAX_USB_DEVICES];
+static unsigned char keyboard_monitor_report_keys[MAX_USB_DEVICES]
+                                                 [KEYBOARD_MONITOR_REPORT_KEYS];
+static unsigned char keyboard_monitor_held_modifiers[MAX_USB_DEVICES];
+static unsigned char keyboard_monitor_held_keys[MAX_USB_DEVICES]
+                                               [KEYBOARD_MONITOR_REPORT_KEYS];
+static int keyboard_monitor_last_device;
+static int keyboard_monitor_last_hid_usage;
+static long keyboard_monitor_last_keycode;
+static int keyboard_monitor_last_pressed;
+static unsigned char keyboard_monitor_last_modifiers;
+
+static struct menu_item *keyboard_monitor_device_item;
+static struct menu_item *keyboard_monitor_event_item;
+static struct menu_item *keyboard_monitor_usage_item;
+static struct menu_item *keyboard_monitor_token_item;
+static struct menu_item *keyboard_monitor_modifiers_item;
+static struct menu_item *keyboard_monitor_held_item;
+static struct menu_item *keyboard_monitor_report_item;
+static struct menu_item *keyboard_monitor_file_item;
+static struct menu_item *keyboard_monitor_mapping_item;
+static struct menu_item *keyboard_monitor_target_item;
+
+enum mouse_monitor_capability {
+  MOUSE_MONITOR_MOVEMENT = 1U << 0,
+  MOUSE_MONITOR_LEFT = 1U << 1,
+  MOUSE_MONITOR_RIGHT = 1U << 2,
+  MOUSE_MONITOR_MIDDLE = 1U << 3,
+  MOUSE_MONITOR_WHEEL = 1U << 4,
+};
+
+static BmxMouseType selected_mouse_type = BMX_MOUSE_TYPE_DEFAULT;
+static unsigned mouse_monitor_enabled;
+static unsigned mouse_monitor_capabilities;
+static int mouse_monitor_delta_x;
+static int mouse_monitor_delta_y;
+static int mouse_monitor_total_x;
+static int mouse_monitor_total_y;
+static int mouse_monitor_left;
+static int mouse_monitor_right;
+static int mouse_monitor_middle;
+static int mouse_monitor_left_presses;
+static int mouse_monitor_right_presses;
+static int mouse_monitor_middle_presses;
+static int mouse_monitor_wheel_delta;
+static int mouse_monitor_wheel_total;
+
+static struct menu_item *mouse_monitor_delta_x_item;
+static struct menu_item *mouse_monitor_delta_y_item;
+static struct menu_item *mouse_monitor_total_x_item;
+static struct menu_item *mouse_monitor_total_y_item;
+static struct menu_item *mouse_monitor_left_item;
+static struct menu_item *mouse_monitor_right_item;
+static struct menu_item *mouse_monitor_middle_item;
+static struct menu_item *mouse_monitor_left_presses_item;
+static struct menu_item *mouse_monitor_right_presses_item;
+static struct menu_item *mouse_monitor_middle_presses_item;
+static struct menu_item *mouse_monitor_wheel_delta_item;
+static struct menu_item *mouse_monitor_wheel_total_item;
 struct menu_item *statusbar_item;
 struct menu_item *diagnostics_overlay_item;
 struct menu_item *statusbar_padding_item;
@@ -240,6 +344,7 @@ struct menu_item *saturation_item[2];
 struct menu_item *warp_item;
 struct menu_item *reset_confirm_item;
 struct menu_item *gpio_config_item;
+static struct menu_item *gpio_outputs_item;
 struct menu_item *active_display_item;
 
 struct menu_item *use_scaling_params_item[2];
@@ -1102,6 +1207,12 @@ static struct network_menu_state network_saved_state = {
 };
 static int network_scan_requires_reboot;
 static int pending_reboot_confirm_open;
+static struct menu_item *developer_status_item;
+static struct menu_item *developer_password_item;
+static struct menu_item *developer_buffer_size_item;
+static int developer_mode_target;
+static char developer_password_target[BMX_DEVELOPER_PASSWORD_MAX_LEN + 1];
+static unsigned developer_buffer_size_target;
 
 static int save_network_cmdline(void);
 static int append_network_boot_options(struct bmx_boot_plan *plan);
@@ -1514,17 +1625,28 @@ static void show_machine_switch_error(const struct bmx_machine *machine,
   }
 }
 
-static int apply_pending_system_changes(int force_network_save) {
+static int apply_pending_system_changes(int force_network_save,
+                                        int developer_mode,
+                                        const char *developer_password,
+                                        unsigned developer_buffer_kb) {
   int machine_pending = machine_change_pending();
   int network_pending = network_menu_requires_reboot();
+  int overclock_pending = overclock_change_pending();
+  int gpio_pending = gpio_outputs_item != NULL &&
+                     gpio_outputs_item->value !=
+                         circle_gpio_outputs_enabled();
   int apply_network = force_network_save || network_pending;
+  int apply_developer = developer_mode >= 0 || developer_password != NULL ||
+                        developer_buffer_kb != 0U;
   const struct bmx_machine *machine = machine_selected_machine();
   const struct bmx_machine_mode *mode = machine_selected_mode();
   BMC64C64Core c64_core = machine_selected_c64_core();
   struct bmx_boot_plan plan;
   int status;
 
-  if (!machine_pending && !apply_network) {
+  if (!machine_pending && !apply_network && !overclock_pending &&
+      !gpio_pending &&
+      !apply_developer) {
     return 1;
   }
   if (apply_network && !validate_network_menu()) {
@@ -1535,10 +1657,20 @@ static int apply_pending_system_changes(int force_network_save) {
 
   // Resolve and check the complete destination before writing either boot
   // file. Network options are added to the same plan below.
-  if (machine_pending) {
+  if ((machine_pending || overclock_pending) &&
+      overclock_load_status != BMX_OVERCLOCK_READ_OK) {
+    show_overclock_config_error();
+    return 0;
+  }
+  if (machine_pending || overclock_pending) {
     status = switch_build_boot_plan(machine, mode, c64_core, &plan);
     if (status != 0) {
       show_machine_switch_error(machine, c64_core, status);
+      return 0;
+    }
+    status = bmx_boot_plan_add_overclock(&plan, &overclock_state);
+    if (status != 0) {
+      ui_error("Invalid overclocking settings");
       return 0;
     }
   }
@@ -1547,10 +1679,39 @@ static int apply_pending_system_changes(int force_network_save) {
     ui_error("Problem saving network config");
     return 0;
   }
+  if (developer_mode >= 0 &&
+      bmx_boot_plan_set_developer_mode(&plan, developer_mode) != 0) {
+    ui_error("Problem changing Developer settings");
+    return 0;
+  }
+  if (developer_password != NULL &&
+      bmx_boot_plan_set_developer_password(&plan, developer_password) != 0) {
+    ui_error("Problem changing Developer settings");
+    return 0;
+  }
+  if (developer_buffer_kb != 0U &&
+      bmx_boot_plan_set_developer_log_buffer_kb(
+          &plan, developer_buffer_kb) != 0) {
+    ui_error("Problem changing Developer settings");
+    return 0;
+  }
+  if (gpio_pending &&
+      (gpio_outputs_item->value
+           ? bmx_boot_plan_set_cmdline_option(
+                 &plan, "enable_gpio_outputs", "true")
+           : bmx_boot_plan_manage_cmdline_key(
+                 &plan, "enable_gpio_outputs")) != 0) {
+    ui_error("Problem changing GPIO Outputs");
+    return 0;
+  }
   status = switch_apply_boot_plan(&plan);
   if (status != 0) {
-    if (machine_pending) {
+    if (machine_pending || overclock_pending) {
       show_machine_switch_error(machine, c64_core, status);
+    } else if (apply_developer) {
+      ui_error("Problem changing Developer settings");
+    } else if (gpio_pending) {
+      ui_error("Problem changing GPIO Outputs");
     } else {
       ui_error("Problem saving network config");
     }
@@ -1582,11 +1743,16 @@ static int prepare_system_shutdown_storage(void) {
 }
 
 static void perform_system_action(SystemAction action,
-                                  int force_network_save) {
+                                  int force_network_save,
+                                  int developer_mode,
+                                  const char *developer_password,
+                                  unsigned developer_buffer_kb) {
   if (rs232net_dirty && !apply_rs232net_config(1)) {
     return;
   }
-  if (!apply_pending_system_changes(force_network_save)) {
+  if (!apply_pending_system_changes(force_network_save, developer_mode,
+                                    developer_password,
+                                    developer_buffer_kb)) {
     return;
   }
   if (!prepare_system_shutdown_storage()) {
@@ -1602,9 +1768,38 @@ static void perform_system_action(SystemAction action,
   }
 }
 
+static void show_developer_settings_confirm(void) {
+  char message[384];
+
+  if (developer_status_item == NULL || developer_password_item == NULL ||
+      developer_buffer_size_item == NULL) {
+    ui_error("Developer settings unavailable");
+    return;
+  }
+  developer_mode_target = developer_status_item->value ? 1 : 0;
+  strncpy(developer_password_target, developer_password_item->str_value,
+          sizeof developer_password_target - 1);
+  developer_password_target[sizeof developer_password_target - 1] = '\0';
+  developer_buffer_size_target =
+      (unsigned)developer_buffer_size_item->value;
+  snprintf(message, sizeof message,
+           "Apply Developer settings and reboot? Status: %s. Password: %s. "
+           "Buffer size: %u KiB. BMX will update cmdline.txt and apply any "
+           "pending system changes.",
+           developer_mode_target ? "Enabled" : "Disabled",
+           developer_password_target[0] == '\0' ? "None" : "Set",
+           developer_buffer_size_target);
+  ui_confirm_wrapped_cancel_default("Apply Developer Settings?", message, 0,
+                                    MENU_CONFIRM_SYSTEM_DEVELOPER);
+}
+
 static void show_system_action_confirm(SystemAction action) {
   int machine_pending = machine_change_pending();
   int network_pending = network_menu_requires_reboot() || rs232net_dirty;
+  int overclock_pending = overclock_change_pending();
+  int gpio_pending = gpio_outputs_item != NULL &&
+                     gpio_outputs_item->value !=
+                         circle_gpio_outputs_enabled();
   const char *action_text = action == SYSTEM_ACTION_POWER_OFF
                                 ? "power off"
                                 : "reboot";
@@ -1614,9 +1809,26 @@ static void show_system_action_confirm(SystemAction action) {
   int confirm_id = action == SYSTEM_ACTION_POWER_OFF
                        ? MENU_CONFIRM_SYSTEM_POWER_OFF
                        : MENU_CONFIRM_SYSTEM_REBOOT;
-  char message[384];
+  char message[512];
 
-  if (machine_pending) {
+  if (overclock_pending) {
+    if (machine_pending) {
+      char target[160];
+      machine_target_description(target, sizeof target);
+      snprintf(message, sizeof message,
+               network_pending
+                   ? "Apply %s, save network and overclocking settings, then "
+                     "%s? %s"
+                   : "Apply %s and overclocking settings, then %s? %s",
+               target, action_text, OVERCLOCK_RECOVERY_MSG);
+    } else {
+      snprintf(message, sizeof message,
+               network_pending
+                   ? "Save network and overclocking settings, then %s? %s"
+                   : "Apply overclocking settings and %s? %s",
+               action_text, OVERCLOCK_RECOVERY_MSG);
+    }
+  } else if (machine_pending) {
     char target[160];
     machine_target_description(target, sizeof target);
     snprintf(message, sizeof message,
@@ -1633,6 +1845,13 @@ static void show_system_action_confirm(SystemAction action) {
     snprintf(message, sizeof message,
              "%s the Raspberry Pi now? Unsaved emulator state will be lost.",
              action == SYSTEM_ACTION_POWER_OFF ? "Power off" : "Reboot");
+  }
+
+  if (gpio_pending) {
+    size_t used = strlen(message);
+    snprintf(message + used, sizeof message - used,
+             " GPIO Outputs will be %s.",
+             gpio_outputs_item->value ? "enabled" : "disabled");
   }
 
   ui_confirm_wrapped_cancel_default((char *)title, message, 0, confirm_id);
@@ -2003,6 +2222,380 @@ void emu_set_keyboard_info(
   update_detected_keyboard_items();
 }
 
+static int keyboard_monitor_contains(
+    const unsigned char keys[KEYBOARD_MONITOR_REPORT_KEYS],
+    unsigned char usage) {
+  int i;
+  for (i = 0; i < KEYBOARD_MONITOR_REPORT_KEYS; i++) {
+    if (keys[i] == usage) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int keyboard_monitor_is_error_report(
+    const unsigned char keys[KEYBOARD_MONITOR_REPORT_KEYS]) {
+  int i;
+  for (i = 0; i < KEYBOARD_MONITOR_REPORT_KEYS; i++) {
+    if (keys[i] >= 1 && keys[i] <= 3) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static long keyboard_monitor_modifier_keycode(int bit) {
+  static const long keycodes[8] = {
+      KEYCODE_LeftControl, KEYCODE_LeftShift, KEYCODE_LeftAlt,
+      KEYCODE_LeftSuper, KEYCODE_RightControl, KEYCODE_RightShift,
+      KEYCODE_RightAlt, KEYCODE_RightSuper};
+  return bit >= 0 && bit < 8 ? keycodes[bit] : KEYCODE_NONE;
+}
+
+static void keyboard_monitor_publish_event(int device, int hid_usage,
+                                           long keycode, int pressed,
+                                           unsigned char modifiers) {
+  __atomic_store_n(&keyboard_monitor_last_device, device, __ATOMIC_RELAXED);
+  __atomic_store_n(&keyboard_monitor_last_hid_usage, hid_usage,
+                   __ATOMIC_RELAXED);
+  __atomic_store_n(&keyboard_monitor_last_keycode, keycode, __ATOMIC_RELAXED);
+  __atomic_store_n(&keyboard_monitor_last_pressed, pressed, __ATOMIC_RELAXED);
+  __atomic_store_n(&keyboard_monitor_last_modifiers, modifiers,
+                   __ATOMIC_RELEASE);
+}
+
+int emu_wants_raw_keyboard(void) {
+  return ui_enabled &&
+         __atomic_load_n(&keyboard_monitor_enabled, __ATOMIC_ACQUIRE) != 0;
+}
+
+void emu_set_raw_keyboard(unsigned device, unsigned char modifiers,
+                          const unsigned char raw_keys[6]) {
+  unsigned char previous_keys[KEYBOARD_MONITOR_REPORT_KEYS];
+  unsigned char previous_modifiers;
+  int i;
+  int error;
+  int event_published = 0;
+  int event_usage = 0;
+  long event_keycode = KEYCODE_NONE;
+  int event_pressed = 0;
+
+  if (!__atomic_load_n(&keyboard_monitor_enabled, __ATOMIC_ACQUIRE) ||
+      device >= MAX_USB_DEVICES || raw_keys == NULL) {
+    return;
+  }
+
+  previous_modifiers = __atomic_load_n(
+      &keyboard_monitor_held_modifiers[device], __ATOMIC_RELAXED);
+  for (i = 0; i < KEYBOARD_MONITOR_REPORT_KEYS; i++) {
+    previous_keys[i] = __atomic_load_n(
+        &keyboard_monitor_held_keys[device][i], __ATOMIC_RELAXED);
+    __atomic_store_n(&keyboard_monitor_report_keys[device][i], raw_keys[i],
+                     __ATOMIC_RELAXED);
+  }
+  __atomic_store_n(&keyboard_monitor_report_modifiers[device], modifiers,
+                   __ATOMIC_RELAXED);
+
+  error = keyboard_monitor_is_error_report(raw_keys);
+  if (error) {
+    for (i = 0; i < KEYBOARD_MONITOR_REPORT_KEYS; i++) {
+      if (raw_keys[i] >= 1 && raw_keys[i] <= 3) {
+        keyboard_monitor_publish_event((int)device, raw_keys[i],
+                                       KEYCODE_NONE, -1, modifiers);
+        break;
+      }
+    }
+    return;
+  }
+
+  /* Prefer a newly pressed ordinary key as the most useful monitor event. */
+  for (i = 0; i < KEYBOARD_MONITOR_REPORT_KEYS; i++) {
+    unsigned char usage = raw_keys[i];
+    if (usage != 0 && !keyboard_monitor_contains(previous_keys, usage)) {
+      event_usage = usage;
+      event_keycode = usage;
+      event_pressed = 1;
+      event_published = 1;
+      break;
+    }
+  }
+  if (!event_published) {
+    for (i = 0; i < 8; i++) {
+      unsigned char mask = (unsigned char)(1U << i);
+      if ((modifiers & mask) != (previous_modifiers & mask)) {
+        event_usage = 0xe0 + i;
+        event_keycode = keyboard_monitor_modifier_keycode(i);
+        event_pressed = (modifiers & mask) != 0;
+        event_published = 1;
+        break;
+      }
+    }
+  }
+  if (!event_published) {
+    for (i = 0; i < KEYBOARD_MONITOR_REPORT_KEYS; i++) {
+      unsigned char usage = previous_keys[i];
+      if (usage != 0 && !keyboard_monitor_contains(raw_keys, usage)) {
+        event_usage = usage;
+        event_keycode = usage;
+        event_pressed = 0;
+        event_published = 1;
+        break;
+      }
+    }
+  }
+
+  __atomic_store_n(&keyboard_monitor_held_modifiers[device], modifiers,
+                   __ATOMIC_RELAXED);
+  for (i = 0; i < KEYBOARD_MONITOR_REPORT_KEYS; i++) {
+    __atomic_store_n(&keyboard_monitor_held_keys[device][i], raw_keys[i],
+                     __ATOMIC_RELAXED);
+  }
+  if (event_published) {
+    keyboard_monitor_publish_event((int)device, event_usage, event_keycode,
+                                   event_pressed, modifiers);
+  }
+
+  /* The raw mode consumes all input, so explicitly retain exit keys. */
+  if (!keyboard_monitor_contains(raw_keys, KEYCODE_Escape) &&
+      keyboard_monitor_contains(previous_keys, KEYCODE_Escape)) {
+    emu_ui_key_interrupt(KEYCODE_Escape, 0);
+  } else if (!keyboard_monitor_contains(raw_keys, KEYCODE_F12) &&
+             keyboard_monitor_contains(previous_keys, KEYCODE_F12)) {
+    emu_ui_key_interrupt(KEYCODE_F12, 0);
+  }
+}
+
+static void keyboard_monitor_clear_items(void) {
+  keyboard_monitor_device_item = NULL;
+  keyboard_monitor_event_item = NULL;
+  keyboard_monitor_usage_item = NULL;
+  keyboard_monitor_token_item = NULL;
+  keyboard_monitor_modifiers_item = NULL;
+  keyboard_monitor_held_item = NULL;
+  keyboard_monitor_report_item = NULL;
+  keyboard_monitor_file_item = NULL;
+  keyboard_monitor_mapping_item = NULL;
+  keyboard_monitor_target_item = NULL;
+}
+
+static void keyboard_monitor_reset_data(void) {
+  int device;
+  int key;
+  for (device = 0; device < MAX_USB_DEVICES; device++) {
+    __atomic_store_n(&keyboard_monitor_report_modifiers[device], 0,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&keyboard_monitor_held_modifiers[device], 0,
+                     __ATOMIC_RELAXED);
+    for (key = 0; key < KEYBOARD_MONITOR_REPORT_KEYS; key++) {
+      __atomic_store_n(&keyboard_monitor_report_keys[device][key], 0,
+                       __ATOMIC_RELAXED);
+      __atomic_store_n(&keyboard_monitor_held_keys[device][key], 0,
+                       __ATOMIC_RELAXED);
+    }
+  }
+  keyboard_monitor_publish_event(-1, 0, KEYCODE_NONE, 0, 0);
+}
+
+static void keyboard_monitor_append(char *buffer, size_t buffer_size,
+                                    const char *value) {
+  size_t used = strlen(buffer);
+  if (used >= buffer_size - 1) {
+    return;
+  }
+  snprintf(buffer + used, buffer_size - used, "%s%s",
+           used == 0 ? "" : " ", value);
+}
+
+static void keyboard_monitor_format_modifiers(unsigned char modifiers,
+                                              char *buffer,
+                                              size_t buffer_size) {
+  int bit;
+  char token[24];
+  buffer[0] = '\0';
+  for (bit = 0; bit < 8; bit++) {
+    if ((modifiers & (1U << bit)) != 0 &&
+        keycode_format_vkm_token(keyboard_monitor_modifier_keycode(bit),
+                                 token, sizeof token)) {
+      keyboard_monitor_append(buffer, buffer_size, token);
+    }
+  }
+  if (buffer[0] == '\0') {
+    snprintf(buffer, buffer_size, "none");
+  }
+}
+
+static void keyboard_monitor_format_held(char *buffer, size_t buffer_size) {
+  unsigned char seen[256] = {0};
+  unsigned char modifiers = 0;
+  int device;
+  int key;
+  char token[24];
+  buffer[0] = '\0';
+  for (device = 0; device < MAX_USB_DEVICES; device++) {
+    modifiers |= __atomic_load_n(&keyboard_monitor_held_modifiers[device],
+                                 __ATOMIC_RELAXED);
+  }
+  for (key = 0; key < 8; key++) {
+    if ((modifiers & (1U << key)) != 0 &&
+        keycode_format_vkm_token(keyboard_monitor_modifier_keycode(key),
+                                 token, sizeof token)) {
+      keyboard_monitor_append(buffer, buffer_size, token);
+    }
+  }
+  for (device = 0; device < MAX_USB_DEVICES; device++) {
+    for (key = 0; key < KEYBOARD_MONITOR_REPORT_KEYS; key++) {
+      unsigned char usage = __atomic_load_n(
+          &keyboard_monitor_held_keys[device][key], __ATOMIC_RELAXED);
+      if (usage != 0 && !seen[usage]) {
+        seen[usage] = 1;
+        if (keycode_format_vkm_token(usage, token, sizeof token)) {
+          keyboard_monitor_append(buffer, buffer_size, token);
+        }
+      }
+    }
+  }
+  if (buffer[0] == '\0') {
+    snprintf(buffer, buffer_size, "none");
+  }
+}
+
+static void keyboard_monitor_refresh(void) {
+  int device;
+  int usage;
+  int pressed;
+  int row;
+  int column;
+  int flags;
+  long keycode;
+  unsigned char modifiers;
+  char value[128];
+  char target[128];
+  char token[24];
+
+  if (!__atomic_load_n(&keyboard_monitor_enabled, __ATOMIC_ACQUIRE) ||
+      keyboard_monitor_device_item == NULL) {
+    return;
+  }
+
+  device = __atomic_load_n(&keyboard_monitor_last_device, __ATOMIC_RELAXED);
+  usage = __atomic_load_n(&keyboard_monitor_last_hid_usage, __ATOMIC_RELAXED);
+  keycode = __atomic_load_n(&keyboard_monitor_last_keycode, __ATOMIC_RELAXED);
+  pressed = __atomic_load_n(&keyboard_monitor_last_pressed, __ATOMIC_RELAXED);
+  modifiers = __atomic_load_n(&keyboard_monitor_last_modifiers,
+                              __ATOMIC_ACQUIRE);
+
+  if (device >= 0) {
+    snprintf(value, sizeof value, "USB %d", device + 1);
+  } else {
+    snprintf(value, sizeof value, "waiting...");
+  }
+  ui_menu_set_button_value_fitted(keyboard_monitor_device_item, value, 1);
+  ui_menu_set_button_value_fitted(
+      keyboard_monitor_event_item,
+      pressed < 0 ? "HID error" : pressed ? "Pressed" :
+      device >= 0 ? "Released" : "waiting...", 1);
+  if (device >= 0) {
+    snprintf(value, sizeof value, "0x%02X (%d)", usage, usage);
+  } else {
+    snprintf(value, sizeof value, "-");
+  }
+  ui_menu_set_button_value_fitted(keyboard_monitor_usage_item, value, 1);
+
+  if (pressed < 0) {
+    snprintf(token, sizeof token, "not mappable");
+  } else if (!keycode_format_vkm_token(keycode, token, sizeof token)) {
+    snprintf(token, sizeof token, "-");
+  }
+  ui_menu_set_button_value_fitted(keyboard_monitor_token_item, token, 1);
+
+  keyboard_monitor_format_modifiers(modifiers, value, sizeof value);
+  ui_menu_set_button_value_fitted(keyboard_monitor_modifiers_item, value, 1);
+  keyboard_monitor_format_held(value, sizeof value);
+  ui_menu_set_button_value_fitted(keyboard_monitor_held_item, value, 1);
+
+  if (device >= 0) {
+    unsigned char report_modifiers = __atomic_load_n(
+        &keyboard_monitor_report_modifiers[device], __ATOMIC_RELAXED);
+    unsigned char report[KEYBOARD_MONITOR_REPORT_KEYS];
+    int i;
+    for (i = 0; i < KEYBOARD_MONITOR_REPORT_KEYS; i++) {
+      report[i] = __atomic_load_n(&keyboard_monitor_report_keys[device][i],
+                                  __ATOMIC_RELAXED);
+    }
+    snprintf(value, sizeof value, "M:%02X K:%02X %02X %02X %02X %02X %02X",
+             report_modifiers, report[0], report[1], report[2], report[3],
+             report[4], report[5]);
+  } else {
+    snprintf(value, sizeof value, "-");
+  }
+  ui_menu_set_button_value_fitted(keyboard_monitor_report_item, value, 1);
+  ui_menu_set_button_value_fitted(keyboard_monitor_file_item,
+                                  emux_keyboard_mapping_file(), 1);
+
+  if (device >= 0 && pressed >= 0 &&
+      emux_keyboard_mapping_lookup(keycode, modifiers,
+                                   &row, &column, &flags)) {
+    snprintf(value, sizeof value, "%s %d %d %d",
+             token, row, column, flags);
+    if (!emux_keyboard_mapping_target_name(row, column, flags,
+                                           target, sizeof target)) {
+      snprintf(target, sizeof target, "row %d, column %d", row, column);
+    }
+  } else {
+    snprintf(value, sizeof value, "unmapped");
+    snprintf(target, sizeof target, "unmapped");
+  }
+  ui_menu_set_button_value_fitted(keyboard_monitor_mapping_item, value, 1);
+  ui_menu_set_button_value_fitted(keyboard_monitor_target_item, target, 1);
+}
+
+static void keyboard_monitor_popped(struct menu_item *old_root,
+                                    struct menu_item *new_root) {
+  (void)old_root;
+  (void)new_root;
+  __atomic_store_n(&keyboard_monitor_enabled, 0U, __ATOMIC_RELEASE);
+  keyboard_monitor_clear_items();
+}
+
+static void show_keyboard_monitor(void) {
+  struct menu_item *root = ui_push_menu(-1, -1);
+  if (root == NULL) {
+    return;
+  }
+  root->on_popped_off = keyboard_monitor_popped;
+  keyboard_monitor_clear_items();
+  ui_menu_add_button(MENU_TEXT, root, "Keyboard Monitor");
+  keyboard_monitor_device_item = ui_menu_add_button_with_value(
+      MENU_TEXT, root, "Device", 0, "", "");
+  keyboard_monitor_event_item = ui_menu_add_button_with_value(
+      MENU_TEXT, root, "Last event", 0, "", "");
+  keyboard_monitor_usage_item = ui_menu_add_button_with_value(
+      MENU_TEXT, root, "HID usage", 0, "", "");
+  keyboard_monitor_token_item = ui_menu_add_button_with_value(
+      MENU_TEXT, root, ".vkm token", 0, "", "");
+  keyboard_monitor_modifiers_item = ui_menu_add_button_with_value(
+      MENU_TEXT, root, "Host modifiers", 0, "", "");
+  keyboard_monitor_held_item = ui_menu_add_button_with_value(
+      MENU_TEXT, root, "Held", 0, "", "");
+  keyboard_monitor_report_item = ui_menu_add_button_with_value(
+      MENU_TEXT, root, "Raw report", 0, "", "");
+  keyboard_monitor_file_item = ui_menu_add_button_with_value(
+      MENU_TEXT, root, "Active file", 0, "", "");
+  keyboard_monitor_mapping_item = ui_menu_add_button_with_value(
+      MENU_TEXT, root, "Effective entry", 0, "", "");
+  keyboard_monitor_target_item = ui_menu_add_button_with_value(
+      MENU_TEXT, root, "Emulated key", 0, "", "");
+  ui_menu_add_divider(root);
+  ui_menu_add_button(MENU_TEXT, root,
+                     "Use .vkm token in user_pos*.vkm");
+  ui_menu_add_button(MENU_TEXT, root,
+                     "Esc/F12 closes; input is consumed");
+  keyboard_monitor_reset_data();
+  __atomic_store_n(&keyboard_monitor_enabled, 1U, __ATOMIC_RELEASE);
+  keyboard_monitor_refresh();
+}
+
 void emu_set_mouse_info(int present, const char *product) {
   detected_mouse_present = present != 0;
   strncpy(detected_mouse_product, product != NULL ? product : "",
@@ -2011,6 +2604,243 @@ void emu_set_mouse_info(int present, const char *product) {
   ui_menu_set_button_value_fitted(
       detected_mouse_item,
       present_device_name(detected_mouse_present, detected_mouse_product), 1);
+}
+
+static const char *mouse_monitor_type_name(BmxMouseType type) {
+  switch (type) {
+  case BMX_MOUSE_TYPE_1351: return "1351";
+  case BMX_MOUSE_TYPE_NEOS: return "NEOS";
+  case BMX_MOUSE_TYPE_AMIGA: return "Amiga";
+  case BMX_MOUSE_TYPE_CX22: return "Atari CX-22";
+  case BMX_MOUSE_TYPE_ST: return "Atari ST";
+  case BMX_MOUSE_TYPE_SMART: return "SmartMouse";
+  case BMX_MOUSE_TYPE_MICROMYS: return "Micromys";
+  default: return "Unknown";
+  }
+}
+
+static unsigned mouse_monitor_capabilities_for_type(BmxMouseType type) {
+  switch (type) {
+  case BMX_MOUSE_TYPE_1351:
+  case BMX_MOUSE_TYPE_NEOS:
+  case BMX_MOUSE_TYPE_SMART:
+    return MOUSE_MONITOR_MOVEMENT | MOUSE_MONITOR_LEFT |
+           MOUSE_MONITOR_RIGHT;
+  case BMX_MOUSE_TYPE_AMIGA:
+  case BMX_MOUSE_TYPE_ST:
+    return MOUSE_MONITOR_MOVEMENT | MOUSE_MONITOR_LEFT;
+  case BMX_MOUSE_TYPE_CX22:
+    return MOUSE_MONITOR_MOVEMENT;
+  case BMX_MOUSE_TYPE_MICROMYS:
+    return MOUSE_MONITOR_MOVEMENT | MOUSE_MONITOR_LEFT |
+           MOUSE_MONITOR_RIGHT | MOUSE_MONITOR_MIDDLE |
+           MOUSE_MONITOR_WHEEL;
+  default:
+    return 0;
+  }
+}
+
+static void mouse_monitor_reset_data(void) {
+  __atomic_store_n(&mouse_monitor_delta_x, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&mouse_monitor_delta_y, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&mouse_monitor_total_x, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&mouse_monitor_total_y, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&mouse_monitor_left, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&mouse_monitor_right, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&mouse_monitor_middle, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&mouse_monitor_left_presses, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&mouse_monitor_right_presses, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&mouse_monitor_middle_presses, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&mouse_monitor_wheel_delta, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&mouse_monitor_wheel_total, 0, __ATOMIC_RELAXED);
+}
+
+static struct menu_item *mouse_monitor_add_value(struct menu_item *root,
+                                                 const char *label) {
+  return ui_menu_add_button_with_value(MENU_TEXT, root, label, 0, "", "");
+}
+
+static void mouse_monitor_clear_items(void) {
+  mouse_monitor_delta_x_item = NULL;
+  mouse_monitor_delta_y_item = NULL;
+  mouse_monitor_total_x_item = NULL;
+  mouse_monitor_total_y_item = NULL;
+  mouse_monitor_left_item = NULL;
+  mouse_monitor_right_item = NULL;
+  mouse_monitor_middle_item = NULL;
+  mouse_monitor_left_presses_item = NULL;
+  mouse_monitor_right_presses_item = NULL;
+  mouse_monitor_middle_presses_item = NULL;
+  mouse_monitor_wheel_delta_item = NULL;
+  mouse_monitor_wheel_total_item = NULL;
+}
+
+static void mouse_monitor_popped(struct menu_item *new_root,
+                                 struct menu_item *old_root) {
+  (void)new_root;
+  (void)old_root;
+  __atomic_store_n(&mouse_monitor_enabled, 0U, __ATOMIC_RELEASE);
+  emux_mouse_input_clear();
+  mouse_monitor_clear_items();
+}
+
+static void show_mouse_monitor(void) {
+  int type = selected_mouse_type;
+  unsigned capabilities;
+  struct menu_item *root = ui_push_menu(-1, -1);
+  struct menu_item *type_item;
+
+  if (root == NULL) {
+    return;
+  }
+  if (machine_supports_mouse_type()) {
+    emux_get_int(Setting_MouseType, &type);
+    if (type >= 0 && type < BMX_MOUSE_TYPE_NUM) {
+      selected_mouse_type = (BmxMouseType)type;
+    }
+  }
+  capabilities = mouse_monitor_capabilities_for_type(selected_mouse_type);
+  root->on_popped_off = mouse_monitor_popped;
+  mouse_monitor_clear_items();
+
+  ui_menu_add_button(MENU_TEXT, root, "Mouse Monitor");
+  type_item = mouse_monitor_add_value(root, "Type");
+  ui_menu_set_button_value_fitted(
+      type_item, mouse_monitor_type_name(selected_mouse_type), 1);
+
+  if (capabilities & MOUSE_MONITOR_MOVEMENT) {
+    mouse_monitor_delta_x_item = mouse_monitor_add_value(root, "Delta X");
+    mouse_monitor_delta_y_item = mouse_monitor_add_value(root, "Delta Y");
+    mouse_monitor_total_x_item = mouse_monitor_add_value(root, "Total X");
+    mouse_monitor_total_y_item = mouse_monitor_add_value(root, "Total Y");
+  }
+  if (capabilities & MOUSE_MONITOR_LEFT) {
+    mouse_monitor_left_item = mouse_monitor_add_value(root, "Left");
+    mouse_monitor_left_presses_item =
+        mouse_monitor_add_value(root, "Left presses");
+  }
+  if (capabilities & MOUSE_MONITOR_RIGHT) {
+    mouse_monitor_right_item = mouse_monitor_add_value(root, "Right");
+    mouse_monitor_right_presses_item =
+        mouse_monitor_add_value(root, "Right presses");
+  }
+  if (capabilities & MOUSE_MONITOR_MIDDLE) {
+    mouse_monitor_middle_item = mouse_monitor_add_value(root, "Middle");
+    mouse_monitor_middle_presses_item =
+        mouse_monitor_add_value(root, "Middle presses");
+  }
+  if (capabilities & MOUSE_MONITOR_WHEEL) {
+    mouse_monitor_wheel_delta_item =
+        mouse_monitor_add_value(root, "Wheel delta");
+    mouse_monitor_wheel_total_item =
+        mouse_monitor_add_value(root, "Wheel total");
+  }
+
+  mouse_monitor_reset_data();
+  __atomic_store_n(&mouse_monitor_capabilities, capabilities,
+                   __ATOMIC_RELAXED);
+  emux_mouse_input_clear();
+  __atomic_store_n(&mouse_monitor_enabled, 1U, __ATOMIC_RELEASE);
+}
+
+int emu_wants_raw_mouse(void) {
+  return ui_enabled &&
+         __atomic_load_n(&mouse_monitor_enabled, __ATOMIC_ACQUIRE) != 0;
+}
+
+void emu_set_raw_mouse(int left, int right, int middle,
+                       int delta_x, int delta_y, int wheel_move) {
+  unsigned capabilities;
+  int previous;
+
+  if (!__atomic_load_n(&mouse_monitor_enabled, __ATOMIC_ACQUIRE)) {
+    return;
+  }
+  capabilities = __atomic_load_n(&mouse_monitor_capabilities,
+                                 __ATOMIC_RELAXED);
+
+  if ((capabilities & MOUSE_MONITOR_MOVEMENT) &&
+      (delta_x != 0 || delta_y != 0)) {
+    __atomic_store_n(&mouse_monitor_delta_x, delta_x, __ATOMIC_RELAXED);
+    __atomic_store_n(&mouse_monitor_delta_y, delta_y, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&mouse_monitor_total_x, delta_x, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&mouse_monitor_total_y, delta_y, __ATOMIC_RELAXED);
+  }
+
+  if (capabilities & MOUSE_MONITOR_LEFT) {
+    previous = __atomic_exchange_n(&mouse_monitor_left, left,
+                                   __ATOMIC_RELAXED);
+    if (left && !previous) {
+      __atomic_fetch_add(&mouse_monitor_left_presses, 1, __ATOMIC_RELAXED);
+    }
+  }
+  if (capabilities & MOUSE_MONITOR_RIGHT) {
+    previous = __atomic_exchange_n(&mouse_monitor_right, right,
+                                   __ATOMIC_RELAXED);
+    if (right && !previous) {
+      __atomic_fetch_add(&mouse_monitor_right_presses, 1, __ATOMIC_RELAXED);
+    }
+  }
+  if (capabilities & MOUSE_MONITOR_MIDDLE) {
+    previous = __atomic_exchange_n(&mouse_monitor_middle, middle,
+                                   __ATOMIC_RELAXED);
+    if (middle && !previous) {
+      __atomic_fetch_add(&mouse_monitor_middle_presses, 1, __ATOMIC_RELAXED);
+    }
+  }
+  if ((capabilities & MOUSE_MONITOR_WHEEL) && wheel_move != 0) {
+    __atomic_store_n(&mouse_monitor_wheel_delta, wheel_move,
+                     __ATOMIC_RELAXED);
+    __atomic_fetch_add(&mouse_monitor_wheel_total, wheel_move,
+                       __ATOMIC_RELAXED);
+  }
+}
+
+static void mouse_monitor_refresh(void) {
+  if (!__atomic_load_n(&mouse_monitor_enabled, __ATOMIC_ACQUIRE)) {
+    return;
+  }
+
+  if (mouse_monitor_delta_x_item != NULL) {
+    mouse_monitor_delta_x_item->value =
+        __atomic_load_n(&mouse_monitor_delta_x, __ATOMIC_RELAXED);
+    mouse_monitor_delta_y_item->value =
+        __atomic_load_n(&mouse_monitor_delta_y, __ATOMIC_RELAXED);
+    mouse_monitor_total_x_item->value =
+        __atomic_load_n(&mouse_monitor_total_x, __ATOMIC_RELAXED);
+    mouse_monitor_total_y_item->value =
+        __atomic_load_n(&mouse_monitor_total_y, __ATOMIC_RELAXED);
+  }
+  if (mouse_monitor_left_item != NULL) {
+    ui_menu_set_button_value_fitted(
+        mouse_monitor_left_item,
+        __atomic_load_n(&mouse_monitor_left, __ATOMIC_RELAXED)
+            ? "Pressed" : "Released", 1);
+    mouse_monitor_left_presses_item->value =
+        __atomic_load_n(&mouse_monitor_left_presses, __ATOMIC_RELAXED);
+  }
+  if (mouse_monitor_right_item != NULL) {
+    ui_menu_set_button_value_fitted(
+        mouse_monitor_right_item,
+        __atomic_load_n(&mouse_monitor_right, __ATOMIC_RELAXED)
+            ? "Pressed" : "Released", 1);
+    mouse_monitor_right_presses_item->value =
+        __atomic_load_n(&mouse_monitor_right_presses, __ATOMIC_RELAXED);
+  }
+  if (mouse_monitor_middle_item != NULL) {
+    ui_menu_set_button_value_fitted(
+        mouse_monitor_middle_item,
+        __atomic_load_n(&mouse_monitor_middle, __ATOMIC_RELAXED)
+            ? "Pressed" : "Released", 1);
+    mouse_monitor_middle_presses_item->value =
+        __atomic_load_n(&mouse_monitor_middle_presses, __ATOMIC_RELAXED);
+  }
+  if (mouse_monitor_wheel_delta_item != NULL) {
+    mouse_monitor_wheel_delta_item->value =
+        __atomic_load_n(&mouse_monitor_wheel_delta, __ATOMIC_RELAXED);
+    mouse_monitor_wheel_total_item->value =
+        __atomic_load_n(&mouse_monitor_wheel_total, __ATOMIC_RELAXED);
+  }
 }
 
 void emu_set_current_sound_output(enum bmx_sound_output output,
@@ -2273,6 +3103,11 @@ static void refresh_dhcp_network_fields(void) {
 }
 
 void menu_before_render(void) {
+  keyboard_monitor_refresh();
+  mouse_monitor_refresh();
+  gpio_monitor_refresh();
+  refresh_overclock_diagnostics();
+
   if (network_folder_item == NULL || !network_folder_item->is_expanded) {
     return;
   }
@@ -2438,6 +3273,8 @@ static int apply_rs232net_config(int strict) {
 int menu_before_ui_close(void) {
   int machine_pending;
   int network_pending;
+  int overclock_pending;
+  int gpio_pending;
 
   if (rs232net_dirty) {
     if (!apply_rs232net_config(1)) {
@@ -2446,20 +3283,55 @@ int menu_before_ui_close(void) {
   }
   machine_pending = machine_change_pending();
   network_pending = network_menu_requires_reboot();
-  if (machine_pending || network_pending) {
+  overclock_pending = overclock_change_pending();
+  gpio_pending = gpio_outputs_item != NULL &&
+                 gpio_outputs_item->value !=
+                     circle_gpio_outputs_enabled();
+  if (machine_pending || network_pending || overclock_pending ||
+      gpio_pending) {
     if (!pending_reboot_confirm_open) {
       const char *message = NETWORK_REBOOT_MSG;
-      char machine_message[256];
+      char pending_message[512];
+      char gpio_message[640];
       char target[160];
       struct menu_item *confirm_root;
 
-      if (machine_pending) {
+      if (overclock_pending && machine_pending) {
         machine_target_description(target, sizeof target);
-        snprintf(machine_message, sizeof machine_message,
+        snprintf(pending_message, sizeof pending_message,
+                 network_pending
+                     ? "Apply %s, save network and overclocking settings, then "
+                       "reboot? %s"
+                     : "Apply %s and overclocking settings, then reboot? %s",
+                 target, OVERCLOCK_RECOVERY_MSG);
+        message = pending_message;
+      } else if (overclock_pending) {
+        snprintf(pending_message, sizeof pending_message,
+                 network_pending
+                     ? "Save network and overclocking settings, then reboot? %s"
+                     : "Apply overclocking settings and reboot? %s",
+                 OVERCLOCK_RECOVERY_MSG);
+        message = pending_message;
+      } else if (machine_pending) {
+        machine_target_description(target, sizeof target);
+        snprintf(pending_message, sizeof pending_message,
                  network_pending ? MACHINE_NETWORK_SWITCH_MSG
                                  : MACHINE_SWITCH_MSG,
                  target);
-        message = machine_message;
+        message = pending_message;
+      }
+      if (gpio_pending) {
+        if (!machine_pending && !network_pending && !overclock_pending) {
+          snprintf(gpio_message, sizeof gpio_message,
+                   "Set GPIO Outputs to %s and reboot? BMX will update "
+                   "cmdline.txt.",
+                   gpio_outputs_item->value ? "Enabled" : "Disabled");
+        } else {
+          snprintf(gpio_message, sizeof gpio_message,
+                   "%s GPIO Outputs will be %s.", message,
+                   gpio_outputs_item->value ? "enabled" : "disabled");
+        }
+        message = gpio_message;
       }
       pending_reboot_confirm_open = 1;
       confirm_root = ui_confirm_wrapped_cancel_default(
@@ -2647,6 +3519,19 @@ static void set_need_mouse() {
       }
    }
    emux_set_int(Setting_Mouse, need_mouse);
+}
+
+static int machine_supports_mouse_type(void) {
+  switch (emux_machine_class) {
+  case BMC64_MACHINE_CLASS_C64:
+  case BMC64_MACHINE_CLASS_SCPU64:
+  case BMC64_MACHINE_CLASS_C128:
+  case BMC64_MACHINE_CLASS_VIC20:
+  case BMC64_MACHINE_CLASS_PLUS4:
+    return 1;
+  default:
+    return 0;
+  }
 }
 
 // Sets joydev port 'p' (1-4) to JOYDEV_* value 'value' and makes sure
@@ -2942,9 +3827,13 @@ static int save_settings() {
     fprintf(fp, "usb_y_t_%d=%d\n", k, (int)(usb_y_thresh[k] * 100.0f));
   }
 
-  fprintf(fp, "palette=%d\n", palette_item[0]->value);
+  const char *palette_setting = emux_get_palette_setting(0);
+  fprintf(fp, "palette=%s\n",
+          palette_setting != NULL ? palette_setting : "0");
   if (emux_machine_class == BMC64_MACHINE_CLASS_C128) {
-    fprintf(fp, "palette2=%d\n", palette_item[1]->value);
+    const char *palette2_setting = emux_get_palette_setting(1);
+    fprintf(fp, "palette2=%s\n",
+            palette2_setting != NULL ? palette2_setting : "0");
   }
 
   for (int k = 0; k < MAX_USB_DEVICES; k++) {
@@ -3230,14 +4119,12 @@ static void load_settings() {
     } else if (strcmp(name, "default_disk_drive") == 0) {
       default_disk_set_drive(value);
     } else if (strcmp(name, "palette") == 0) {
-      palette_item[0]->value = value;
-      if (value >= palette_item[0]->num_choices) {
-         palette_item[1]->value = palette_item[0]->num_choices - 1;
+      if (emux_set_palette_setting(0, value_str) != 0) {
+        printf("Ignoring invalid palette setting: %s\n", value_str);
       }
     } else if (strcmp(name, "palette2") == 0 && emux_machine_class == BMC64_MACHINE_CLASS_C128) {
-      palette_item[1]->value = value;
-      if (value >= palette_item[1]->num_choices) {
-         palette_item[1]->value = palette_item[1]->num_choices - 1;
+      if (emux_set_palette_setting(1, value_str) != 0) {
+        printf("Ignoring invalid palette2 setting: %s\n", value_str);
       }
     } else if (strcmp(name, "alt_f12") == 0) {
       // Old. Equivalent to cf7 = Menu
@@ -3295,7 +4182,7 @@ static void load_settings() {
            gpio_config_item->value = 3;
            break;
         case GPIO_CONFIG_USERPORT:
-           gpio_config_item->value = 4;
+           gpio_config_item->value = gpio_userport_config_available() ? 4 : 0;
            break;
         case GPIO_CONFIG_CUSTOM:
            gpio_config_item->value = 5;
@@ -4486,11 +5373,15 @@ static void menu_value_changed(struct menu_item *item) {
     return;
   case MENU_COLOR_PALETTE_0:
     ui_canvas_reveal_temp(FB_LAYER_VIC);
-    emux_change_palette(0, item->value);
+    if (emux_change_palette(0, item->value) != 0) {
+      ui_error("Palette could not be loaded");
+    }
     return;
   case MENU_COLOR_PALETTE_1:
     ui_canvas_reveal_temp(FB_LAYER_VDC);
-    emux_change_palette(1, item->value);
+    if (emux_change_palette(1, item->value) != 0) {
+      ui_error("Palette could not be loaded");
+    }
     return;
   case MENU_AUTOSTART_WARP:
     emux_set_int(Setting_AutostartWarp, item->value);
@@ -4498,6 +5389,16 @@ static void menu_value_changed(struct menu_item *item) {
   case MENU_MOUSE_SENSITIVITY:
     emux_set_int(Setting_MouseSensitivity, item->value);
     ui_mouse_preview_begin();
+    return;
+  case MENU_MOUSE_TYPE:
+    selected_mouse_type = (BmxMouseType)item->choice_ints[item->value];
+    emux_set_int(Setting_MouseType, selected_mouse_type);
+    return;
+  case MENU_MOUSE_MONITOR:
+    show_mouse_monitor();
+    return;
+  case MENU_KEYBOARD_MONITOR:
+    show_keyboard_monitor();
     return;
   case MENU_DEFAULT_DISK_IMAGE:
     show_files(DIR_DISKS, FILTER_DISK, MENU_DEFAULT_DISK_FILE, 0);
@@ -4826,9 +5727,30 @@ static void menu_value_changed(struct menu_item *item) {
   case MENU_CONFIGURE_GPIO:
     configure_gpio();
     return;
+  case MENU_GPIO_MONITOR:
+    show_gpio_monitor();
+    return;
   case MENU_GPIO_CONFIG:
+    if (gpio_outputs_item != NULL) {
+      gpio_outputs_item->value =
+          item->choice_ints[item->value] == GPIO_CONFIG_USERPORT &&
+          gpio_userport_machine_supported();
+      if (gpio_userport_machine_supported()) {
+        strcpy(item->choices[4],
+               gpio_outputs_item->value
+                   ? "#4 (Userport+Joy)"
+                   : "#4 (N/A: Outputs Disabled)");
+      }
+    }
     // Ensure GPIO pins are correct for new mode.
     circle_reset_gpio(emu_get_gpio_config());
+    return;
+  case MENU_GPIO_OUTPUTS:
+    if (gpio_config_item != NULL && gpio_userport_machine_supported()) {
+      strcpy(gpio_config_item->choices[4],
+             item->value ? "#4 (Userport+Joy)"
+                         : "#4 (N/A: Outputs Disabled)");
+    }
     return;
   case MENU_WARP_MODE:
     toggle_warp(item->value);
@@ -4838,7 +5760,30 @@ static void menu_value_changed(struct menu_item *item) {
     demo_reset();
     return;
   case MENU_NETWORK_SAVE:
-    perform_system_action(SYSTEM_ACTION_REBOOT, 1);
+    perform_system_action(SYSTEM_ACTION_REBOOT, 1, -1, NULL, 0U);
+    return;
+  case MENU_SYSTEM_DEVELOPER_STATUS:
+  case MENU_SYSTEM_DEVELOPER_PASSWORD:
+  case MENU_SYSTEM_DEVELOPER_BUFFER_SIZE:
+    return;
+  case MENU_SYSTEM_DEVELOPER_APPLY:
+    show_developer_settings_confirm();
+    return;
+  case MENU_OVERCLOCK_ARM_FREQ:
+  case MENU_OVERCLOCK_VOLTAGE_DELTA:
+  case MENU_OVERCLOCK_TEMP_LIMIT:
+  case MENU_OVERCLOCK_CORE_FREQ:
+  case MENU_OVERCLOCK_V3D_FREQ:
+    overclock_menu_changed(item);
+    return;
+  case MENU_OVERCLOCK_RESTORE_DEFAULTS:
+    overclock_restore_defaults();
+    return;
+  case MENU_OVERCLOCK_APPLY:
+    show_system_action_confirm(SYSTEM_ACTION_REBOOT);
+    return;
+  case MENU_OVERCLOCK_CONFIG_ERROR:
+    show_overclock_config_error();
     return;
   case MENU_SYSTEM_REBOOT:
     show_system_action_confirm(SYSTEM_ACTION_REBOOT);
@@ -5193,11 +6138,15 @@ static void menu_value_changed(struct menu_item *item) {
     }
     ui_pop_menu();
     if (confirm_sub_id == MENU_PENDING_REBOOT) {
-      perform_system_action(SYSTEM_ACTION_REBOOT, 0);
+      perform_system_action(SYSTEM_ACTION_REBOOT, 0, -1, NULL, 0U);
+    } else if (confirm_sub_id == MENU_CONFIRM_SYSTEM_DEVELOPER) {
+      perform_system_action(SYSTEM_ACTION_REBOOT, 0, developer_mode_target,
+                            developer_password_target,
+                            developer_buffer_size_target);
     } else if (confirm_sub_id == MENU_CONFIRM_SYSTEM_REBOOT) {
-      perform_system_action(SYSTEM_ACTION_REBOOT, 0);
+      perform_system_action(SYSTEM_ACTION_REBOOT, 0, -1, NULL, 0U);
     } else if (confirm_sub_id == MENU_CONFIRM_SYSTEM_POWER_OFF) {
-      perform_system_action(SYSTEM_ACTION_POWER_OFF, 0);
+      perform_system_action(SYSTEM_ACTION_POWER_OFF, 0, -1, NULL, 0U);
     } else {
       menu_update_confirm_ok(confirm_sub_id);
     }
@@ -5798,6 +6747,302 @@ static void menu_build_machine_switch(struct menu_item* parent) {
   machine_active_emulator = emulator;
 }
 
+static int overclock_configs_equal(
+    const struct bmx_overclock_config *left,
+    const struct bmx_overclock_config *right) {
+  if (left->present != right->present) {
+    return 0;
+  }
+  return (!(left->present & BMX_OVERCLOCK_ARM_FREQ) ||
+          left->arm_freq_mhz == right->arm_freq_mhz) &&
+         (!(left->present & BMX_OVERCLOCK_CORE_FREQ) ||
+          left->core_freq_mhz == right->core_freq_mhz) &&
+         (!(left->present & BMX_OVERCLOCK_V3D_FREQ) ||
+          left->v3d_freq_mhz == right->v3d_freq_mhz) &&
+         (!(left->present & BMX_OVERCLOCK_VOLTAGE_DELTA) ||
+          left->over_voltage_delta_uv == right->over_voltage_delta_uv) &&
+         (!(left->present & BMX_OVERCLOCK_TEMP_LIMIT) ||
+          left->temp_limit_c == right->temp_limit_c);
+}
+
+static int overclock_change_pending(void) {
+  return overclock_load_status == BMX_OVERCLOCK_READ_OK &&
+         !overclock_configs_equal(&overclock_state, &overclock_saved_state);
+}
+
+static int overclock_choice_index(struct menu_item *item, int value) {
+  int i;
+
+  for (i = 0; i < item->num_choices; ++i) {
+    if (item->choice_ints[i] == value) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static void overclock_add_choice(struct menu_item *item, const char *label,
+                                 int value) {
+  int choice;
+
+  if (overclock_choice_index(item, value) >= 0 ||
+      item->num_choices >= MAX_CHOICES) {
+    return;
+  }
+  choice = item->num_choices++;
+  snprintf(item->choices[choice], sizeof item->choices[choice], "%s", label);
+  item->choice_ints[choice] = value;
+}
+
+static void overclock_add_frequency_choices(struct menu_item *item,
+                                            int minimum, int maximum,
+                                            int step, int configured,
+                                            int present) {
+  char label[MAX_MENU_STR];
+  int value;
+  int selected;
+
+  overclock_add_choice(item, "Auto", BMX_OVERCLOCK_AUTO_CHOICE);
+  for (value = minimum; value <= maximum; value += step) {
+    snprintf(label, sizeof label, "%d MHz", value);
+    overclock_add_choice(item, label, value);
+  }
+  if (present && overclock_choice_index(item, configured) < 0) {
+    snprintf(label, sizeof label, "Custom: %d MHz", configured);
+    overclock_add_choice(item, label, configured);
+  }
+  selected = present ? overclock_choice_index(item, configured) : 0;
+  item->value = selected >= 0 ? selected : 0;
+}
+
+static void overclock_add_voltage_choices(struct menu_item *item,
+                                          int configured, int present) {
+  char label[MAX_MENU_STR];
+  int millivolts;
+  int selected;
+
+  overclock_add_choice(item, "Auto", BMX_OVERCLOCK_AUTO_CHOICE);
+  for (millivolts = -100; millivolts <= 100; millivolts += 5) {
+    snprintf(label, sizeof label, "%+d mV", millivolts);
+    overclock_add_choice(item, label, millivolts * 1000);
+  }
+  if (present && overclock_choice_index(item, configured) < 0) {
+    snprintf(label, sizeof label, "Custom: %+d uV", configured);
+    overclock_add_choice(item, label, configured);
+  }
+  selected = present ? overclock_choice_index(item, configured) : 0;
+  item->value = selected >= 0 ? selected : 0;
+}
+
+static void overclock_add_temperature_choices(struct menu_item *item,
+                                              int configured, int present) {
+  char label[MAX_MENU_STR];
+  int temperature;
+  int selected;
+
+  overclock_add_choice(item, "Auto", BMX_OVERCLOCK_AUTO_CHOICE);
+  for (temperature = 60; temperature <= 85; ++temperature) {
+    snprintf(label, sizeof label, "%d C", temperature);
+    overclock_add_choice(item, label, temperature);
+  }
+  if (present && overclock_choice_index(item, configured) < 0) {
+    snprintf(label, sizeof label, "Custom: %d C", configured);
+    overclock_add_choice(item, label, configured);
+  }
+  selected = present ? overclock_choice_index(item, configured) : 0;
+  item->value = selected >= 0 ? selected : 0;
+}
+
+static void overclock_update_menu_state(void) {
+  const char *mode = overclock_state.present == 0 ? "Default" : "Custom";
+
+  if (overclock_status_item != NULL) {
+    ui_menu_set_button_value_fitted(overclock_status_item, mode, 0);
+  }
+  if (overclock_restore_item != NULL) {
+    overclock_restore_item->disabled = overclock_state.present == 0;
+  }
+  if (overclock_apply_item != NULL) {
+    overclock_apply_item->disabled = !overclock_change_pending();
+  }
+}
+
+static void overclock_set_field_from_item(struct menu_item *item,
+                                          unsigned field, int *value) {
+  int selected;
+
+  if (item == NULL || item->value < 0 || item->value >= item->num_choices) {
+    return;
+  }
+  selected = item->choice_ints[item->value];
+  if (selected == BMX_OVERCLOCK_AUTO_CHOICE) {
+    overclock_state.present &= ~field;
+    *value = 0;
+  } else {
+    overclock_state.present |= field;
+    *value = selected;
+  }
+}
+
+static void overclock_menu_changed(struct menu_item *item) {
+  switch (item->id) {
+    case MENU_OVERCLOCK_ARM_FREQ:
+      overclock_set_field_from_item(item, BMX_OVERCLOCK_ARM_FREQ,
+                                    &overclock_state.arm_freq_mhz);
+      break;
+    case MENU_OVERCLOCK_VOLTAGE_DELTA:
+      overclock_set_field_from_item(item, BMX_OVERCLOCK_VOLTAGE_DELTA,
+                                    &overclock_state.over_voltage_delta_uv);
+      break;
+    case MENU_OVERCLOCK_TEMP_LIMIT:
+      overclock_set_field_from_item(item, BMX_OVERCLOCK_TEMP_LIMIT,
+                                    &overclock_state.temp_limit_c);
+      break;
+    case MENU_OVERCLOCK_CORE_FREQ:
+      overclock_set_field_from_item(item, BMX_OVERCLOCK_CORE_FREQ,
+                                    &overclock_state.core_freq_mhz);
+      break;
+    case MENU_OVERCLOCK_V3D_FREQ:
+      overclock_set_field_from_item(item, BMX_OVERCLOCK_V3D_FREQ,
+                                    &overclock_state.v3d_freq_mhz);
+      break;
+    default:
+      return;
+  }
+  overclock_update_menu_state();
+}
+
+static void overclock_restore_defaults(void) {
+  memset(&overclock_state, 0, sizeof overclock_state);
+  overclock_arm_item->value = 0;
+  overclock_voltage_item->value = 0;
+  overclock_temp_item->value = 0;
+  overclock_core_item->value = 0;
+  overclock_v3d_item->value = 0;
+  overclock_update_menu_state();
+}
+
+static void show_overclock_config_error(void) {
+  if (overclock_load_status == BMX_OVERCLOCK_READ_CONFLICT) {
+    ui_confirm_wrapped(
+        "Overclocking conflict",
+        "config.txt contains non-commented clock, voltage or turbo settings "
+        "outside the BMX-managed block. Remove or move those lines before "
+        "using this menu.",
+        -1, -1);
+  } else {
+    ui_confirm_wrapped(
+        "Invalid config.txt",
+        "The BMX-managed block or one of its overclocking values is invalid. "
+        "Check the block markers, duplicate keys and value ranges in "
+        "config.txt before using this menu.",
+        -1, -1);
+  }
+}
+
+static void refresh_overclock_diagnostics(void) {
+  struct bmx_diagnostics_snapshot snapshot;
+  char value[32];
+
+  if (overclock_folder_item == NULL ||
+      !overclock_folder_item->is_expanded ||
+      overclock_current_arm_item == NULL ||
+      overclock_current_temp_item == NULL) {
+    return;
+  }
+  circle_get_diagnostics(&snapshot);
+  snprintf(value, sizeof value, "%u MHz",
+           (snapshot.arm_clock_hz + 500000U) / 1000000U);
+  ui_menu_set_button_value_fitted(overclock_current_arm_item, value, 0);
+  snprintf(value, sizeof value, "%u C", snapshot.temperature_c);
+  ui_menu_set_button_value_fitted(overclock_current_temp_item, value, 0);
+}
+
+static void build_overclock_menu(struct menu_item *parent) {
+  struct menu_item *expert;
+  int pi_model = circle_get_model();
+
+  overclock_folder_item = NULL;
+  overclock_status_item = NULL;
+  overclock_arm_item = NULL;
+  overclock_voltage_item = NULL;
+  overclock_temp_item = NULL;
+  overclock_core_item = NULL;
+  overclock_v3d_item = NULL;
+  overclock_current_arm_item = NULL;
+  overclock_current_temp_item = NULL;
+  overclock_restore_item = NULL;
+  overclock_apply_item = NULL;
+  memset(&overclock_state, 0, sizeof overclock_state);
+  memset(&overclock_saved_state, 0, sizeof overclock_saved_state);
+  overclock_load_status = switch_read_overclock_config(&overclock_state);
+  overclock_saved_state = overclock_state;
+
+  overclock_folder_item = ui_menu_add_folder(parent, "Overclocking");
+  overclock_status_item = ui_menu_add_button_with_value(
+      MENU_ID_DO_NOTHING, overclock_folder_item, "Mode", 0, "", "");
+  overclock_status_item->disabled = 1;
+  overclock_current_arm_item = ui_menu_add_button_with_value(
+      MENU_ID_DO_NOTHING, overclock_folder_item, "Current CPU", 0, "", "");
+  overclock_current_arm_item->disabled = 1;
+  overclock_current_temp_item = ui_menu_add_button_with_value(
+      MENU_ID_DO_NOTHING, overclock_folder_item, "Temperature", 0, "", "");
+  overclock_current_temp_item->disabled = 1;
+
+  if (overclock_load_status != BMX_OVERCLOCK_READ_OK ||
+      (pi_model != 4 && pi_model != 5)) {
+    ui_menu_set_button_value_fitted(
+        overclock_status_item,
+        overclock_load_status == BMX_OVERCLOCK_READ_CONFLICT
+            ? "Conflict"
+            : "Invalid",
+        0);
+    ui_menu_add_button(MENU_OVERCLOCK_CONFIG_ERROR, overclock_folder_item,
+                       "Resolve config.txt...");
+    return;
+  }
+
+  overclock_arm_item = ui_menu_add_multiple_choice(
+      MENU_OVERCLOCK_ARM_FREQ, overclock_folder_item, "CPU Clock");
+  overclock_add_frequency_choices(
+      overclock_arm_item, pi_model == 4 ? 1500 : 2400,
+      pi_model == 4 ? 2400 : 3200, 25, overclock_state.arm_freq_mhz,
+      (overclock_state.present & BMX_OVERCLOCK_ARM_FREQ) != 0);
+
+  overclock_voltage_item = ui_menu_add_multiple_choice(
+      MENU_OVERCLOCK_VOLTAGE_DELTA, overclock_folder_item, "Voltage Offset");
+  overclock_add_voltage_choices(
+      overclock_voltage_item, overclock_state.over_voltage_delta_uv,
+      (overclock_state.present & BMX_OVERCLOCK_VOLTAGE_DELTA) != 0);
+
+  overclock_temp_item = ui_menu_add_multiple_choice(
+      MENU_OVERCLOCK_TEMP_LIMIT, overclock_folder_item, "Temperature Limit");
+  overclock_add_temperature_choices(
+      overclock_temp_item, overclock_state.temp_limit_c,
+      (overclock_state.present & BMX_OVERCLOCK_TEMP_LIMIT) != 0);
+
+  expert = ui_menu_add_folder(overclock_folder_item, "Expert");
+  overclock_core_item = ui_menu_add_multiple_choice(
+      MENU_OVERCLOCK_CORE_FREQ, expert, "Core Clock");
+  overclock_add_frequency_choices(
+      overclock_core_item, pi_model == 4 ? 500 : 910,
+      pi_model == 4 ? 800 : 1200, 10, overclock_state.core_freq_mhz,
+      (overclock_state.present & BMX_OVERCLOCK_CORE_FREQ) != 0);
+  overclock_v3d_item = ui_menu_add_multiple_choice(
+      MENU_OVERCLOCK_V3D_FREQ, expert, "V3D Clock");
+  overclock_add_frequency_choices(
+      overclock_v3d_item, pi_model == 4 ? 500 : 960,
+      pi_model == 4 ? 800 : 1200, 10, overclock_state.v3d_freq_mhz,
+      (overclock_state.present & BMX_OVERCLOCK_V3D_FREQ) != 0);
+
+  overclock_restore_item = ui_menu_add_button(
+      MENU_OVERCLOCK_RESTORE_DEFAULTS, overclock_folder_item,
+      "Restore Defaults");
+  overclock_apply_item = ui_menu_add_button(
+      MENU_OVERCLOCK_APPLY, overclock_folder_item, "Apply & Reboot...");
+  overclock_update_menu_state();
+}
+
 struct menu_item* add_joyport_options(struct menu_item* parent, int port) {
   int menu_id;
   switch (port) {
@@ -5840,7 +7085,7 @@ struct menu_item* add_joyport_options(struct menu_item* parent, int port) {
   child->choice_ints[7] = JOYDEV_NUMS_2;
   strcpy(child->choices[8], "CURS + LCTRL");
   child->choice_ints[8] = JOYDEV_CURS_LC;
-  strcpy(child->choices[9], "USB Mouse (1351)");
+  strcpy(child->choices[9], "USB Mouse");
   child->choice_ints[9] = JOYDEV_MOUSE;
   strcpy(child->choices[10], "Custom Keyset 1");
   child->choice_ints[10] = JOYDEV_KEYSET1;
@@ -6482,6 +7727,7 @@ void build_menu(struct menu_item *root) {
   ui_menu_add_divider(parent);
 
   emux_add_keyboard_options(parent);
+  ui_menu_add_button(MENU_KEYBOARD_MONITOR, parent, "Monitor...");
 
   if (emux_machine_class == BMC64_MACHINE_CLASS_C128) {
      c40_80_column_item = ui_menu_add_toggle_labels(
@@ -6531,10 +7777,43 @@ void build_menu(struct menu_item *root) {
       MENU_TEXT, parent, "Detected 1", 0, "", "");
   emu_set_mouse_info(detected_mouse_present, detected_mouse_product);
   ui_menu_add_divider(parent);
+  selected_mouse_type = BMX_MOUSE_TYPE_DEFAULT;
+  if (machine_supports_mouse_type()) {
+    child = ui_menu_add_multiple_choice(MENU_MOUSE_TYPE, parent, "Type");
+    child->num_choices = BMX_MOUSE_TYPE_NUM;
+    strcpy(child->choices[0], "1351");
+    child->choice_ints[0] = BMX_MOUSE_TYPE_1351;
+    strcpy(child->choices[1], "NEOS");
+    child->choice_ints[1] = BMX_MOUSE_TYPE_NEOS;
+    strcpy(child->choices[2], "Amiga");
+    child->choice_ints[2] = BMX_MOUSE_TYPE_AMIGA;
+    strcpy(child->choices[3], "Atari CX-22");
+    child->choice_ints[3] = BMX_MOUSE_TYPE_CX22;
+    strcpy(child->choices[4], "Atari ST");
+    child->choice_ints[4] = BMX_MOUSE_TYPE_ST;
+    strcpy(child->choices[5], "SmartMouse");
+    child->choice_ints[5] = BMX_MOUSE_TYPE_SMART;
+    strcpy(child->choices[6], "Micromys");
+    child->choice_ints[6] = BMX_MOUSE_TYPE_MICROMYS;
+    tmp = BMX_MOUSE_TYPE_DEFAULT;
+    emux_get_int(Setting_MouseType, &tmp);
+    if (tmp < 0 || tmp >= BMX_MOUSE_TYPE_NUM) {
+      tmp = BMX_MOUSE_TYPE_DEFAULT;
+    }
+    selected_mouse_type = (BmxMouseType)tmp;
+    child->value = BMX_MOUSE_TYPE_DEFAULT;
+    for (i = 0; i < child->num_choices; ++i) {
+      if (child->choice_ints[i] == tmp) {
+        child->value = i;
+        break;
+      }
+    }
+  }
   tmp = 100;
   emux_get_int(Setting_MouseSensitivity, &tmp);
   ui_menu_add_range(MENU_MOUSE_SENSITIVITY, parent, "Sensitivity (%)",
                     10, 200, 10, tmp);
+  ui_menu_add_button(MENU_MOUSE_MONITOR, parent, "Monitor...");
 
   parent = ui_menu_add_folder(root, "Joyports");
 
@@ -6590,12 +7869,13 @@ void build_menu(struct menu_item *root) {
      strcpy(child->choices[1], "#1 (Nav+Joy)");
      strcpy(child->choices[2], "#2 (Kyb+Joy)");
      strcpy(child->choices[3], "#3 (Waveshare Hat)");
-     if (circle_gpio_outputs_enabled() &&
-         emux_machine_class != BMC64_MACHINE_CLASS_PLUS4EMU &&
-         emux_machine_class != BMC64_MACHINE_CLASS_PLUS4) {
+     if (!gpio_userport_machine_supported()) {
+        strcpy(child->choices[4], "#4 (N/A: unsupported)");
+        child->choice_disabled[4] = 1;
+     } else if (circle_gpio_outputs_enabled()) {
         strcpy(child->choices[4], "#4 (Userport+Joy)");
      } else {
-        strcpy(child->choices[4], "#4 (N/A)");
+        strcpy(child->choices[4], "#4 (N/A: Outputs Disabled)");
      }
      strcpy(child->choices[5], "#5 (Custom)");
      child->choice_ints[0] = GPIO_CONFIG_DISABLED;
@@ -6613,9 +7893,17 @@ void build_menu(struct menu_item *root) {
         child->choice_disabled[5] = 1;
      }
 
+     gpio_outputs_item = ui_menu_add_toggle_labels(
+         MENU_GPIO_OUTPUTS, parent, "GPIO Outputs",
+         circle_gpio_outputs_enabled(), "Disabled", "Enabled");
+     if (!circle_gpio_enabled() || !gpio_userport_machine_supported()) {
+       gpio_outputs_item->disabled = 1;
+     }
+
      if (circle_gpio_enabled()) {
         ui_menu_add_button(MENU_CONFIGURE_GPIO,
                         parent, "Configure Custom GPIO...");
+        ui_menu_add_button(MENU_GPIO_MONITOR, parent, "Monitor...");
      }
 
   parent = network_folder_item = ui_menu_add_folder(root, "Network");
@@ -6690,6 +7978,30 @@ void build_menu(struct menu_item *root) {
     ui_menu_add_button(MENU_SYSTEM_UPDATE_DRAFT, parent,
                        "Test prepared draft...");
   }
+  {
+    char developer_password[BMX_DEVELOPER_PASSWORD_MAX_LEN + 1] = "";
+    struct menu_item *developer = ui_menu_add_folder(parent, "Developer");
+
+    developer_status_item = ui_menu_add_toggle_labels(
+        MENU_SYSTEM_DEVELOPER_STATUS, developer, "Status",
+        emux_developer_mode_enabled(), "Disabled", "Enabled");
+    if (!emux_get_developer_password(developer_password,
+                                     sizeof developer_password)) {
+      developer_password[0] = '\0';
+    }
+    developer_password_item = ui_menu_add_text_field_limited(
+        MENU_SYSTEM_DEVELOPER_PASSWORD, developer, "Password",
+        developer_password, BMX_DEVELOPER_PASSWORD_MAX_LEN);
+    ui_menu_set_text_field_display(developer_password_item, 20, 1);
+    developer_buffer_size_item = ui_menu_add_range(
+        MENU_SYSTEM_DEVELOPER_BUFFER_SIZE, developer, "Buffer size (KiB)",
+        BMX_DEVELOPER_LOG_BUFFER_MIN_KB, BMX_DEVELOPER_LOG_BUFFER_MAX_KB,
+        BMX_DEVELOPER_LOG_BUFFER_STEP_KB,
+        (int)emux_get_developer_log_buffer_kb());
+    ui_menu_add_button(MENU_SYSTEM_DEVELOPER_APPLY, developer,
+                       "Apply and Reboot...");
+  }
+  build_overclock_menu(parent);
   ui_menu_add_button(MENU_SYSTEM_REBOOT, parent, "Reboot...");
   ui_menu_add_button(MENU_SYSTEM_POWER_OFF, parent, "Power Off...");
 
@@ -6726,9 +8038,9 @@ void build_menu(struct menu_item *root) {
       sound_output_priority_item->choice_ints[
           sound_output_priority_item->value]);
 
-  emux_change_palette(0, palette_item[0]->value);
+  emux_apply_palette_setting(0);
   if (emux_machine_class == BMC64_MACHINE_CLASS_C128) {
-    emux_change_palette(1, palette_item[1]->value);
+    emux_apply_palette_setting(1);
   }
   ui_set_hotkeys();
   ui_set_joy_devs();
@@ -6944,6 +8256,14 @@ void menu_quick_func(int button_assignment) {
 }
 
 int emu_get_gpio_config() {
+  int config = gpio_config_item->choice_ints[gpio_config_item->value];
+  return config == GPIO_CONFIG_USERPORT &&
+                 !gpio_userport_config_available()
+             ? GPIO_CONFIG_DISABLED
+             : config;
+}
+
+int menu_get_gpio_selection(void) {
   return gpio_config_item->choice_ints[gpio_config_item->value];
 }
 
