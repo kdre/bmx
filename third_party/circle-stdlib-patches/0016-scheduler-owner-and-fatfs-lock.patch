@@ -1,0 +1,286 @@
+diff --git a/libs/circle/addon/fatfs/diskio.cpp b/libs/circle/addon/fatfs/diskio.cpp
+index 0d21a31..891be20 100644
+--- a/libs/circle/addon/fatfs/diskio.cpp
++++ b/libs/circle/addon/fatfs/diskio.cpp
+@@ -10,6 +10,7 @@
+ 
+ #include "ff.h"			/* Obtains integer types */
+ #include "diskio.h"		/* Declarations of disk functions */
++#include "ffsync.h"
+ #include <circle/device.h>
+ #include <circle/devicenameservice.h>
+ #include <circle/util.h>
+@@ -55,6 +56,7 @@ PARTITION VolToPart[FF_VOLUMES] =
+ 
+ static u8 *s_pBuffer = 0;
+ static unsigned s_nBufferSize = 0;
++static CFatFsLock s_DiskLock;
+ 
+ 
+ 
+@@ -67,6 +69,7 @@ static void disk_removed (
+ 	void *pContext
+ )
+ {
++	CFatFsLockGuard Guard (s_DiskLock);
+ 	*((CDevice **) pContext) = 0;
+ }
+ 
+@@ -80,6 +83,7 @@ DSTATUS disk_status (
+ 	BYTE pdrv		/* Physical drive nmuber to identify the drive */
+ )
+ {
++	CFatFsLockGuard Guard (s_DiskLock);
+ 	if (   pdrv < FF_VOLUMES
+ 	    && s_pVolume[pdrv] != 0)
+ 	{
+@@ -103,6 +107,7 @@ DSTATUS disk_initialize (
+ 	{
+ 		return STA_NOINIT;
+ 	}
++	CFatFsLockGuard Guard (s_DiskLock);
+ 
+ 	s_pVolume[pdrv] = CDeviceNameService::Get ()->GetDevice (s_pVolumeName[pdrv], TRUE);
+ 	if (s_pVolume[pdrv] != 0)
+@@ -132,6 +137,7 @@ DRESULT disk_read (
+ 	{
+ 		return RES_PARERR;
+ 	}
++	CFatFsLockGuard Guard (s_DiskLock);
+ 
+ 	CDevice *pDevice = s_pVolume[pdrv];
+ 	if (pDevice == 0)
+@@ -193,6 +199,7 @@ DRESULT disk_write (
+ 	{
+ 		return RES_PARERR;
+ 	}
++	CFatFsLockGuard Guard (s_DiskLock);
+ 
+ 	CDevice *pDevice = s_pVolume[pdrv];
+ 	if (pDevice == 0)
+@@ -245,6 +252,7 @@ DRESULT disk_ioctl (
+ 	void *buff		/* Buffer to send/receive control data */
+ )
+ {
++	CFatFsLockGuard Guard (s_DiskLock);
+ 	switch (cmd)
+ 	{
+ 	case GET_SECTOR_COUNT:
+@@ -326,4 +334,3 @@ DRESULT disk_ioctl (
+ 
+ 	return RES_PARERR;
+ }
+-
+diff --git a/libs/circle/addon/fatfs/ffsync.h b/libs/circle/addon/fatfs/ffsync.h
+new file mode 100644
+index 0000000..2784892
+--- /dev/null
++++ b/libs/circle/addon/fatfs/ffsync.h
+@@ -0,0 +1,98 @@
++#ifndef _circle_addon_fatfs_ffsync_h
++#define _circle_addon_fatfs_ffsync_h
++
++#include <circle/multicore.h>
++#include <circle/sched/scheduler.h>
++#include <circle/types.h>
++#include <assert.h>
++
++// A FatFs lock may be shared by the scheduler core and a non-scheduler core.
++// The scheduler core must yield while contended so the lock holder's I/O can
++// continue; a non-scheduler core must never enter Circle's scheduler.
++class CFatFsLock
++{
++public:
++	CFatFsLock (void)
++	:	m_nOwner (0),
++		m_nDepth (0)
++	{
++	}
++
++	void Acquire (void)
++	{
++		const uintptr nOwner = CurrentOwner ();
++		if (__atomic_load_n (&m_nOwner, __ATOMIC_ACQUIRE) == nOwner)
++		{
++			m_nDepth++;
++			return;
++		}
++
++		for (;;)
++		{
++			uintptr nExpected = 0;
++			if (__atomic_compare_exchange_n (&m_nOwner, &nExpected, nOwner,
++						 FALSE, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
++			{
++				m_nDepth = 1;
++				return;
++			}
++
++			if (CScheduler::IsActive () && CScheduler::IsOwnerCore ())
++			{
++				CScheduler::Get ()->Yield ();
++			}
++			else
++			{
++				asm volatile ("yield");
++			}
++		}
++	}
++
++	void Release (void)
++	{
++		assert (__atomic_load_n (&m_nOwner, __ATOMIC_RELAXED) == CurrentOwner ());
++		assert (m_nDepth > 0);
++		if (--m_nDepth == 0)
++		{
++			__atomic_store_n (&m_nOwner, 0, __ATOMIC_RELEASE);
++		}
++	}
++
++private:
++	static uintptr CurrentOwner (void)
++	{
++		if (CScheduler::IsActive () && CScheduler::IsOwnerCore ())
++		{
++			return reinterpret_cast<uintptr> (CScheduler::Get ()->GetCurrentTask ());
++		}
++#ifdef ARM_ALLOW_MULTI_CORE
++		return static_cast<uintptr> (CMultiCoreSupport::ThisCore () + 1U);
++#else
++		return 1U;
++#endif
++	}
++
++private:
++	volatile uintptr m_nOwner;
++	unsigned m_nDepth;
++};
++
++class CFatFsLockGuard
++{
++public:
++	explicit CFatFsLockGuard (CFatFsLock &Lock)
++	:	m_Lock (Lock)
++	{
++		m_Lock.Acquire ();
++	}
++
++	~CFatFsLockGuard (void)
++	{
++		m_Lock.Release ();
++	}
++
++private:
++	CFatFsLock &m_Lock;
++};
++
++#endif
+diff --git a/libs/circle/addon/fatfs/ffsystem.cpp b/libs/circle/addon/fatfs/ffsystem.cpp
+index 3f94812..2caaf80 100644
+--- a/libs/circle/addon/fatfs/ffsystem.cpp
++++ b/libs/circle/addon/fatfs/ffsystem.cpp
+@@ -6,7 +6,7 @@
+ 
+ 
+ #include "ff.h"
+-#include <circle/genericlock.h>
++#include "ffsync.h"
+ #include <circle/alloc.h>
+ #include <circle/timer.h>
+ #include <assert.h>
+@@ -17,7 +17,7 @@
+ /* Definitions of Mutex                                                   */
+ /*------------------------------------------------------------------------*/
+ 
+-static CGenericLock *s_pMutex[FF_VOLUMES + 1] = {0};
++static CFatFsLock *s_pMutex[FF_VOLUMES + 1] = {0};
+ 
+ 
+ /*------------------------------------------------------------------------*/
+@@ -35,7 +35,7 @@ int ff_mutex_create (	/* Returns 1:Function succeeded or 0:Could not create the
+ 	assert (vol <= FF_VOLUMES);
+ 	assert (s_pMutex[vol] == 0);
+ 
+-	s_pMutex[vol] = new CGenericLock ();
++	s_pMutex[vol] = new CFatFsLock ();
+ 	assert (s_pMutex[vol] != 0);
+ 
+ 	return 1;
+diff --git a/libs/circle/include/circle/sched/scheduler.h b/libs/circle/include/circle/sched/scheduler.h
+index a3c1f24..214f99a 100644
+--- a/libs/circle/include/circle/sched/scheduler.h
++++ b/libs/circle/include/circle/sched/scheduler.h
+@@ -107,6 +107,9 @@ public:
+ 		return s_pThis != 0 ? TRUE : FALSE;
+ 	}
+ 
++	/// \return Is the caller running on the core which owns this scheduler?
++	static boolean IsOwnerCore (void);
++
+ private:
+ 	void AddTask (CTask *pTask);
+ 	friend class CTask;
+@@ -119,6 +122,8 @@ private:
+ 	unsigned GetNextTask (void); // returns index into m_pTask or MAX_TASKS if no task was found
+ 
+ private:
++	unsigned m_nOwnerCore;
++
+ 	CTask *m_pTask[MAX_TASKS];
+ 	unsigned m_nTasks;
+ 
+diff --git a/libs/circle/lib/sched/scheduler.cpp b/libs/circle/lib/sched/scheduler.cpp
+index 52aeb66..273043d 100644
+--- a/libs/circle/lib/sched/scheduler.cpp
++++ b/libs/circle/lib/sched/scheduler.cpp
+@@ -18,6 +18,7 @@
+ // along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ //
+ #include <circle/sched/scheduler.h>
++#include <circle/multicore.h>
+ #include <circle/timer.h>
+ #include <circle/logger.h>
+ #include <circle/string.h>
+@@ -30,7 +31,12 @@ static const char FromScheduler[] = "sched";
+ CScheduler *CScheduler::s_pThis = 0;
+ 
+ CScheduler::CScheduler (void)
+-:	m_nTasks (0),
++#ifdef ARM_ALLOW_MULTI_CORE
++:	m_nOwnerCore (CMultiCoreSupport::ThisCore ()),
++#else
++:	m_nOwnerCore (0),
++#endif
++	m_nTasks (0),
+ 	m_pCurrent (0),
+ 	m_nCurrent (0),
+ 	m_pTaskSwitchHandler (0),
+@@ -482,9 +488,28 @@ unsigned CScheduler::GetNextTask (void)
+ CScheduler *CScheduler::Get (void)
+ {
+ 	assert (s_pThis != 0);
++	if (!IsOwnerCore ())
++	{
++#ifdef ARM_ALLOW_MULTI_CORE
++		CLogger::Get ()->Write (FromScheduler, LogPanic,
++				       "Scheduler owned by core %u called from core %u",
++				       s_pThis->m_nOwnerCore,
++				       CMultiCoreSupport::ThisCore ());
++#endif
++	}
+ 	return s_pThis;
+ }
+ 
++boolean CScheduler::IsOwnerCore (void)
++{
++	assert (s_pThis != 0);
++#ifdef ARM_ALLOW_MULTI_CORE
++	return CMultiCoreSupport::ThisCore () == s_pThis->m_nOwnerCore;
++#else
++	return TRUE;
++#endif
++}
++
+ TStackInfo GetCurrentStack (void)
+ {
+ 	TStackInfo StackInfo = __GetCurrentStackNoWeak ();

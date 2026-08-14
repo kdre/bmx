@@ -465,6 +465,10 @@ int overlay_diagnostics_get_mode(void) {
   return diagnostics_mode;
 }
 
+unsigned overlay_diagnostics_get_fps_milli(void) {
+  return diagnostics_fps_milli;
+}
+
 void overlay_diagnostics_set_frame_stats(unsigned fps_milli,
                                          unsigned core_busy_milli) {
   diagnostics_fps_milli = fps_milli;

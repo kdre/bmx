@@ -432,7 +432,7 @@ u32 MakeHvsPpfWord(u32 src, u32 dst, u32 xy, bool nearest) {
   if (phase >= (1 << kHvsPpfPhaseBits)) {
     phase = (1 << kHvsPpfPhaseBits) - 1;
   }
-  phase &= 0x3F;
+  phase &= (1U << (kHvsPpfPhaseBits + 1U)) - 1U;
 
   return (nearest ? kHvsPpfNoInterp : 0) |
          kHvsPpfAgc |

@@ -24,13 +24,12 @@ extern "C" {
 #include <strings.h>
 }
 
-#include <circle/sched/scheduler.h>
-
 #include <circle/devicenameservice.h>
 #include <circle/koptions.h>
 #include <circle/sound/hdmisoundbasedevice.h>
 #include <circle/sound/usbsoundbasedevice.h>
 #include <circle/string.h>
+#include <circle/timer.h>
 #include <circle/usb/usbaudiostreaming.h>
 
 namespace {
@@ -171,6 +170,9 @@ ViceSound::ViceSound(CInterruptSystem *pInterrupt,
       mSampleRate(SampleRate),
       mQueueSizeFrames(FRAG_SIZE * NUM_FRAGS),
       mNumChannels(2),
+      mQueueFillFrames(0),
+      mQueueMinimumFillFrames(FRAG_SIZE * NUM_FRAGS),
+      mWriteWaitCount(0U),
       mVolumePercent(100) {}
 
 ViceSound::~ViceSound(void) {
@@ -209,6 +211,9 @@ boolean ViceSound::StartUSB(void) {
 boolean ViceSound::Playback(int volume, int channels,
                             SoundOutputPriority priority) {
   CancelPlayback();
+
+  mQueueFillFrames = 0;
+  mQueueMinimumFillFrames = mQueueSizeFrames;
 
   mNumChannels = channels >= 1 ? (unsigned) channels : 1;
   mControlLock.Acquire();
@@ -321,7 +326,11 @@ unsigned ViceSound::AddChunk(s16 *pBuffer, unsigned nChunkSize) {
       written += (size_t) consumed;
       continue;
     }
-    CScheduler::Get()->Yield();
+    ++mWriteWaitCount;
+    // The audio queue is drained by the device/IRQ path. On Pi 5 the Circle
+    // scheduler belongs to core 0, so the VICE core waits only for device
+    // progress and never enters the scheduler here.
+    CTimer::SimpleusDelay(50U);
   }
 
   if (scaled_buffer) {
@@ -338,7 +347,16 @@ unsigned ViceSound::BufferSpaceSamples() {
 
   unsigned used_frames = mSoundDevice->GetQueueFramesAvail();
   if (used_frames >= mQueueSizeFrames) {
+    mQueueFillFrames = mQueueSizeFrames;
+    if (mQueueFillFrames < mQueueMinimumFillFrames) {
+      mQueueMinimumFillFrames = mQueueFillFrames;
+    }
     return 0;
+  }
+
+  mQueueFillFrames = used_frames;
+  if (mQueueFillFrames < mQueueMinimumFillFrames) {
+    mQueueMinimumFillFrames = mQueueFillFrames;
   }
 
   return mQueueSizeFrames - used_frames;

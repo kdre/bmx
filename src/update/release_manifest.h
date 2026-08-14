@@ -14,6 +14,8 @@ static const size_t kMaximumReleaseManifestBytes = 128U * 1024U;
 static const size_t kMaximumManifestTokens = 32768U;
 static const size_t kMaximumManifestFiles = 2048U;
 static const size_t kMaximumManifestDirectories = 2048U;
+static const size_t kMaximumManifestDeletions = 256U;
+static const size_t kMaximumManifestReplacements = 256U;
 static const size_t kMaximumManifestPathBytes = 240U;
 static const size_t kMaximumManifestSchemas = 32U;
 static const size_t kMaximumManifestMigrations = 64U;
@@ -42,6 +44,15 @@ struct ManifestFile {
 
 struct ManifestDirectory {
     char path[kMaximumManifestPathBytes + 1U];
+};
+
+struct ManifestDeletion {
+    char path[kMaximumManifestPathBytes + 1U];
+};
+
+struct ManifestReplacement {
+    char path[kMaximumManifestPathBytes + 1U];
+    char replaced_by[kMaximumManifestPathBytes + 1U];
 };
 
 struct ManifestConfigSchema {
@@ -78,9 +89,15 @@ struct ManifestAsset {
     size_t file_count;
     ManifestDirectory *directories;
     size_t directory_count;
+    ManifestDeletion *deletions;
+    size_t deletion_count;
+    ManifestReplacement *replacements;
+    size_t replacement_count;
+    bool configuration_reset_required;
 };
 
 struct ReleaseManifest {
+    uint32_t manifest_version;
     char version[65];
     char tag[129];
     char source_commit[65];
@@ -106,6 +123,10 @@ struct ManifestParseStorage {
     size_t file_capacity;
     ManifestDirectory *directories;
     size_t directory_capacity;
+    ManifestDeletion *deletions;
+    size_t deletion_capacity;
+    ManifestReplacement *replacements;
+    size_t replacement_capacity;
 };
 
 enum class ManifestParseStatus : uint8_t {

@@ -46,7 +46,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "network/network_manager.h"
+#include "network/network_service.h"
 #include "remote/circle_usb_diagnostic_adapter.h"
 #include "remote/developer_log_device.h"
 #include "remote/developer_log_ring.h"
@@ -287,7 +287,7 @@ public:
   ViceScreenApp(const char *kernel)
       : ViceApp(kernel),
         mEmulatorCore(nullptr),
-        mNetworkManager(nullptr),
+        mNetworkService(nullptr),
         mNetworkStarted(false),
         mTimer(&mInterrupt),
         mLogger(mOptions.GetLogLevel(), &mTimer),
@@ -297,7 +297,7 @@ public:
 #endif
         {
      mEmulatorCore = new ViceEmulatorCore(&mMemory, circle_cycles_per_second());
-     mNetworkManager = new bmx::NetworkManager();
+     mNetworkService = new bmx::NetworkService();
   }
 
   virtual bool Initialize(void);
@@ -306,7 +306,7 @@ protected:
   bool StartNetwork(void);
 
   EmulatorCore *mEmulatorCore;
-  bmx::NetworkManager *mNetworkManager;
+  bmx::NetworkService *mNetworkService;
   bool mNetworkStarted;
   CTimer mTimer;
   CLogger mLogger;
@@ -389,8 +389,8 @@ protected:
   char mTimingOption[8];
 
 protected:
-  void StartDeveloperService(void);
-  void StopDeveloperService(void);
+  void StartRemoteService(void);
+  void StopRemoteService(void);
 };
 
 #endif

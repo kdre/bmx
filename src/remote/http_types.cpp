@@ -52,6 +52,8 @@ const char *HttpMethodName(HttpMethod method) {
         return "PUT";
     case HttpMethod::Post:
         return "POST";
+    case HttpMethod::Delete:
+        return "DELETE";
     }
     return "";
 }

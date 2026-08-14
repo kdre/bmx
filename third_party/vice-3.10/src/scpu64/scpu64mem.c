@@ -204,8 +204,12 @@ void mem_toggle_watchpoints(int flag, void *context)
 
 void scpu64_mem_init(void)
 {
+    /* FIXME: xscpu64 does not (yet) support the "sc" way of handling the REU */
+#if 0
     /* Initialize REU BA low interface (FIXME find a better place for this) */
-    reu_ba_register(vicii_cycle, vicii_steal_cycles, &maincpu_ba_low_flags, MAINCPU_BA_LOW_REU);
+    /*reu_ba_register(vicii_cycle, vicii_steal_cycles, &maincpu_ba_low_flags, MAINCPU_BA_LOW_REU);*/
+    reu_ba_register(vicii_cycle_reu, vicii_steal_cycles, &maincpu_ba_low_flags, MAINCPU_BA_LOW_REU);
+#endif
 }
 
 void mem_pla_config_changed(void)

@@ -104,6 +104,7 @@ ViceOptions::ViceOptions(void)
       m_bDemoEnabled(false), m_bSerialEnabled(false),
       m_bGPIOOutputsEnabled(false), m_bDeveloperModeEnabled(false),
       m_developerLogBufferKB(BMX_DEVELOPER_LOG_BUFFER_DEFAULT_KB),
+      m_bApiModeEnabled(false),
       m_disk_volume{0}, m_nCyclesPerSecond(0),
       m_audioOut(VCHIQSoundDestinationAuto), m_bDPIEnabled(false),
       m_nFramebufferWidth(0), m_nFramebufferHeight(0),
@@ -128,6 +129,7 @@ ViceOptions::ViceOptions(void)
   m_networkWifiSSID[0] = '\0';
   m_networkWifiPSK[0] = '\0';
   m_developerPassword[0] = '\0';
+  m_apiPassword[0] = '\0';
   strcpy(m_networkWifiCountry, "DE");
   strcpy(m_disk_volume, "SD");
   m_rs232NetTarget[0] = '\0';
@@ -191,6 +193,13 @@ ViceOptions::ViceOptions(void)
           value % BMX_DEVELOPER_LOG_BUFFER_STEP_KB == 0U) {
         m_developerLogBufferKB = value;
       }
+    } else if (strcmp(pOption, "api_mode") == 0) {
+      m_bApiModeEnabled = strcmp(pValue, "true") == 0 ||
+                          strcmp(pValue, "1") == 0;
+    } else if (strcmp(pOption, "api_password") == 0) {
+      DecodeOptionValue(pValue);
+      strncpy(m_apiPassword, pValue, sizeof m_apiPassword - 1);
+      m_apiPassword[sizeof m_apiPassword - 1] = '\0';
     } else if (strcmp(pOption, "cycles_per_refresh") == 0 || strcmp(pOption, "cycles_per_second") == 0) {
       // This was named incorrectly in earlier versions. Keeping the old bad name working.
       m_nCyclesPerSecond = atol(pValue);
@@ -415,6 +424,10 @@ const char *ViceOptions::GetDeveloperPassword(void) const {
 unsigned ViceOptions::GetDeveloperLogBufferKB(void) const {
   return m_developerLogBufferKB;
 }
+
+bool ViceOptions::ApiModeEnabled(void) const { return m_bApiModeEnabled; }
+
+const char *ViceOptions::GetApiPassword(void) const { return m_apiPassword; }
 
 bool ViceOptions::DPIEnabled(void) const { return m_bDPIEnabled; }
 

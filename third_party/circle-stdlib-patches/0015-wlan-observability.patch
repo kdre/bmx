@@ -1,0 +1,804 @@
+diff --git a/libs/circle/addon/wlan/bcm4343.cpp b/libs/circle/addon/wlan/bcm4343.cpp
+index 0568a5a6..8853fcb8 100644
+--- a/libs/circle/addon/wlan/bcm4343.cpp
++++ b/libs/circle/addon/wlan/bcm4343.cpp
+@@ -377,6 +377,8 @@ extern "C" void ether4330hardreset (Ether *pEther, const char *pReason);
+ extern "C" void ether4330linkdowncleanup (Ether *pEther, const char *pReason);
+ extern "C" void ether4330dumptrace (Ether *pEther, const char *pReason);
+ extern "C" void ether4330debugauthstart (Ether *pEther, unsigned nAuthGeneration);
++extern "C" int ether4330flowstatus (Ether *pEther, bmx_wlan_flow_status_t *pStatus);
++extern "C" void ether4330rxhandoff (Ether *pEther, uvlong nElapsedUS);
+ extern "C" void bmx_l2_flush_8021x_rx (const char *pReason);
+ 
+ static ether_pnp_t *s_pEtherPnpHandler = 0;
+@@ -642,6 +644,7 @@ boolean CBcm4343Device::SendFrame (const void *pBuffer, unsigned nLength)
+ 	pBlock->wp += nLength;
+ 
+ 	assert (s_EtherDevice.oq != 0);
++	pBlock->timingus = p9microseconds ();
+ 	qpass (s_EtherDevice.oq, pBlock);
+ 	BcmTraceDHCPFrame ("bcm tx-queued", pBuffer, nLength);
+ 	BcmTraceEAPOLFrame ("bcm tx-queued", pBuffer, nLength);
+@@ -677,11 +680,20 @@ boolean CBcm4343Device::SendFrame (const void *pBuffer, unsigned nLength)
+ boolean CBcm4343Device::ReceiveFrame (void *pBuffer, unsigned *pResultLength)
+ {
+ 	assert (pBuffer != 0);
+-	unsigned nLength = m_RxQueue.Dequeue (pBuffer);
++	void *pTiming = 0;
++	unsigned nLength = m_RxQueue.Dequeue (pBuffer, &pTiming);
+ 	if (nLength == 0)
+ 	{
+ 		return FALSE;
+ 	}
++	u64 nNowUS = p9microseconds ();
++	uintptr nStartUS = reinterpret_cast<uintptr> (pTiming);
++#if AARCH == 32
++	u64 nElapsedUS = static_cast<u32> (nNowUS) - static_cast<u32> (nStartUS);
++#else
++	u64 nElapsedUS = nNowUS - nStartUS;
++#endif
++	ether4330rxhandoff (&s_EtherDevice, nElapsedUS);
+ 
+ 	assert (pResultLength != 0);
+ 	*pResultLength = nLength;
+@@ -758,6 +770,11 @@ boolean CBcm4343Device::IsLinkUp (void)
+ 	return FALSE;
+ }
+ 
++boolean CBcm4343Device::GetFlowStatus (bmx_wlan_flow_status_t *pStatus) const
++{
++	return ether4330flowstatus (&s_EtherDevice, pStatus) ? TRUE : FALSE;
++}
++
+ boolean CBcm4343Device::SetMulticastFilter (const u8 Groups[][MAC_ADDRESS_SIZE])
+ {
+ 	u32 nGroups = 0;
+@@ -1306,14 +1323,15 @@ void CBcm4343Device::DumpStatus (void)
+ 	print (Buffer);
+ }
+ 
+-void CBcm4343Device::FrameReceived (const void *pBuffer, unsigned nLength)
++void CBcm4343Device::FrameReceived (const void *pBuffer, unsigned nLength, u64 nStartUS)
+ {
+ 	assert (s_pThis != 0);
+ 	BcmTraceDHCPFrame ("bcm rx-enqueue", pBuffer, nLength);
+ 	BcmTraceEAPOLFrame ("bcm rx-enqueue", pBuffer, nLength);
+ 	BcmLowEAPOLFrame (BMX_EAPOL_STAGE_BCM_RX_ENQUEUE, pBuffer, nLength);
+ 	BcmLowDHCPFrame (BMX_DHCP_STAGE_BCM_RX_ENQUEUE, pBuffer, nLength);
+-	s_pThis->m_RxQueue.Enqueue (pBuffer, nLength);
++	s_pThis->m_RxQueue.Enqueue (pBuffer, nLength,
++				     reinterpret_cast<void *> (static_cast<uintptr> (nStartUS)));
+ }
+ 
+ void CBcm4343Device::ScanResultReceived (const void *pBuffer, unsigned nLength)
+@@ -1360,7 +1378,7 @@ void etheriq (Ether *pEther, Block *pBlock, unsigned nFlag)
+ 	BcmTraceEAPOLFrame ("bcm etheriq", pBlock->rp, BLEN (pBlock));
+ 	BcmLowEAPOLFrame (BMX_EAPOL_STAGE_BCM_ETHERIQ, pBlock->rp, BLEN (pBlock));
+ 	BcmLowDHCPFrame (BMX_DHCP_STAGE_BCM_ETHERIQ, pBlock->rp, BLEN (pBlock));
+-	CBcm4343Device::FrameReceived (pBlock->rp, BLEN (pBlock));
++	CBcm4343Device::FrameReceived (pBlock->rp, BLEN (pBlock), pBlock->timingus);
+ 
+ 	freeb (pBlock);
+ }
+diff --git a/libs/circle/addon/wlan/bcm4343.h b/libs/circle/addon/wlan/bcm4343.h
+index a772430d..fde255d7 100644
+--- a/libs/circle/addon/wlan/bcm4343.h
++++ b/libs/circle/addon/wlan/bcm4343.h
+@@ -26,6 +26,7 @@
+ #include <circle/spinlock.h>
+ #include <circle/string.h>
+ #include <circle/types.h>
++#include "bmxwlanstatus.h"
+ #include "etherevent.h"
+ 
+ typedef ether_event_handler_t TBcm4343EventHandler;
+@@ -53,6 +54,8 @@ public:
+ 
+ 	boolean IsLinkUp (void);
+ 
++	boolean GetFlowStatus (bmx_wlan_flow_status_t *pStatus) const;
++
+ 	boolean SetMulticastFilter (const u8 Groups[][MAC_ADDRESS_SIZE]);
+ 
+ public:
+@@ -90,7 +93,7 @@ public:
+ 	void DumpStatus (void);
+ 
+ public:
+-	static void FrameReceived (const void *pBuffer, unsigned nLength);
++	static void FrameReceived (const void *pBuffer, unsigned nLength, u64 nStartUS);
+ 	static void ScanResultReceived (const void *pBuffer, unsigned nLength);
+ 
+ private:
+diff --git a/libs/circle/addon/wlan/bmxwlanstatus.h b/libs/circle/addon/wlan/bmxwlanstatus.h
+new file mode 100644
+index 00000000..85f78ba5
+--- /dev/null
++++ b/libs/circle/addon/wlan/bmxwlanstatus.h
+@@ -0,0 +1,65 @@
++#ifndef _wlan_bmxwlanstatus_h
++#define _wlan_bmxwlanstatus_h
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct bmx_wlan_flow_status
++{
++	unsigned tx_sequence;
++	unsigned tx_window;
++	unsigned flow_control_mask;
++	unsigned tx_queue_frames;
++	unsigned long long tx_frames;
++	unsigned long long rx_data_frames;
++	unsigned long long tx_window_updates;
++	unsigned long long tx_flow_updates;
++	unsigned long long tx_window_stalls;
++	unsigned long long tx_window_stall_ms;
++	unsigned long long tx_window_stall_max_ms;
++	unsigned long long tx_window_stall_current_ms;
++	unsigned long long tx_flow_stalls;
++	unsigned long long tx_flow_stall_ms;
++	unsigned long long tx_flow_stall_max_ms;
++	unsigned long long tx_flow_stall_current_ms;
++	unsigned long long tx_timing_samples;
++	unsigned long long tx_queue_us;
++	unsigned long long tx_queue_max_us;
++	unsigned long long tx_pktlock_wait_us;
++	unsigned long long tx_pktlock_wait_max_us;
++	unsigned long long tx_sdio_us;
++	unsigned long long tx_sdio_max_us;
++	unsigned long long tx_pktlock_yield_calls;
++	unsigned long long tx_pktlock_yield_us;
++	unsigned long long tx_pktlock_yield_max_us;
++	unsigned long long rx_timing_samples;
++	unsigned long long rx_pktlock_wait_us;
++	unsigned long long rx_pktlock_wait_max_us;
++	unsigned long long rx_sdio_us;
++	unsigned long long rx_sdio_max_us;
++	unsigned long long rx_pktlock_yield_calls;
++	unsigned long long rx_pktlock_yield_us;
++	unsigned long long rx_pktlock_yield_max_us;
++	unsigned long long rx_to_netdev_samples;
++	unsigned long long rx_to_netdev_us;
++	unsigned long long rx_to_netdev_max_us;
++	unsigned long long emmc_dataready_precheck_hits;
++	unsigned long long emmc_dataready_poll_hits;
++	unsigned long long emmc_dataready_sleep_calls;
++	unsigned long long emmc_dataready_poll_us;
++	unsigned long long emmc_dataready_poll_max_us;
++	unsigned long long emmc_datadone_precheck_hits;
++	unsigned long long emmc_datadone_poll_hits;
++	unsigned long long emmc_datadone_sleep_calls;
++	unsigned long long emmc_datadone_poll_us;
++	unsigned long long emmc_datadone_poll_max_us;
++} bmx_wlan_flow_status_t;
++
++void bmx_emmc_wait_status(bmx_wlan_flow_status_t *status);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/libs/circle/addon/wlan/emmc.c b/libs/circle/addon/wlan/emmc.c
+index dfdb78f2..b2de20ff 100644
+--- a/libs/circle/addon/wlan/emmc.c
++++ b/libs/circle/addon/wlan/emmc.c
+@@ -23,6 +23,7 @@
+ #include "../port/sd.h"
+ #else
+ #include "p9compat.h"
++#include "bmxwlanstatus.h"
+ #endif
+ 
+ #if RASPPI <= 4
+@@ -188,6 +189,17 @@ struct Ctlr {
+ 
+ #if RASPPI >= 5
+ 	int	blksize;
++	Lock	waitstatlock;
++	uvlong	datareadyprecheckhits;
++	uvlong	datareadypollhits;
++	uvlong	datareadysleepcalls;
++	uvlong	datareadypollus;
++	uvlong	datareadypollmaxus;
++	uvlong	datadoneprecheckhits;
++	uvlong	datadonepollhits;
++	uvlong	datadonesleepcalls;
++	uvlong	datadonepollus;
++	uvlong	datadonepollmaxus;
+ #endif
+ };
+ 
+@@ -268,8 +280,43 @@ datadone(void*dummy)
+ 
+ enum {
+ 	EmmcWaitPollUS = 200,
++	EmmcWaitPrecheckHit,
++	EmmcWaitPollHit,
++	EmmcWaitSleep,
+ };
+ 
++static void
++emmcwaitrecord(sleephandler_t *handler, int result, uvlong pollus)
++{
++	lock(&emmc.waitstatlock);
++	if(handler == dataready){
++		if(result == EmmcWaitPrecheckHit)
++			emmc.datareadyprecheckhits++;
++		else{
++			emmc.datareadypollus += pollus;
++			if(pollus > emmc.datareadypollmaxus)
++				emmc.datareadypollmaxus = pollus;
++			if(result == EmmcWaitPollHit)
++				emmc.datareadypollhits++;
++			else
++				emmc.datareadysleepcalls++;
++		}
++	}else if(handler == datadone){
++		if(result == EmmcWaitPrecheckHit)
++			emmc.datadoneprecheckhits++;
++		else{
++			emmc.datadonepollus += pollus;
++			if(pollus > emmc.datadonepollmaxus)
++				emmc.datadonepollmaxus = pollus;
++			if(result == EmmcWaitPollHit)
++				emmc.datadonepollhits++;
++			else
++				emmc.datadonesleepcalls++;
++		}
++	}
++	unlock(&emmc.waitstatlock);
++}
++
+ #endif
+ 
+ static void
+@@ -278,18 +325,45 @@ emmcwait(Rendez *rendez, sleephandler_t *handler, void *param, unsigned msecs)
+ #if RASPPI >= 5
+ 	uvlong start, elapsed;
+ 
+-	if((*handler)(param))
++	if((*handler)(param)){
++		emmcwaitrecord(handler, EmmcWaitPrecheckHit, 0);
+ 		return;
++	}
+ 	start = p9microseconds();
+ 	do{
+-		if((*handler)(param))
++		if((*handler)(param)){
++			elapsed = p9microseconds() - start;
++			emmcwaitrecord(handler, EmmcWaitPollHit, elapsed);
+ 			return;
++		}
+ 		elapsed = p9microseconds() - start;
+ 	}while(elapsed < EmmcWaitPollUS);
++	emmcwaitrecord(handler, EmmcWaitSleep, elapsed);
+ #endif
+ 	tsleep(rendez, handler, param, msecs);
+ }
+ 
++void
++bmx_emmc_wait_status(bmx_wlan_flow_status_t *status)
++{
++	if(status == nil)
++		return;
++#if RASPPI >= 5
++	lock(&emmc.waitstatlock);
++	status->emmc_dataready_precheck_hits = emmc.datareadyprecheckhits;
++	status->emmc_dataready_poll_hits = emmc.datareadypollhits;
++	status->emmc_dataready_sleep_calls = emmc.datareadysleepcalls;
++	status->emmc_dataready_poll_us = emmc.datareadypollus;
++	status->emmc_dataready_poll_max_us = emmc.datareadypollmaxus;
++	status->emmc_datadone_precheck_hits = emmc.datadoneprecheckhits;
++	status->emmc_datadone_poll_hits = emmc.datadonepollhits;
++	status->emmc_datadone_sleep_calls = emmc.datadonesleepcalls;
++	status->emmc_datadone_poll_us = emmc.datadonepollus;
++	status->emmc_datadone_poll_max_us = emmc.datadonepollmaxus;
++	unlock(&emmc.waitstatlock);
++#endif
++}
++
+ static int
+ cardintready(void*dummy)
+ {
+diff --git a/libs/circle/addon/wlan/ether4330.c b/libs/circle/addon/wlan/ether4330.c
+index 7e29df1c..8d50e92e 100644
+--- a/libs/circle/addon/wlan/ether4330.c
++++ b/libs/circle/addon/wlan/ether4330.c
+@@ -15,6 +15,7 @@
+ #else
+ #include "p9compat.h"
+ #endif
++#include "bmxwlanstatus.h"
+ 
+ extern int sdiocardintr(int);
+ 
+@@ -305,9 +306,45 @@ struct Ctlr {
+ 	uchar	rxseq;
+ 	ether_event_handler_t *evhndlr;
+ 	void	*evcontext;
++	Lock	statlock;
++	uvlong	stat_txframes;
++	uvlong	stat_rxdataframes;
++	uvlong	stat_txwindowupdates;
++	uvlong	stat_txflowupdates;
++	uvlong	stat_txwindowstalls;
++	uvlong	stat_txwindowstallticks;
++	uvlong	stat_txwindowstallmaxticks;
++	ulong	stat_txwindowstallstart;
++	int	stat_txwindowblocked;
++	uvlong	stat_txflowstalls;
++	uvlong	stat_txflowstallticks;
++	uvlong	stat_txflowstallmaxticks;
++	ulong	stat_txflowstallstart;
++	int	stat_txflowblocked;
++	uvlong	stat_txtimingsamples;
++	uvlong	stat_txqueueus;
++	uvlong	stat_txqueuemaxus;
++	uvlong	stat_txpktlockwaitus;
++	uvlong	stat_txpktlockwaitmaxus;
++	uvlong	stat_txsdious;
++	uvlong	stat_txsdiomaxus;
++	uvlong	stat_txpktlockyieldcalls;
++	uvlong	stat_txpktlockyieldus;
++	uvlong	stat_txpktlockyieldmaxus;
+ #if RASPPI >= 5
+ 	int	txyieldbatch;
+ #endif
++	uvlong	stat_rxtimingsamples;
++	uvlong	stat_rxpktlockwaitus;
++	uvlong	stat_rxpktlockwaitmaxus;
++	uvlong	stat_rxsdious;
++	uvlong	stat_rxsdiomaxus;
++	uvlong	stat_rxpktlockyieldcalls;
++	uvlong	stat_rxpktlockyieldus;
++	uvlong	stat_rxpktlockyieldmaxus;
++	uvlong	stat_rxtonetdevsamples;
++	uvlong	stat_rxtonetdevus;
++	uvlong	stat_rxtonetdevmaxus;
+ #ifdef BMC64_WLAN_LOW_IMPACT_TRACE
+ 	ulong	dbg_iw_calls;
+ 	ulong	dbg_iw_intpend0;
+@@ -2376,10 +2413,19 @@ wlreadpkt(Ctlr *ctl)
+ 	Block *b;
+ 	Sdpcm *p;
+ 	int len, lenck;
++	uvlong pktlockstart, pktlockwaitus, sdious, sdiostart;
++	uvlong unlockus;
++#if RASPPI <= 4
++	uvlong unlockstart;
++#endif
+ 
+ 	b = allocb(2048);
++	b->timingus = p9microseconds();
+ 	p = (Sdpcm*)b->wp;
++	pktlockstart = p9microseconds();
+ 	qlock(&ctl->pktlock);
++	pktlockwaitus = p9microseconds() - pktlockstart;
++	sdious = 0;
+ 	if(ctl->resetting){
+ 		freeb(b);
+ 		qunlock(&ctl->pktlock);
+@@ -2394,7 +2440,9 @@ wlreadpkt(Ctlr *ctl)
+ 			b = nil;
+ 			break;
+ 		}
++		sdiostart = p9microseconds();
+ 		packetrw(0, b->wp, sizeof(*p));
++		sdious += p9microseconds() - sdiostart;
+ 		len = p->len[0] | p->len[1]<<8;
+ #ifdef BMC64_WLAN_LOW_IMPACT_TRACE
+ 		ctl->dbg_last_len = len;
+@@ -2427,19 +2475,168 @@ wlreadpkt(Ctlr *ctl)
+ 				;
+ 			continue;
+ 		}
+-		if(len > sizeof(*p))
++		if(len > sizeof(*p)){
++			sdiostart = p9microseconds();
+ 			packetrw(0, b->wp + sizeof(*p), len - sizeof(*p));
++			sdious += p9microseconds() - sdiostart;
++		}
+ 		b->wp += len;
+ 		break;
+ 	}
+ #if RASPPI >= 5
+ 	qunlock_no_yield(&ctl->pktlock);
++	unlockus = 0;
+ #else
++	unlockstart = p9microseconds();
+ 	qunlock(&ctl->pktlock);
++	unlockus = p9microseconds() - unlockstart;
++#endif
++	lock(&ctl->statlock);
++	ctl->stat_rxtimingsamples++;
++	ctl->stat_rxpktlockwaitus += pktlockwaitus;
++	if(pktlockwaitus > ctl->stat_rxpktlockwaitmaxus)
++		ctl->stat_rxpktlockwaitmaxus = pktlockwaitus;
++	ctl->stat_rxsdious += sdious;
++	if(sdious > ctl->stat_rxsdiomaxus)
++		ctl->stat_rxsdiomaxus = sdious;
++#if RASPPI <= 4
++	ctl->stat_rxpktlockyieldcalls++;
+ #endif
++	ctl->stat_rxpktlockyieldus += unlockus;
++	if(unlockus > ctl->stat_rxpktlockyieldmaxus)
++		ctl->stat_rxpktlockyieldmaxus = unlockus;
++	unlock(&ctl->statlock);
+ 	return b;
+ }
+ 
++static void
++wlstatblock(Ctlr *ctl, int window)
++{
++	lock(&ctl->statlock);
++	if(window){
++		if(!ctl->stat_txwindowblocked){
++			ctl->stat_txwindowblocked = 1;
++			ctl->stat_txwindowstallstart = m->ticks;
++			ctl->stat_txwindowstalls++;
++		}
++	}else if(!ctl->stat_txflowblocked){
++		ctl->stat_txflowblocked = 1;
++		ctl->stat_txflowstallstart = m->ticks;
++		ctl->stat_txflowstalls++;
++	}
++	unlock(&ctl->statlock);
++}
++
++static void
++wlstatunblock(Ctlr *ctl, int window)
++{
++	uvlong elapsed;
++
++	lock(&ctl->statlock);
++	if(window){
++		if(ctl->stat_txwindowblocked){
++			elapsed = m->ticks - ctl->stat_txwindowstallstart;
++			ctl->stat_txwindowstallticks += elapsed;
++			if(elapsed > ctl->stat_txwindowstallmaxticks)
++				ctl->stat_txwindowstallmaxticks = elapsed;
++			ctl->stat_txwindowblocked = 0;
++		}
++	}else if(ctl->stat_txflowblocked){
++		elapsed = m->ticks - ctl->stat_txflowstallstart;
++		ctl->stat_txflowstallticks += elapsed;
++		if(elapsed > ctl->stat_txflowstallmaxticks)
++			ctl->stat_txflowstallmaxticks = elapsed;
++		ctl->stat_txflowblocked = 0;
++	}
++	unlock(&ctl->statlock);
++}
++
++static uvlong
++wlstattoms(uvlong ticks)
++{
++	return ticks * 1000 / HZ;
++}
++
++int
++ether4330flowstatus(Ether *edev, bmx_wlan_flow_status_t *status)
++{
++	Ctlr *ctl;
++	uvlong current;
++
++	if(edev == nil || status == nil || edev->ctlr == nil)
++		return 0;
++	ctl = edev->ctlr;
++	memset(status, 0, sizeof *status);
++
++	lock(&ctl->txwinlock);
++	status->tx_sequence = ctl->txseq;
++	status->tx_window = ctl->txwindow;
++	status->flow_control_mask = ctl->fcmask;
++	unlock(&ctl->txwinlock);
++	status->tx_queue_frames = edev->oq != nil ? qlen(edev->oq) : 0;
++
++	lock(&ctl->statlock);
++	status->tx_frames = ctl->stat_txframes;
++	status->rx_data_frames = ctl->stat_rxdataframes;
++	status->tx_window_updates = ctl->stat_txwindowupdates;
++	status->tx_flow_updates = ctl->stat_txflowupdates;
++	status->tx_window_stalls = ctl->stat_txwindowstalls;
++	status->tx_window_stall_ms = wlstattoms(ctl->stat_txwindowstallticks);
++	status->tx_window_stall_max_ms = wlstattoms(ctl->stat_txwindowstallmaxticks);
++	if(ctl->stat_txwindowblocked){
++		current = m->ticks - ctl->stat_txwindowstallstart;
++		status->tx_window_stall_current_ms = wlstattoms(current);
++	}
++	status->tx_flow_stalls = ctl->stat_txflowstalls;
++	status->tx_flow_stall_ms = wlstattoms(ctl->stat_txflowstallticks);
++	status->tx_flow_stall_max_ms = wlstattoms(ctl->stat_txflowstallmaxticks);
++	if(ctl->stat_txflowblocked){
++		current = m->ticks - ctl->stat_txflowstallstart;
++		status->tx_flow_stall_current_ms = wlstattoms(current);
++	}
++	status->tx_timing_samples = ctl->stat_txtimingsamples;
++	status->tx_queue_us = ctl->stat_txqueueus;
++	status->tx_queue_max_us = ctl->stat_txqueuemaxus;
++	status->tx_pktlock_wait_us = ctl->stat_txpktlockwaitus;
++	status->tx_pktlock_wait_max_us = ctl->stat_txpktlockwaitmaxus;
++	status->tx_sdio_us = ctl->stat_txsdious;
++	status->tx_sdio_max_us = ctl->stat_txsdiomaxus;
++	status->tx_pktlock_yield_calls = ctl->stat_txpktlockyieldcalls;
++	status->tx_pktlock_yield_us = ctl->stat_txpktlockyieldus;
++	status->tx_pktlock_yield_max_us = ctl->stat_txpktlockyieldmaxus;
++	status->rx_timing_samples = ctl->stat_rxtimingsamples;
++	status->rx_pktlock_wait_us = ctl->stat_rxpktlockwaitus;
++	status->rx_pktlock_wait_max_us = ctl->stat_rxpktlockwaitmaxus;
++	status->rx_sdio_us = ctl->stat_rxsdious;
++	status->rx_sdio_max_us = ctl->stat_rxsdiomaxus;
++	status->rx_pktlock_yield_calls = ctl->stat_rxpktlockyieldcalls;
++	status->rx_pktlock_yield_us = ctl->stat_rxpktlockyieldus;
++	status->rx_pktlock_yield_max_us = ctl->stat_rxpktlockyieldmaxus;
++	status->rx_to_netdev_samples = ctl->stat_rxtonetdevsamples;
++	status->rx_to_netdev_us = ctl->stat_rxtonetdevus;
++	status->rx_to_netdev_max_us = ctl->stat_rxtonetdevmaxus;
++	unlock(&ctl->statlock);
++	bmx_emmc_wait_status(status);
++
++	return 1;
++}
++
++void
++ether4330rxhandoff(Ether *edev, uvlong elapsedus)
++{
++	Ctlr *ctl;
++
++	if(edev == nil || edev->ctlr == nil)
++		return;
++	ctl = edev->ctlr;
++	lock(&ctl->statlock);
++	ctl->stat_rxtonetdevsamples++;
++	ctl->stat_rxtonetdevus += elapsedus;
++	if(elapsedus > ctl->stat_rxtonetdevmaxus)
++		ctl->stat_rxtonetdevmaxus = elapsedus;
++	unlock(&ctl->statlock);
++}
++
+ static void
+ txstart(Ether *edev)
+ {
+@@ -2447,6 +2644,9 @@ txstart(Ether *edev)
+ 	Sdpcm *p;
+ 	Block *b;
+ 	int len, off;
++	uvlong queueus, pktlockstart, pktlockwaitus;
++	uvlong sdiostart, sdious, unlockstart, unlockus;
++	int yieldcall;
+ 
+ 	ctl = edev->ctlr;
+ 	if(ctl->resetting)
+@@ -2467,6 +2667,8 @@ txstart(Ether *edev)
+ #endif
+ 			//print("f");
+ 			unlock(&ctl->txwinlock);
++			if(qlen(edev->oq) != 0)
++				wlstatblock(ctl, 1);
+ #ifdef BMC64_WLAN_TRACE
+ 			if(qlen(edev->oq) != 0)
+ 				print("bmx-wl-dhcp: tx blocked window txseq %d txwin %d fcmask %#x qlen %u\n",
+@@ -2482,6 +2684,8 @@ txstart(Ether *edev)
+ #endif
+ 			//print("x");
+ 			unlock(&ctl->txwinlock);
++			if(qlen(edev->oq) != 0)
++				wlstatblock(ctl, 0);
+ #ifdef BMC64_WLAN_TRACE
+ 			if(qlen(edev->oq) != 0)
+ 				print("bmx-wl-dhcp: tx blocked flow txseq %d txwin %d fcmask %#x qlen %u\n",
+@@ -2493,6 +2697,7 @@ txstart(Ether *edev)
+ 		b = qget(edev->oq);
+ 		if(b == nil)
+ 			break;
++		queueus = p9microseconds() - b->timingus;
+ 		off = ((uintptr)b->rp & 3) + sizeof(Sdpcm);
+ 		wldhcptrace("wl tx-qget", b->rp, BLEN(b), ctl);
+ 		wleapoltrace("wl tx-qget", b->rp, BLEN(b), ctl);
+@@ -2509,7 +2714,9 @@ txstart(Ether *edev)
+ 		p->doffset = off;
+ 		put4(b->rp + off, 0x20);	/* BDC header */
+ 		if(iodebug) dump("send", b->rp, len);
++		pktlockstart = p9microseconds();
+ 		qlock(&ctl->pktlock);
++		pktlockwaitus = p9microseconds() - pktlockstart;
+ 		wldhcptrace("wl tx-sdio", b->rp + off + 4, len - off - 4, ctl);
+ 		wleapoltrace("wl tx-sdio", b->rp + off + 4, len - off - 4, ctl);
+ 		wleapollowtrace(BMX_EAPOL_STAGE_WL_TX_SDIO, b->rp + off + 4, len - off - 4, ctl);
+@@ -2530,7 +2737,9 @@ txstart(Ether *edev)
+ 			qunlock(&ctl->pktlock);
+ 			nexterror();
+ 		}
++		sdiostart = p9microseconds();
+ 		packetrw(1, b->rp, len);
++		sdious = p9microseconds() - sdiostart;
+ 		wldhcptrace("wl tx-sdio-done", b->rp + off + 4, len - off - 4, ctl);
+ 		wleapoltrace("wl tx-sdio-done", b->rp + off + 4, len - off - 4, ctl);
+ 		wleapollowtrace(BMX_EAPOL_STAGE_WL_TX_SDIO_DONE, b->rp + off + 4, len - off - 4, ctl);
+@@ -2539,15 +2748,39 @@ txstart(Ether *edev)
+ 			bmx_l2_note_done_8021x_tx();
+ 		ctl->txseq++;
+ 		poperror();
++		unlockstart = p9microseconds();
++		yieldcall = 0;
+ #if RASPPI >= 5
+ 		qunlock_no_yield(&ctl->pktlock);
+ 		if(++ctl->txyieldbatch >= WlPi5PktYieldBatch){
+ 			ctl->txyieldbatch = 0;
+ 			p9yield();
++			yieldcall = 1;
+ 		}
+ #else
+ 		qunlock(&ctl->pktlock);
+-#endif
++		yieldcall = 1;
++#endif
++		unlockus = p9microseconds() - unlockstart;
++		lock(&ctl->statlock);
++		ctl->stat_txframes++;
++		ctl->stat_txtimingsamples++;
++		ctl->stat_txqueueus += queueus;
++		if(queueus > ctl->stat_txqueuemaxus)
++			ctl->stat_txqueuemaxus = queueus;
++		ctl->stat_txpktlockwaitus += pktlockwaitus;
++		if(pktlockwaitus > ctl->stat_txpktlockwaitmaxus)
++			ctl->stat_txpktlockwaitmaxus = pktlockwaitus;
++		ctl->stat_txsdious += sdious;
++		if(sdious > ctl->stat_txsdiomaxus)
++			ctl->stat_txsdiomaxus = sdious;
++		if(yieldcall){
++			ctl->stat_txpktlockyieldcalls++;
++			ctl->stat_txpktlockyieldus += unlockus;
++			if(unlockus > ctl->stat_txpktlockyieldmaxus)
++				ctl->stat_txpktlockyieldmaxus = unlockus;
++		}
++		unlock(&ctl->statlock);
+ 		freeb(b);
+ 	}
+ 	poperror();
+@@ -2557,9 +2790,19 @@ txstart(Ether *edev)
+ 
+ #if RASPPI >= 5
+ static void
+-wlrxyield(void)
++wlrxyield(Ctlr *ctl)
+ {
++	uvlong start, elapsed;
++
++	start = p9microseconds();
+ 	p9yield();
++	elapsed = p9microseconds() - start;
++	lock(&ctl->statlock);
++	ctl->stat_rxpktlockyieldcalls++;
++	ctl->stat_rxpktlockyieldus += elapsed;
++	if(elapsed > ctl->stat_rxpktlockyieldmaxus)
++		ctl->stat_rxpktlockyieldmaxus = elapsed;
++	unlock(&ctl->statlock);
+ }
+ #endif
+ 
+@@ -2596,7 +2839,7 @@ rproc(void *a)
+ #if RASPPI >= 5
+ 		if(rxyieldbatch >= WlPi5PktYieldBatch){
+ 			rxyieldbatch = 0;
+-			wlrxyield();
++			wlrxyield(ctl);
+ 		}
+ #endif
+ 		if(flowstart){
+@@ -2622,18 +2865,34 @@ rproc(void *a)
+ #endif
+ 		p = (Sdpcm*)b->rp;
+ 		if(p->window != ctl->txwindow || p->fcmask != ctl->fcmask){
++			int windowchanged = 0;
++			int flowchanged = 0;
++			int windowopen;
++			int flowopen;
+ 			lock(&ctl->txwinlock);
+ 			if(p->window != ctl->txwindow){
++				windowchanged = 1;
+ 				if(ctl->txseq == ctl->txwindow)
+ 					flowstart = 1;
+ 				ctl->txwindow = p->window;
+ 			}
+ 			if(p->fcmask != ctl->fcmask){
++				flowchanged = 1;
+ 				if((p->fcmask & 1<<2) == 0)
+ 					flowstart = 1;
+ 				ctl->fcmask = p->fcmask;
+ 			}
++			windowopen = ctl->txseq != ctl->txwindow;
++			flowopen = (ctl->fcmask & 1<<2) == 0;
+ 			unlock(&ctl->txwinlock);
++			lock(&ctl->statlock);
++			ctl->stat_txwindowupdates += windowchanged;
++			ctl->stat_txflowupdates += flowchanged;
++			unlock(&ctl->statlock);
++			if(windowopen)
++				wlstatunblock(ctl, 1);
++			if(flowopen)
++				wlstatunblock(ctl, 0);
+ 		}
+ #ifdef BMC64_WLAN_LOW_IMPACT_TRACE
+ 		bmxwldbg_rxrecord(ctl, p, b);
+@@ -2721,6 +2980,9 @@ rproc(void *a)
+ 				print("short event %ld %d\n", BLEN(b), p->doffset);
+ 			break;
+ 		case 2:
++			lock(&ctl->statlock);
++			ctl->stat_rxdataframes++;
++			unlock(&ctl->statlock);
+ #ifdef BMC64_WLAN_LOW_IMPACT_TRACE
+ 			ctl->dbg_rp_chan2++;
+ #endif
+@@ -4216,9 +4478,44 @@ resetctlstate(Ctlr *ctlr)
+ 	ctlr->txwindow = 0;
+ 	ctlr->txseq = 0;
+ 	ctlr->rxseq = 0;
++	ctlr->stat_txframes = 0;
++	ctlr->stat_rxdataframes = 0;
++	ctlr->stat_txwindowupdates = 0;
++	ctlr->stat_txflowupdates = 0;
++	ctlr->stat_txwindowstalls = 0;
++	ctlr->stat_txwindowstallticks = 0;
++	ctlr->stat_txwindowstallmaxticks = 0;
++	ctlr->stat_txwindowstallstart = 0;
++	ctlr->stat_txwindowblocked = 0;
++	ctlr->stat_txflowstalls = 0;
++	ctlr->stat_txflowstallticks = 0;
++	ctlr->stat_txflowstallmaxticks = 0;
++	ctlr->stat_txflowstallstart = 0;
++	ctlr->stat_txflowblocked = 0;
++	ctlr->stat_txtimingsamples = 0;
++	ctlr->stat_txqueueus = 0;
++	ctlr->stat_txqueuemaxus = 0;
++	ctlr->stat_txpktlockwaitus = 0;
++	ctlr->stat_txpktlockwaitmaxus = 0;
++	ctlr->stat_txsdious = 0;
++	ctlr->stat_txsdiomaxus = 0;
++	ctlr->stat_txpktlockyieldcalls = 0;
++	ctlr->stat_txpktlockyieldus = 0;
++	ctlr->stat_txpktlockyieldmaxus = 0;
+ #if RASPPI >= 5
+ 	ctlr->txyieldbatch = 0;
+ #endif
++	ctlr->stat_rxtimingsamples = 0;
++	ctlr->stat_rxpktlockwaitus = 0;
++	ctlr->stat_rxpktlockwaitmaxus = 0;
++	ctlr->stat_rxsdious = 0;
++	ctlr->stat_rxsdiomaxus = 0;
++	ctlr->stat_rxpktlockyieldcalls = 0;
++	ctlr->stat_rxpktlockyieldus = 0;
++	ctlr->stat_rxpktlockyieldmaxus = 0;
++	ctlr->stat_rxtonetdevsamples = 0;
++	ctlr->stat_rxtonetdevus = 0;
++	ctlr->stat_rxtonetdevmaxus = 0;
+ #ifdef BMC64_WLAN_LOW_IMPACT_TRACE
+ 	ctlr->dbg_iw_calls = 0;
+ 	ctlr->dbg_iw_intpend0 = 0;
+diff --git a/libs/circle/addon/wlan/p9ether.cpp b/libs/circle/addon/wlan/p9ether.cpp
+index 38c7ea4d..6e7d4431 100644
+--- a/libs/circle/addon/wlan/p9ether.cpp
++++ b/libs/circle/addon/wlan/p9ether.cpp
+@@ -17,6 +17,7 @@ Block *allocb (size_t size)
+ 	b->lim = b->buf + size;
+ 	b->wp = b->buf + maxhdrsize;
+ 	b->rp = b->wp;
++	b->timingus = 0;
+ 
+ 	return b;
+ }
+diff --git a/libs/circle/addon/wlan/p9ether.h b/libs/circle/addon/wlan/p9ether.h
+index 00d34d0c..83c15c96 100644
+--- a/libs/circle/addon/wlan/p9ether.h
++++ b/libs/circle/addon/wlan/p9ether.h
+@@ -19,6 +19,7 @@ typedef struct Block
+ 	uchar *lim;
+ 	uchar *wp;
+ 	uchar *rp;
++	uvlong timingus;
+ 	uchar data[0];
+ #define BLEN(b)		((b)->wp - (b)->rp)
+ }

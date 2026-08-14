@@ -5,10 +5,33 @@
 
 #include <circle/net/socket.h>
 
+#include <stdint.h>
+
 class CNetSubSystem;
 
 namespace bmx {
 namespace remote {
+
+struct CircleHttpTransportDiagnostics {
+    uint64_t read_calls;
+    uint64_t rx_not_ready;
+    uint64_t receive_calls;
+    uint64_t read_bytes;
+    uint64_t receive_us;
+    uint64_t receive_max_us;
+    uint64_t write_calls;
+    uint64_t tx_not_ready;
+    uint64_t send_calls;
+    uint64_t write_bytes;
+    uint64_t send_zero;
+    uint64_t send_closed;
+    uint64_t send_errors;
+    int last_send_error;
+};
+
+void ResetCircleHttpTransportDiagnostics();
+void ReadCircleHttpTransportDiagnostics(
+    CircleHttpTransportDiagnostics *diagnostics);
 
 class CircleHttpTransport : public HttpTransport {
 public:

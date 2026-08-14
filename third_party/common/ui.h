@@ -27,7 +27,12 @@
 #ifndef RASPI_UI_H_
 #define RASPI_UI_H_
 
+#include <stddef.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #define NUM_MENU_ROOTS 5
 #define MAX_CHOICES    64
@@ -66,6 +71,12 @@ typedef enum menu_item_type {
   TEXTFIELD,       // editable text field
 } menu_item_type;
 
+typedef enum ui_text_encoding {
+  UI_TEXT_ENCODING_LATIN1 = 0,
+  UI_TEXT_ENCODING_PETSCII_NATIVE,
+  UI_TEXT_ENCODING_PETSCII_UNSCII,
+} ui_text_encoding_t;
+
 struct menu_item {
   // Client defined id.
   int id;
@@ -83,6 +94,7 @@ struct menu_item {
 
   // For all
   char name[MAX_MENU_STR];
+  ui_text_encoding_t name_encoding;
 
   // Symbol on left edge
   int symbol;
@@ -141,12 +153,16 @@ struct menu_item {
   // previous menu.
   int menu_width;
   int menu_height;
+  // Requested row count for menu roots; negative values mean full height.
+  int menu_rows;
   int menu_left;
   int menu_top;
 
   void (*cursor_listener_func)(struct menu_item* parent, int);
   int (*left_right_listener_func)(struct menu_item* parent,
                                   struct menu_item* current, int right);
+  int (*key_listener_func)(struct menu_item* parent,
+                           struct menu_item* current, long key);
 
   // For menu roots only, called on menu being popped off the stack (old_root)
   // By the time this is called, the popped root has already been cleared of
@@ -178,6 +194,8 @@ struct menu_item *ui_menu_add_button_with_value(int id,
                                                 const char *displayed_value);
 void ui_menu_set_button_value_fitted(struct menu_item *item,
                                      const char *value, int indent);
+void ui_menu_set_name_encoding(struct menu_item *item,
+                               ui_text_encoding_t encoding);
 struct menu_item *ui_menu_add_range(int id, struct menu_item *folder,
                                     char *name, int min, int max, int step,
                                     int initial_value);
@@ -205,16 +223,23 @@ int ui_pause_loop_iteration(void);
 // Begin raspi ui code
 void ui_init_menu(void);
 
-// Draws a single character with no ascii to petscii translation
+// Draws a single character from the active machine's raw character ROM.
 void ui_draw_char_raw(const char singlechar, int x, int y, int color,
                       uint8_t *dst, int dst_pitch, int stretch);
 
-// Draws a string with ascii to petscii translation into the provided buffer
+// Draws Latin-1 text with the shared BMX UI font into the provided buffer.
 void ui_draw_text_buf(const char *text, int x, int y, int color, uint8_t *dst,
                       int dst_pitch, int stretch);
 
-// Draws a string with ascii to petscii translation into the menu buffer
+// Draws PETSCII with the machine-independent Unscii upper-case/graphics
+// profile. Use this for BMX-owned UI elements that must look identical on
+// every emulated machine.
+void ui_draw_text_petscii_buf(const char *text, int x, int y, int color,
+                              uint8_t *dst, int dst_pitch, int stretch);
+
+// Draws Latin-1 text with the shared BMX UI font into the menu buffer.
 void ui_draw_text(const char *text, int x, int y, int color);
+void ui_draw_text_petscii(const char *text, int x, int y, int color);
 
 void ui_draw_rect_buf(int x, int y, int w, int h, int color, int fill,
                       uint8_t *dst, int dst_pitch);
@@ -224,6 +249,8 @@ void ui_draw_rect(int x, int y, int w, int h, int color, int fill);
 int ui_text_width(const char *text);
 
 void ui_check_key(void);
+int ui_keyboard_shift_active(void);
+void ui_keyboard_clear_shift(void);
 
 void ui_pop_all_and_toggle(void);
 
@@ -255,6 +282,23 @@ struct menu_item *ui_push_menu(int w_chars, int h_chars);
 // unless overridden by the item.
 void ui_set_on_value_changed_callback(
     void (*on_value_changed)(struct menu_item *));
+
+// Commit one concrete menu item through the same item-specific/global
+// callback path used by the visible UI.  The item pointer is never replaced
+// with the current cursor, so headless callers cannot accidentally commit a
+// neighbouring control.
+void ui_menu_commit(struct menu_item *item);
+
+// Monotonic, runtime-only hint for lightweight REST cache invalidation.  It
+// changes after a visible menu commit and whenever the menu/OSD is toggled;
+// it is neither persistent metadata nor a kernel build identifier.
+uint32_t ui_menu_change_revision(void);
+
+// The persistent menu tree. Dynamic dialogs live on higher stack entries and
+// deliberately remain remote-controllable through keyboard input instead.
+struct menu_item *ui_menu_root(void);
+int emu_ui_key_interrupt_batch(const long *keys, const int *pressed,
+                               size_t count);
 
 // Sets the global callback for Return on a text field. Return 1 when handled.
 void ui_set_on_text_field_return_callback(
@@ -296,10 +340,15 @@ void ui_update_progress_present(unsigned phase, unsigned progress_per_mille,
 int ui_update_progress_pump(void);
 void ui_update_progress_end(void);
 
-void ui_geometry_changed(int dpx, int dpy,
-                         int fbw, int fbh,
-                         int sw, int sh,
-                         int dw, int dh);
+// Configure the machine-independent UI plane for a physical output mode.
+// Machine framebuffer/source geometry is deliberately not part of this API.
+void ui_output_geometry_changed(int display_width, int display_height);
+
+int ui_get_menu_scale_percent(void);
+int ui_set_menu_scale_percent(int percent);
+int ui_get_menu_row_gap(void);
+int ui_set_menu_row_gap(int gap);
+int ui_save_appearance_settings(void);
 
 // Used to ensure we process all key events before transitioning to
 // the ui. Can be set to 2 from an ISR to ensure handling from key queue and
@@ -307,8 +356,6 @@ void ui_geometry_changed(int dpx, int dpy,
 // Should acquire lock around changing.
 extern int ui_toggle_pending;
 
-extern uint8_t *video_font;
-extern uint16_t video_font_translate[256];
 extern uint8_t *raw_video_font;
 
 // If layer is visible right now, make the ui transparent and tell the
@@ -319,5 +366,9 @@ extern uint8_t *raw_video_font;
 extern void ui_canvas_reveal_temp(int layer);
 extern void ui_mouse_preview_begin(void);
 extern void ui_mouse_preview_end(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

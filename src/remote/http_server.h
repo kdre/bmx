@@ -42,8 +42,9 @@ class HttpConnection {
 
     bool Begin(HttpTransport *transport, HttpRouter *router,
                const HttpServerConfig &config, uint64_t now_ms);
-    // Performs bounded work and at most one transport read or write.
-    bool Poll(uint64_t now_ms);
+    // Performs bounded work and at most one transport read or write.  The
+    // optional flag reports accepted, received or transmitted bytes.
+    bool Poll(uint64_t now_ms, bool *made_progress = 0);
     void Stop();
 
     bool active() const { return active_; }
@@ -71,7 +72,7 @@ class HttpConnection {
     bool BeginResponse(const HttpResponse &response, uint64_t now_ms);
     void AbortBody(HttpBodyAbortReason reason);
     void FinishBody(uint64_t now_ms);
-    void PollResponse(uint64_t now_ms);
+    void PollResponse(uint64_t now_ms, bool *made_progress);
     void Terminate(HttpCompletionReason reason,
                    HttpBodyAbortReason body_reason);
     void NotifyCompletion(HttpCompletionReason reason);
@@ -112,7 +113,9 @@ class HttpServer {
                const HttpServerConfig &config = HttpServerConfig());
     ~HttpServer();
 
-    HttpServerPollStatus Poll(uint64_t now_ms);
+    // made_progress allows a cooperative owner to remain runnable only while
+    // the non-blocking transport is actively moving a request or response.
+    HttpServerPollStatus Poll(uint64_t now_ms, bool *made_progress = 0);
     // Advances only connections which are already writing a response.  This
     // is safe to call from a router's bounded cooperative callback: it keeps
     // an established log stream moving without re-entering request parsing,

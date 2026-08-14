@@ -76,6 +76,7 @@ class StageContext:
     board: str
     profile: str
     developer_mode: bool
+    api_mode: bool
     omit_roms: bool
     kernel_dir: Path
     stage_dir: Path
@@ -297,6 +298,9 @@ def render_config_and_cmdline(
     cmdline = _set_first_line_option(
         cmdline, "developer_mode", "1" if context.developer_mode else None,
     )
+    cmdline = _set_first_line_option(
+        cmdline, "api_mode", "1" if context.api_mode else None,
+    )
 
     active = _replace_kernel_with_selector(config, kernel_name, "bmx-active-kernel.txt")
     selector = f"# BMX-KERNEL-SELECTOR-V2\nkernel={kernel_name}\n"
@@ -482,6 +486,16 @@ def parse_args(argv: Sequence[str] | None = None) -> StageContext:
         help="remove developer_mode from cmdline.txt",
     )
     parser.set_defaults(developer_mode=True)
+    api_mode = parser.add_mutually_exclusive_group()
+    api_mode.add_argument(
+        "--api-mode", dest="api_mode", action="store_true",
+        help="stage api_mode=1 in cmdline.txt (local default)",
+    )
+    api_mode.add_argument(
+        "--no-api-mode", dest="api_mode", action="store_false",
+        help="remove api_mode from cmdline.txt",
+    )
+    parser.set_defaults(api_mode=True)
     parser.add_argument("--omit-roms", action="store_true")
     parser.add_argument("--kernel-dir", type=Path)
     parser.add_argument("--stage-dir", type=Path)
@@ -511,6 +525,7 @@ def parse_args(argv: Sequence[str] | None = None) -> StageContext:
         board=args.board,
         profile=profile,
         developer_mode=args.developer_mode,
+        api_mode=args.api_mode,
         omit_roms=args.omit_roms,
         kernel_dir=kernel_dir,
         stage_dir=stage_dir,

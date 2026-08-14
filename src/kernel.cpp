@@ -18,6 +18,7 @@
 #include "third_party/common/gpio_layout.h"
 #include "update/update_service.h"
 
+#include "machines/machine_descriptor.h"
 #include "platform/platform.h"
 
 #if defined(BMX_SID_WORKER) || defined(BMX_SID_DIAGNOSTICS)
@@ -38,7 +39,95 @@
 #include <circle/memio.h>
 #endif
 
+extern "C" {
+#include "mem.h"
+#include "third_party/common/menu_control.h"
+#include "third_party/common/overlay.h"
+}
+
+// Kernel-side dispatch only needs the stable identifiers, not menu.h's
+// emulator-facing declarations (which collide with viceoptions.h here).
+enum BmxRemoteMenuId {
+#define BMX_MENU_ID(name) name,
+#include "third_party/common/menu_ids.inc"
+#undef BMX_MENU_ID
+};
+
+#define BMX_REMOTE_CONTROL(key, id) \
+  {key, id, 0, MENU_CONTROL_PUBLIC_CONTROL, MENU_CONTROL_ACTION_NONE}
+#define BMX_REMOTE_ACTION(key, id) \
+  {key, id, 0, MENU_CONTROL_PUBLIC_ACTION, MENU_CONTROL_ACTION_NONE}
+#define BMX_REMOTE_MEDIA_ACTION(key, id) \
+  {key, id, 0, MENU_CONTROL_PUBLIC_ACTION, MENU_CONTROL_ACTION_MEDIA_PATH}
+
+/* VICE owns this vocabulary. Other emulator kernels can register their own
+   item IDs while keeping the same public REST keys where semantics match. */
+static const menu_control_public_binding kVicePublicBindings[] = {
+    BMX_REMOTE_CONTROL("audio.drive.enabled", MENU_DRIVE_SOUND_EMULATION),
+    BMX_REMOTE_CONTROL("audio.drive.volume",
+                       MENU_DRIVE_SOUND_EMULATION_VOLUME),
+    BMX_REMOTE_CONTROL("audio.volume", MENU_VOLUME),
+    BMX_REMOTE_CONTROL("emulation.autostart.warp", MENU_AUTOSTART_WARP),
+    BMX_REMOTE_CONTROL("emulation.warp", MENU_WARP_MODE),
+    BMX_REMOTE_CONTROL("input.joystick.port.1", MENU_JOYSTICK_PORT_1),
+    BMX_REMOTE_CONTROL("input.joystick.port.2", MENU_JOYSTICK_PORT_2),
+    BMX_REMOTE_CONTROL("input.joystick.port.3", MENU_JOYSTICK_PORT_3),
+    BMX_REMOTE_CONTROL("input.joystick.port.4", MENU_JOYSTICK_PORT_4),
+    BMX_REMOTE_CONTROL("media.tape.reset.with.machine",
+                       MENU_TAPE_RESET_WITH_MACHINE),
+    BMX_REMOTE_CONTROL("video.diagnostics.overlay",
+                       MENU_DIAGNOSTICS_OVERLAY),
+    BMX_REMOTE_CONTROL("video.scaling.interpolation",
+                       MENU_SCALING_INTERPOLATION),
+
+    BMX_REMOTE_ACTION("emulation.reset.hard", MENU_HARD_RESET),
+    BMX_REMOTE_ACTION("emulation.reset.soft", MENU_SOFT_RESET),
+    BMX_REMOTE_ACTION("input.joystick.swap", MENU_SWAP_JOYSTICKS),
+    BMX_REMOTE_MEDIA_ACTION("media.autostart", MENU_AUTOSTART),
+    BMX_REMOTE_MEDIA_ACTION("media.cartridge.attach", MENU_C64_ATTACH_CART),
+    BMX_REMOTE_ACTION("media.cartridge.detach", MENU_DETACH_CART),
+    BMX_REMOTE_MEDIA_ACTION("media.drive.8.attach", MENU_ATTACH_DISK_8),
+    BMX_REMOTE_ACTION("media.drive.8.detach", MENU_DETACH_DISK_8),
+    BMX_REMOTE_MEDIA_ACTION("media.drive.9.attach", MENU_ATTACH_DISK_9),
+    BMX_REMOTE_ACTION("media.drive.9.detach", MENU_DETACH_DISK_9),
+    BMX_REMOTE_MEDIA_ACTION("media.drive.10.attach", MENU_ATTACH_DISK_10),
+    BMX_REMOTE_ACTION("media.drive.10.detach", MENU_DETACH_DISK_10),
+    BMX_REMOTE_MEDIA_ACTION("media.drive.11.attach", MENU_ATTACH_DISK_11),
+    BMX_REMOTE_ACTION("media.drive.11.detach", MENU_DETACH_DISK_11),
+    BMX_REMOTE_MEDIA_ACTION("media.tape.attach", MENU_ATTACH_TAPE),
+    BMX_REMOTE_ACTION("media.tape.detach", MENU_DETACH_TAPE),
+    BMX_REMOTE_ACTION("media.tape.fast.forward", MENU_TAPE_FASTFWD),
+    BMX_REMOTE_ACTION("media.tape.play", MENU_TAPE_START),
+    BMX_REMOTE_ACTION("media.tape.record", MENU_TAPE_RECORD),
+    BMX_REMOTE_ACTION("media.tape.reset", MENU_TAPE_RESET),
+    BMX_REMOTE_ACTION("media.tape.reset.counter", MENU_TAPE_RESET_COUNTER),
+    BMX_REMOTE_ACTION("media.tape.rewind", MENU_TAPE_REWIND),
+    BMX_REMOTE_ACTION("media.tape.stop", MENU_TAPE_STOP),
+};
+
+#undef BMX_REMOTE_MEDIA_ACTION
+#undef BMX_REMOTE_ACTION
+#undef BMX_REMOTE_CONTROL
+
 extern "C" int emux_prepare_shutdown(void);
+extern "C" double emux_calculate_fps(void);
+extern "C" int emux_autostart_file(char *filename,
+                                    unsigned int program_number);
+extern "C" int emux_attach_disk_image(int unit, char *filename);
+extern "C" int emux_attach_tape_image(char *filename);
+extern "C" int emux_attach_cart(int bank, char *filename);
+extern "C" const char *file_system_get_disk_name(unsigned int unit,
+                                                   unsigned int drive);
+extern "C" const char *tape_get_file_name(int port);
+extern "C" char *cartridge_get_filename_by_slot(int slot);
+extern "C" int emux_key_interrupt_batch(const long *keys,
+                                         const int *pressed,
+                                         const int *modifiers, size_t count);
+extern "C" int emux_joy_interrupt_batch(const int *ports,
+                                         const int *devices,
+                                         const int *values, size_t count);
+extern "C" uint8_t *charset_petconvstring(uint8_t *text, int mode);
+extern "C" int kbdbuf_feed(const char *text);
 
 CKernel *static_kernel = NULL;
 
@@ -58,8 +147,92 @@ static unsigned char mod_states;
 static bool uiLeftShift = false;
 static bool uiRightShift = false;
 
+static int ViceKeyboardModifierMask(unsigned char ucModifiers);
+
+static bool QueryStorageGeometry(const char *volume, uint64_t *total_bytes,
+                                 uint64_t *free_bytes) {
+  DWORD free_clusters = 0U;
+  FATFS *file_system = nullptr;
+  *total_bytes = 0U;
+  *free_bytes = 0U;
+  if (f_getfree(volume, &free_clusters, &file_system) != FR_OK ||
+      file_system == nullptr || file_system->csize == 0U) {
+    return false;
+  }
+#if FF_MAX_SS != FF_MIN_SS
+  const uint64_t sector_size = file_system->ssize;
+#else
+  const uint64_t sector_size = FF_MAX_SS;
+#endif
+  const uint64_t cluster_size =
+      static_cast<uint64_t>(file_system->csize) * sector_size;
+  const uint64_t total_clusters = file_system->n_fatent > 2U
+                                      ? file_system->n_fatent - 2U : 0U;
+  *free_bytes = static_cast<uint64_t>(free_clusters) * cluster_size;
+  *total_bytes = total_clusters * cluster_size;
+  return true;
+}
+
+static void CopyMediaPath(char *destination, size_t capacity,
+                          const char *source) {
+  if (destination == nullptr || capacity == 0U) return;
+  if (source == nullptr) source = "";
+  size_t length = strlen(source);
+  if (length >= capacity) length = capacity - 1U;
+  memcpy(destination, source, length);
+  destination[length] = '\0';
+}
+
+static void AddMediaSlot(bmx::remote::BmxMediaState *media,
+                         const char *key, bmx::remote::BmxMediaKind kind,
+                         const char *path) {
+  if (media == nullptr || media->count >=
+                              bmx::remote::kBmxApiMaximumMediaSlots) return;
+  bmx::remote::BmxMediaSlot &slot = media->slots[media->count++];
+  CopyMediaPath(slot.key, sizeof(slot.key), key);
+  slot.kind = kind;
+  CopyMediaPath(slot.path, sizeof(slot.path), path);
+}
+
 static int vol_percent_to_vchiq(int percent) {
   return bmc64::VolumePercentToDeviceControl(percent);
+}
+
+static int direct_cart_file_menu_id(int action_id) {
+  switch (action_id) {
+    case MENU_C64_ATTACH_CART: return MENU_C64_CART_FILE;
+    case MENU_C64_ATTACH_CART_8K: return MENU_C64_CART_8K_FILE;
+    case MENU_C64_ATTACH_CART_16K: return MENU_C64_CART_16K_FILE;
+    case MENU_C64_ATTACH_CART_ULTIMAX: return MENU_C64_CART_ULTIMAX_FILE;
+    case MENU_VIC20_ATTACH_CART_DETECT: return MENU_VIC20_CART_DETECT_FILE;
+    case MENU_VIC20_ATTACH_CART_GENERIC: return MENU_VIC20_CART_GENERIC_FILE;
+    case MENU_VIC20_ATTACH_CART_16K_2000:
+      return MENU_VIC20_CART_16K_2000_FILE;
+    case MENU_VIC20_ATTACH_CART_16K_4000:
+      return MENU_VIC20_CART_16K_4000_FILE;
+    case MENU_VIC20_ATTACH_CART_16K_6000:
+      return MENU_VIC20_CART_16K_6000_FILE;
+    case MENU_VIC20_ATTACH_CART_8K_A000:
+      return MENU_VIC20_CART_8K_A000_FILE;
+    case MENU_VIC20_ATTACH_CART_4K_B000:
+      return MENU_VIC20_CART_4K_B000_FILE;
+    case MENU_VIC20_ATTACH_CART_BEHRBONZ:
+      return MENU_VIC20_CART_BEHRBONZ_FILE;
+    case MENU_VIC20_ATTACH_CART_UM: return MENU_VIC20_CART_UM_FILE;
+    case MENU_VIC20_ATTACH_CART_FP: return MENU_VIC20_CART_FP_FILE;
+    case MENU_VIC20_ATTACH_CART_MEGACART:
+      return MENU_VIC20_CART_MEGACART_FILE;
+    case MENU_VIC20_ATTACH_CART_FINAL_EXPANSION:
+      return MENU_VIC20_CART_FINAL_EXPANSION_FILE;
+    case MENU_PLUS4_ATTACH_CART: return MENU_PLUS4_CART_FILE;
+    case MENU_PLUS4_ATTACH_CART_C0_LO: return MENU_PLUS4_CART_C0_LO_FILE;
+    case MENU_PLUS4_ATTACH_CART_C0_HI: return MENU_PLUS4_CART_C0_HI_FILE;
+    case MENU_PLUS4_ATTACH_CART_C1_LO: return MENU_PLUS4_CART_C1_LO_FILE;
+    case MENU_PLUS4_ATTACH_CART_C1_HI: return MENU_PLUS4_CART_C1_HI_FILE;
+    case MENU_PLUS4_ATTACH_CART_C2_LO: return MENU_PLUS4_CART_C2_LO_FILE;
+    case MENU_PLUS4_ATTACH_CART_C2_HI: return MENU_PLUS4_CART_C2_HI_FILE;
+    default: return -1;
+  }
 }
 
 static void copy_usb_product(char *destination, unsigned destination_size,
@@ -415,6 +588,16 @@ void circle_set_shader_params(int curvature,
 
 namespace {
 
+// VICE normally enters the cooperative Circle scheduler once per emulated
+// frame.  WLAN, IP and HTTP processing often needs several task turns for one
+// request/response exchange, so allow a small number of complete scheduler
+// rounds at that existing safe point.  The time limit keeps this from turning
+// into an unbounded network drain on slower boards or under heavy traffic.
+#ifndef BMC64_USE_EMU_MULTICORE
+static const unsigned kWlanSchedulerPumpMaxRounds = 4U;
+static const uint64_t kWlanSchedulerPumpBudgetUS = 1000U;
+#endif
+
 long func_to_keycode(int btn_func) {
    switch (btn_func) {
       case BTN_ASSIGN_UP:
@@ -461,8 +644,14 @@ CKernel::CKernel(void)
       mVolume(100), mSoundOutputPriority(ViceSound::DefaultOutputPriority()),
       mSoundSampleRate(SAMPLE_RATE),
       mNumCoresComplete(0),
-      mNeedSoundInit(false), mNumSoundChannels(1) {
+      mNeedSoundInit(false), mNumSoundChannels(1),
+      mSchedulerSafePoints(0U), mSchedulerRounds(0U),
+      mSchedulerExtraRounds(0U), mSchedulerPumpUS(0U),
+      mSchedulerPumpMaxUS(0U), mSchedulerPumpBudgetStops(0U) {
   static_kernel = this;
+  (void)menu_control_public_set_bindings(
+      kVicePublicBindings,
+      sizeof(kVicePublicBindings) / sizeof(kVicePublicBindings[0]));
   mod_states = 0;
   memset(key_states, 0, sizeof key_states);
   memset(key_mod_states, 0, sizeof key_mod_states);
@@ -1128,22 +1317,17 @@ ViceApp::TShutdownMode CKernel::Run(void) {
 
   printf("boot: usb plug-and-play ready\r\n");
 
-#ifndef BMC64_USE_EMU_MULTICORE
   mUSBPlugAndPlayTask = new USBPlugAndPlayTask(this);
+#ifndef BMC64_USE_EMU_MULTICORE
   printf("boot: launching emulator on core 0\r\n");
   mEmulatorCore->LaunchEmulator(mTimingOption);
   printf("boot: emulator returned\r\n");
 #else
-  printf("Core 0 servicing USB plug-and-play\n");
-
-  for (;;) {
-#if AARCH == 64
-    asm volatile("dsb sy\n\twfi" ::: "memory");
-#else
-    asm volatile("dsb\n\twfi" ::: "memory");
-#endif
-    UpdateUSBPlugAndPlay();
+  printf("Core 0 servicing Circle, network and USB plug-and-play\n");
+  if (mNetworkService == nullptr) {
+    return ShutdownHalt;
   }
+  mNetworkService->RunScheduler();
 #endif
   return ShutdownHalt;
 }
@@ -1595,6 +1779,7 @@ int CKernel::circle_sound_init(const char *param, int *speed, int *fragsize,
 // Called from VICE: Core 1
 int CKernel::circle_sound_write(int16_t *pbuf, size_t nr) {
   ApplyUSBAudioChange();
+  CompleteAudioCapture(pbuf, nr);
 #if BMX_SID_DIAGNOSTICS
   bmx_sid_diag_record_pcm(pbuf, nr);
 #endif
@@ -1631,11 +1816,42 @@ void CKernel::circle_yield(void) {
   ApplyUSBDeviceInfo();
   ApplyUSBAudioChange();
   ProcessRemoteCommand();
-  CScheduler::Get()->Yield();
+
+#ifdef BMC64_USE_EMU_MULTICORE
+  // Core 0 continuously owns and drives Circle. This VICE safe point only
+  // consumes application-level handoffs.
+  ++mSchedulerSafePoints;
+#else
+  const bool pump_wlan =
+      mViceOptions.GetNetworkAdapter() == BMX_NETWORK_WIFI;
+  const uint64_t start_us = CTimer::GetClockTicks64();
+  unsigned rounds = 0U;
+  do {
+    CScheduler::Get()->Yield();
+    ++rounds;
+  } while (pump_wlan && rounds < kWlanSchedulerPumpMaxRounds &&
+           CTimer::GetClockTicks64() - start_us <
+               kWlanSchedulerPumpBudgetUS);
+
+  const uint64_t elapsed_us = CTimer::GetClockTicks64() - start_us;
+  ++mSchedulerSafePoints;
+  mSchedulerRounds += rounds;
+  mSchedulerExtraRounds += rounds - 1U;
+  mSchedulerPumpUS += elapsed_us;
+  if (elapsed_us > mSchedulerPumpMaxUS) {
+    mSchedulerPumpMaxUS = elapsed_us;
+  }
+  if (pump_wlan && rounds < kWlanSchedulerPumpMaxRounds &&
+      elapsed_us >= kWlanSchedulerPumpBudgetUS) {
+    ++mSchedulerPumpBudgetStops;
+  }
+#endif
 }
 
 void CKernel::ProcessRemoteCommand() {
   if (mRemoteService == nullptr) return;
+  mRemoteService->Capture()->PumpAudioCancel();
+  ProcessControlRequest();
   bmx::remote::RemoteCommand command = bmx::remote::RemoteCommand::None;
   if (!mRemoteService->TakeCommand(&command) ||
       command != bmx::remote::RemoteCommand::SystemReboot) {
@@ -1643,7 +1859,7 @@ void CKernel::ProcessRemoteCommand() {
   }
 
   printf("developer: reboot requested\r\n");
-  StopDeveloperService();
+  StopRemoteService();
   if (emux_prepare_shutdown() != 0) {
     printf("developer: emulator shutdown failed; reboot cancelled\r\n");
     return;
@@ -1653,6 +1869,411 @@ void CKernel::ProcessRemoteCommand() {
     return;
   }
   reboot();
+}
+
+void CKernel::CompleteAudioCapture(const int16_t *samples,
+                                   size_t sample_count) {
+  if (mRemoteService == nullptr || samples == nullptr || sample_count == 0U) {
+    return;
+  }
+  bmx::remote::BmxBinaryPayload payload = {};
+  uint32_t token = 0U;
+  if (!mRemoteService->Capture()->AppendAudio(samples, sample_count,
+                                               &token, &payload)) {
+    return;
+  }
+  bmx::remote::BmxApiResponse response = {};
+  response.operation = payload.wav ? bmx::remote::BmxApiOperation::AudioWav
+                                   : bmx::remote::BmxApiOperation::Audio;
+  response.status = MENU_CONTROL_OK;
+  response.binary = payload;
+  if (!mRemoteService->CompleteControl(token, response)) {
+    free(payload.data);
+  }
+}
+
+void CKernel::ProcessControlRequest() {
+  bmx::remote::BmxApiRequest request = {};
+  uint32_t token = 0U;
+  if (mRemoteService == nullptr ||
+      !mRemoteService->TakeControl(&request, &token)) {
+    return;
+  }
+
+  bmx::remote::BmxApiResponse response = {};
+  response.operation = request.operation;
+  response.status = MENU_CONTROL_UNAVAILABLE;
+  switch (request.operation) {
+    case bmx::remote::BmxApiOperation::Menu: {
+      const bool visible = emu_is_ui_activated() != 0;
+      const bool desired =
+          request.menu_action == bmx::remote::BmxMenuAction::Toggle
+              ? !visible
+              : request.menu_action == bmx::remote::BmxMenuAction::Open;
+      if (desired != visible) {
+        ui_pop_all_and_toggle();
+      }
+      response.state.menu_visible = emu_is_ui_activated() != 0;
+      response.status = MENU_CONTROL_OK;
+      break;
+    }
+    case bmx::remote::BmxApiOperation::State: {
+      struct bmx_diagnostics_snapshot diagnostics = {};
+      circle_get_diagnostics(&diagnostics);
+#if RASPPI == 5
+      strcpy(response.state.board, "pi5");
+#else
+      strcpy(response.state.board, "pi4");
+#endif
+      strncpy(response.state.machine, bmc64::CurrentMachine().display_name,
+              sizeof(response.state.machine) - 1U);
+      if (circle_get_bmx_version(response.state.release_version,
+                                 sizeof(response.state.release_version)) != 0) {
+        strcpy(response.state.release_version, "unknown");
+      }
+      response.state.uptime_ms = CTimer::GetClockTicks64() / 1000U;
+      bool network_enabled = false;
+      bool network_ready = false;
+      response.state.network_ready =
+          bmx::ReadNetworkFeatureState(&network_enabled, &network_ready) &&
+          network_enabled && network_ready;
+      response.state.heap_free_kb = diagnostics.heap_free_kb;
+      response.state.heap_low_free_kb = diagnostics.heap_low_free_kb;
+      response.state.arm_clock_hz = diagnostics.arm_clock_hz;
+      response.state.emu_cycles_per_sec = diagnostics.emu_cycles_per_sec;
+      const double target_fps = emux_calculate_fps();
+      response.state.target_fps_milli = target_fps > 0.0
+                                             ? (uint32_t)(target_fps * 1000.0)
+                                             : 0U;
+      response.state.actual_fps_milli =
+          overlay_diagnostics_get_fps_milli();
+      response.state.temperature_c = (int)diagnostics.temperature_c;
+      response.state.throttle_clock_hz = diagnostics.throttle_clock_hz;
+      const int timing = circle_get_machine_timing();
+      strcpy(response.state.video_output,
+             timing == 2 || timing == 3 ? "composite"
+             : timing >= 6 && timing <= 9 ? "dpi" : "hdmi");
+      int display_width = 0, display_height = 0;
+      int ignored = 0;
+      fbl[FB_LAYER_VIC].GetDimensions(
+          &display_width, &display_height, &ignored, &ignored, &ignored,
+          &ignored, &ignored, &ignored);
+      response.state.display_width = display_width > 0
+                                         ? (uint32_t)display_width : 0U;
+      response.state.display_height = display_height > 0
+                                          ? (uint32_t)display_height : 0U;
+      response.state.audio_sample_rate = mSoundSampleRate;
+      response.state.audio_channels = mNumSoundChannels > 0
+                                          ? (uint32_t)mNumSoundChannels : 0U;
+      strcpy(response.state.audio_output,
+             mViceSound == nullptr || !mViceSound->PlaybackActive()
+                 ? "none"
+                 : mViceSound->HDMIOutputSelected() ? "hdmi" : "usb");
+      if (mViceSound != nullptr) {
+        (void)mViceSound->BufferSpaceSamples();
+        response.state.audio_queue_frames = mViceSound->QueueSizeFrames();
+        response.state.audio_queue_fill_frames =
+            mViceSound->QueueFillFrames();
+        response.state.audio_queue_min_fill_frames =
+            mViceSound->QueueMinimumFillFrames();
+        response.state.audio_write_waits = mViceSound->WriteWaitCount();
+      }
+      response.state.audio_capture_drops =
+          mRemoteService->Capture()->drops();
+      response.state.menu_visible = emu_is_ui_activated() != 0;
+      struct menu_control_description warp = {};
+      response.state.warp =
+          menu_control_public_describe("emulation.warp", &warp) ==
+              MENU_CONTROL_OK &&
+          warp.value.integer != 0;
+      response.state.diagnostics_overlay =
+          overlay_diagnostics_get_mode() != 0;
+      response.status = MENU_CONTROL_OK;
+      break;
+    }
+    case bmx::remote::BmxApiOperation::Storage: {
+      static const char *const names[] = {
+          "SYS", "USER", "SD", "USB", "USB2", "USB3"};
+      const bool mounted[] = {
+          mSYSFileSystemMounted, mUserFileSystemMounted, mSDFileSystemMounted,
+          mUSBFileSystemMounted[0], mUSBFileSystemMounted[1],
+          mUSBFileSystemMounted[2]};
+      response.storage.count =
+          sizeof(names) / sizeof(names[0]);
+      for (size_t i = 0U; i < response.storage.count; ++i) {
+        bmx::remote::BmxStorageVolume &volume = response.storage.volumes[i];
+        strcpy(volume.name, names[i]);
+        volume.mounted = mounted[i];
+        if (volume.mounted) {
+          char root[12U];
+          snprintf(root, sizeof(root), "%s:/", names[i]);
+          if (!QueryStorageGeometry(root, &volume.total_bytes,
+                                    &volume.free_bytes)) {
+            volume.total_bytes = 0U;
+            volume.free_bytes = 0U;
+          }
+        }
+      }
+      response.status = MENU_CONTROL_OK;
+      break;
+    }
+    case bmx::remote::BmxApiOperation::Files: {
+      memcpy(response.files.path, request.path, sizeof(response.files.path));
+      response.files.path[sizeof(response.files.path) - 1U] = '\0';
+      DIR directory = {};
+      FRESULT result = f_opendir(&directory, request.path);
+      if (result == FR_NO_FILE || result == FR_NO_PATH ||
+          result == FR_INVALID_DRIVE || result == FR_NOT_ENABLED) {
+        response.status = MENU_CONTROL_NOT_FOUND;
+        break;
+      }
+      if (result != FR_OK) break;
+      bool after_found = request.file_after[0] == '\0';
+      FILINFO info = {};
+      for (;;) {
+        result = f_readdir(&directory, &info);
+        if (result != FR_OK || info.fname[0] == '\0') break;
+        if (!after_found) {
+          if (strcmp(info.fname, request.file_after) == 0) after_found = true;
+          continue;
+        }
+        if (response.files.count >= request.limit) {
+          response.files.has_more = true;
+          break;
+        }
+        bmx::remote::BmxFileEntry &entry =
+            response.files.entries[response.files.count++];
+        memcpy(entry.name, info.fname, sizeof(entry.name));
+        entry.name[sizeof(entry.name) - 1U] = '\0';
+        entry.directory = (info.fattrib & AM_DIR) != 0U;
+        entry.read_only = (info.fattrib & AM_RDO) != 0U;
+        entry.size = entry.directory ? 0U : static_cast<uint64_t>(info.fsize);
+      }
+      const FRESULT close_result = f_closedir(&directory);
+      if (result != FR_OK || close_result != FR_OK) break;
+      if (!after_found) {
+        response.status = MENU_CONTROL_INVALID_VALUE;
+        break;
+      }
+      if (response.files.has_more && response.files.count != 0U) {
+        strcpy(response.files.next_after,
+               response.files.entries[response.files.count - 1U].name);
+      }
+      response.status = MENU_CONTROL_OK;
+      break;
+    }
+    case bmx::remote::BmxApiOperation::Media: {
+      static const char *const drive_keys[] = {
+          "drive.8", "drive.9", "drive.10", "drive.11"};
+      for (size_t i = 0U; i < 4U; ++i) {
+        AddMediaSlot(&response.media, drive_keys[i],
+                     bmx::remote::BmxMediaKind::Disk,
+                     file_system_get_disk_name(8U + i, 0U));
+      }
+      AddMediaSlot(&response.media, "tape", bmx::remote::BmxMediaKind::Tape,
+                   tape_get_file_name(1));
+      AddMediaSlot(&response.media, "cartridge",
+                   bmx::remote::BmxMediaKind::Cartridge,
+                   cartridge_get_filename_by_slot(0));
+      response.status = MENU_CONTROL_OK;
+      break;
+    }
+    case bmx::remote::BmxApiOperation::DeveloperMemoryRead: {
+      const size_t size = request.memory_size;
+      const uint32_t address = request.memory_address;
+      if (address >= UINT32_C(0x10000) || size == 0U ||
+          size > bmx::remote::kBmxDeveloperMemoryMaximumTransferBytes ||
+          size > UINT32_C(0x10000) - address) {
+        response.status = MENU_CONTROL_INVALID_VALUE;
+        break;
+      }
+      response.binary.data = static_cast<uint8_t *>(malloc(size));
+      if (response.binary.data == nullptr) break;
+      response.binary.size = size;
+      for (size_t offset = 0U; offset < size; ++offset) {
+        response.binary.data[offset] = mem_bank_peek(
+            0, static_cast<uint16_t>(address + offset), nullptr);
+      }
+      response.status = MENU_CONTROL_OK;
+      break;
+    }
+    case bmx::remote::BmxApiOperation::ListControls:
+      response.status = menu_control_public_list(request.after, request.limit,
+                                                 &response.page);
+      break;
+    case bmx::remote::BmxApiOperation::ListActions:
+      response.status = menu_control_public_list_actions(
+          request.after, request.limit, &response.page);
+      break;
+    case bmx::remote::BmxApiOperation::DescribeControl:
+      response.status =
+          menu_control_public_describe(request.key, &response.control);
+      break;
+    case bmx::remote::BmxApiOperation::SetControl:
+      response.status = menu_control_public_set(
+          request.key, &request.value, &response.control);
+      break;
+    case bmx::remote::BmxApiOperation::InvokeAction: {
+      if (request.value.kind != MENU_CONTROL_VALUE_STRING) {
+        response.status =
+            menu_control_public_invoke(request.key, &response.control);
+        break;
+      }
+      if (menu_control_public_action_argument(request.key) !=
+          MENU_CONTROL_ACTION_MEDIA_PATH) {
+        response.status = MENU_CONTROL_INVALID_VALUE;
+        break;
+      }
+      response.status =
+          menu_control_public_describe_action(request.key, &response.control);
+      if (response.status != MENU_CONTROL_OK) break;
+      if (response.control.hidden) {
+        response.status = MENU_CONTROL_HIDDEN;
+        break;
+      }
+      if (response.control.disabled) {
+        response.status = MENU_CONTROL_DISABLED;
+        break;
+      }
+      if (response.control.type != BUTTON) {
+        response.status = MENU_CONTROL_WRONG_TYPE;
+        break;
+      }
+      const int id = response.control.id;
+      const int cart_file_id = direct_cart_file_menu_id(id);
+      int result = -1;
+      if (id == MENU_AUTOSTART) {
+        result = emux_autostart_file(request.path, 0U);
+      } else if (id >= MENU_ATTACH_DISK_8 && id <= MENU_ATTACH_DISK_11) {
+        result = emux_attach_disk_image(8 + id - MENU_ATTACH_DISK_8,
+                                        request.path);
+      } else if (id == MENU_ATTACH_TAPE) {
+        result = emux_attach_tape_image(request.path);
+      } else if (cart_file_id >= 0) {
+        result = emux_attach_cart(cart_file_id, request.path);
+      }
+      response.status = result >= 0
+                            ? menu_control_public_describe_action(
+                                  request.key, &response.control)
+                            : MENU_CONTROL_INVALID_VALUE;
+      break;
+    }
+    case bmx::remote::BmxApiOperation::Input: {
+      long keys[16U];
+      int pressed[16U];
+      int modifiers[16U];
+      int joy_ports[bmx::remote::kBmxApiMaximumInputEvents];
+      int joy_devices[bmx::remote::kBmxApiMaximumInputEvents];
+      int joy_values[bmx::remote::kBmxApiMaximumInputEvents];
+      size_t key_count = 0U;
+      size_t joy_count = 0U;
+      size_t mouse_count = 0U;
+      response.status = MENU_CONTROL_INVALID_VALUE;
+      for (size_t i = 0U; i < request.input_count; ++i) {
+        const bmx::remote::BmxInputEvent &event = request.input[i];
+        if (event.type == bmx::remote::BmxInputType::Key) {
+          const int down = event.key_action != bmx::remote::BmxKeyAction::Up;
+          const size_t transitions =
+              event.key_action == bmx::remote::BmxKeyAction::Tap ? 2U : 1U;
+          if (key_count + transitions > 16U) break;
+          keys[key_count] = event.keycode;
+          pressed[key_count] = down;
+          modifiers[key_count++] =
+              ViceKeyboardModifierMask((unsigned char)event.modifiers);
+          if (transitions == 2U) {
+            keys[key_count] = event.keycode;
+            pressed[key_count] = 0;
+            modifiers[key_count++] =
+                ViceKeyboardModifierMask((unsigned char)event.modifiers);
+          }
+        } else if (event.type == bmx::remote::BmxInputType::Joystick) {
+          joy_ports[joy_count] = event.joystick_port;
+          joy_devices[joy_count] = event.joystick_device;
+          joy_values[joy_count++] = event.joystick_value;
+        } else if (event.type == bmx::remote::BmxInputType::Mouse) {
+          ++mouse_count;
+        } else {
+          break;
+        }
+        if (i + 1U == request.input_count) response.status = MENU_CONTROL_OK;
+      }
+      if (response.status == MENU_CONTROL_OK) {
+        const unsigned kinds = (key_count != 0U ? 1U : 0U) +
+                               (joy_count != 0U ? 1U : 0U) +
+                               (mouse_count != 0U ? 1U : 0U);
+        if (kinds != 1U) {
+          response.status = MENU_CONTROL_INVALID_VALUE;
+          break;
+        }
+        int accepted = key_count != 0U
+            ? (emu_is_ui_activated()
+                   ? emu_ui_key_interrupt_batch(keys, pressed, key_count)
+                   : emux_key_interrupt_batch(keys, pressed, modifiers,
+                                              key_count))
+            : joy_count != 0U
+                  ? emux_joy_interrupt_batch(joy_ports, joy_devices,
+                                             joy_values, joy_count)
+                  : 1;
+        if (mouse_count != 0U) {
+          static BmxMouseStatusState remote_mouse = {0, 0, 0};
+          for (size_t i = 0U; i < request.input_count; ++i) {
+            const bmx::remote::BmxInputEvent &event = request.input[i];
+            bmx_mouse_status_update(
+                (unsigned)event.mouse_buttons, event.mouse_dx,
+                event.mouse_dy, event.mouse_wheel, &remote_mouse);
+          }
+        }
+        if (!accepted) response.status = MENU_CONTROL_UNAVAILABLE;
+      }
+      break;
+    }
+    case bmx::remote::BmxApiOperation::TextInput:
+      response.status = MENU_CONTROL_INVALID_VALUE;
+      if (request.text == nullptr || request.text_size == 0U ||
+          request.text_size > bmx::remote::kBmxApiMaximumTextBytes) {
+        break;
+      }
+      // VICE's normal paste queue performs the frame-by-frame injection.
+      // VICE maps host upper-case letters to shifted PETSCII, which renders as
+      // graphics in the C64 upper-case/graphics character set.  Portable
+      // BASIC text needs the unshifted letter codes instead.  Lower-casing the
+      // host representation before conversion produces PETSCII $41-$5A for
+      // either ASCII case while preserving punctuation and line endings.
+      for (size_t i = 0U; i < request.text_size; ++i) {
+        if (request.text[i] >= 'A' && request.text[i] <= 'Z') {
+          request.text[i] = static_cast<char>(request.text[i] + ('a' - 'A'));
+        }
+      }
+      charset_petconvstring(reinterpret_cast<uint8_t *>(request.text), 0);
+      response.text_queued = strlen(request.text);
+      response.text_accepted = kbdbuf_feed(request.text) == 0;
+      response.status = MENU_CONTROL_OK;
+      break;
+    case bmx::remote::BmxApiOperation::Screenshot:
+      response.status = mRemoteService->Capture()->Screenshot(
+                            request.width, &response.binary)
+                            ? MENU_CONTROL_OK : MENU_CONTROL_UNAVAILABLE;
+      break;
+    case bmx::remote::BmxApiOperation::Audio:
+    case bmx::remote::BmxApiOperation::AudioWav:
+      if (mRemoteService->Capture()->BeginAudio(
+              request.duration_ms, mSoundSampleRate,
+              mNumSoundChannels > 0 ? (uint32_t)mNumSoundChannels : 1U,
+              request.operation == bmx::remote::BmxApiOperation::AudioWav,
+              token)) {
+        return;
+      }
+      response.status = MENU_CONTROL_UNAVAILABLE;
+      break;
+    case bmx::remote::BmxApiOperation::None:
+      response.status = MENU_CONTROL_INVALID_VALUE;
+      break;
+  }
+
+  if (!mRemoteService->CompleteControl(token, response) &&
+      response.binary.data != nullptr) {
+    free(response.binary.data);
+  }
 }
 
 void CKernel::MouseStatusHandler(unsigned nButtons, int deltaX, int deltaY,
@@ -2360,6 +2981,12 @@ void CKernel::circle_get_diagnostics(struct bmx_diagnostics_snapshot *snapshot) 
   snapshot->emu_cycles_per_sec = circle_cycles_per_second();
   snapshot->temperature_c = mCPUThrottle.GetTemperature();
   snapshot->throttle_clock_hz = mCPUThrottle.GetClockRate();
+  snapshot->scheduler_safe_points = mSchedulerSafePoints;
+  snapshot->scheduler_rounds = mSchedulerRounds;
+  snapshot->scheduler_extra_rounds = mSchedulerExtraRounds;
+  snapshot->scheduler_pump_us = mSchedulerPumpUS;
+  snapshot->scheduler_pump_max_us = mSchedulerPumpMaxUS;
+  snapshot->scheduler_pump_budget_stops = mSchedulerPumpBudgetStops;
 }
 
 int CKernel::circle_prepare_system_shutdown(void) {

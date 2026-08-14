@@ -57,6 +57,52 @@ long keycode_for_ui_layout(long keycode, int german_layout) {
   return keycode;
 }
 
+int keycode_format_keycap(long keycode, int german_layout,
+                          char *buffer, size_t buffer_size) {
+  const char *label = NULL;
+  int written;
+
+  if (buffer == NULL || buffer_size == 0) {
+    return 0;
+  }
+
+  if (german_layout) {
+    switch (keycode) {
+      case KEYCODE_y: label = "z"; break;
+      case KEYCODE_z: label = "y"; break;
+      case KEYCODE_Dash: label = "\xDF"; break;       /* sharp s */
+      case KEYCODE_Equals: label = "\xB4"; break;     /* acute */
+      case KEYCODE_LeftBracket: label = "\xFC"; break;
+      case KEYCODE_RightBracket: label = "+"; break;
+      case KEYCODE_BackSlash:
+      case KEYCODE_Pound: label = "#"; break;
+      case KEYCODE_SemiColon: label = "\xF6"; break;
+      case KEYCODE_SingleQuote: label = "\xE4"; break;
+      case KEYCODE_BackQuote: label = "^"; break;
+      case KEYCODE_Slash: label = "-"; break;
+      case KEYCODE_KP_BackSlash: label = "<"; break;
+      default: break;
+    }
+  } else {
+    switch (keycode) {
+      case KEYCODE_LeftBracket: label = "["; break;
+      case KEYCODE_RightBracket: label = "]"; break;
+      case KEYCODE_BackSlash: label = "\\"; break;
+      case KEYCODE_Pound: label = "#"; break;
+      default: break;
+    }
+  }
+
+  if (label == NULL) {
+    label = keycode_to_string(keycode);
+  }
+  if (label == NULL || *label == '\0' || strcmp(label, "undefined") == 0) {
+    return keycode_format_vkm_token(keycode, buffer, buffer_size);
+  }
+  written = snprintf(buffer, buffer_size, "%s", label);
+  return written >= 0 && (size_t)written < buffer_size;
+}
+
 int keycode_format_vkm_token(long keycode, char *buffer, size_t buffer_size) {
   const char *token = NULL;
   int written;

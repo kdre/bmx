@@ -24,6 +24,7 @@ DEFAULT_POLICY_PATH = DEFAULT_LAYOUT_PATH
 POLICY_NAMES = frozenset(
     {"config-template", "kernel", "managed-replace", "metadata", "preserve"}
 )
+LEGACY_MACHINE_KERNEL_BASES = ("kernel7l.img",)
 _MODE_POLICY = {
     "config": "config-template",
     "kernel": "kernel",
@@ -268,12 +269,15 @@ def load_update_path_policy(path: str | Path | None = None) -> UpdatePathPolicy:
 
 
 def machine_kernel_match(
-    path: str, policy: UpdatePathPolicy | None = None,
+    path: str, policy: UpdatePathPolicy | None = None, *,
+    include_legacy: bool = False,
 ) -> MachineKernelMatch | None:
     policy = policy or load_update_path_policy()
     if not isinstance(path, str) or "/" in path:
         return None
-    for base in policy.kernel_bases:
+    bases = (*policy.kernel_bases, *LEGACY_MACHINE_KERNEL_BASES) \
+        if include_legacy else policy.kernel_bases
+    for base in bases:
         prefix = f"{base}."
         if path.startswith(prefix):
             machine = path[len(prefix):]
@@ -283,7 +287,8 @@ def machine_kernel_match(
 
 
 def classify_bmx_path(
-    path: str, policy: UpdatePathPolicy | None = None,
+    path: str, policy: UpdatePathPolicy | None = None, *,
+    include_legacy_kernels: bool = False,
 ) -> str | None:
     """Classify one archive file, returning ``None`` for unknown paths."""
 
@@ -298,7 +303,9 @@ def classify_bmx_path(
     top = path.split("/", 1)[0]
     for rule in policy.rules:
         if rule.kind == "machine-kernel":
-            if machine_kernel_match(path, policy) is not None:
+            if machine_kernel_match(
+                path, policy, include_legacy=include_legacy_kernels
+            ) is not None:
                 return policy.kernel_policy
             continue
         if rule.root is not None and top != rule.root:

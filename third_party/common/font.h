@@ -26,6 +26,8 @@
 #ifndef RASPI_FONT_H_
 #define RASPI_FONT_H_
 
-extern char font8x8_basic[128][8];
+extern char font8x8[256][8];
+/* Fixed Unscii upper-case/graphics glyphs, indexed by Commodore screen code. */
+extern char font8x8_petscii_upper[256][8];
 
 #endif

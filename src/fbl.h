@@ -152,6 +152,12 @@ public:
 
   static void SetInterpolation(int enable);
 
+  // One-shot capture of the fully composed visible display. The caller owns
+  // the output buffer; no capture storage remains allocated afterwards.
+  static bool CaptureDimensions(int *width, int *height);
+  static bool CaptureRgb888(uint8_t *output, int width, int height,
+                            unsigned pitch);
+
 private:
   static void PresentLayerList(bool sync, FrameBufferLayer **layers, unsigned count);
   void FreeInternal(bool keepPixels);

@@ -28,6 +28,10 @@ struct ReleaseOfferStorage {
     size_t manifest_file_capacity;
     ManifestDirectory *manifest_directories;
     size_t manifest_directory_capacity;
+    ManifestDeletion *manifest_deletions;
+    size_t manifest_deletion_capacity;
+    ManifestReplacement *manifest_replacements;
+    size_t manifest_replacement_capacity;
 };
 
 enum class OfferConfigurationStatus : uint8_t {

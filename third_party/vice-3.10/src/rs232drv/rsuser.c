@@ -164,9 +164,10 @@ static int bit_clk_ticks = 0;           /* clk ticks per bit */
 
 static int rsuser_device;
 
-#ifdef BMC64_DEBUG_PROFILE
+#if BMC64_RS232_LOG_LEVEL >= BMC64_LOG_DEBUG
 static unsigned int rsuser_dbg_mismatch_count = 0;
 static unsigned int rsuser_dbg_tx_count = 0;
+static unsigned int rsuser_dbg_rx_count = 0;
 static unsigned int rsuser_dbg_edge_count = 0;
 
 #define RSUSER_DBG_CLK(_clk) ((unsigned long)((_clk) & 0xffffffffUL))
@@ -220,7 +221,7 @@ static void calculate_baudrate(void)
 
     LOG_DEBUG(("RS232 calculate_baudrate: %d cycles per char (cycles_per_sec=%ld).",
                char_clk_ticks, cycles_per_sec));
-#ifdef BMC64_DEBUG_PROFILE
+#if BMC64_RS232_LOG_LEVEL >= BMC64_LOG_DEBUG
     BMC64_RS232_DEBUG("userport baudcalc enabled %d baud %d cycles %ld "
                       "char_ticks %d bit_ticks %d",
                       rsuser_enabled, rsuser_baudrate, cycles_per_sec,
@@ -256,7 +257,7 @@ static int userport_rs232_enable(int value)
 
     calculate_baudrate();
 
-#ifdef BMC64_DEBUG_PROFILE
+#if BMC64_RS232_LOG_LEVEL >= BMC64_LOG_DEBUG
     rsuser_dbg_log_state(newval ? "enable" : "disable");
 #endif
 
@@ -288,7 +289,7 @@ static int set_baudrate(int val, void *param)
 
     calculate_baudrate();
 
-#ifdef BMC64_DEBUG_PROFILE
+#if BMC64_RS232_LOG_LEVEL >= BMC64_LOG_DEBUG
     rsuser_dbg_log_state("set-baud");
 #endif
 
@@ -307,7 +308,7 @@ static int set_up_device(int val, void *param)
         rs232drv_close(fd);
         fd = rs232drv_open(rsuser_device);
     }
-#ifdef BMC64_DEBUG_PROFILE
+#if BMC64_RS232_LOG_LEVEL >= BMC64_LOG_DEBUG
     rsuser_dbg_log_state("set-device");
 #endif
     return 0;
@@ -454,7 +455,7 @@ static const unsigned int masks[] =
     0x1000, 0x2000, 0x4000, 0x8000
 };
 
-#ifdef BMC64_DEBUG_PROFILE
+#if BMC64_RS232_LOG_LEVEL >= BMC64_LOG_DEBUG
 static void rsuser_dbg_print_frame(const char *tag, unsigned int frame_buf, unsigned int frame_valid)
 {
 #if BMC64_RS232_LOG_LEVEL >= BMC64_LOG_TRACE
@@ -548,7 +549,7 @@ static void rsuser_setup(void)
     if (fd < 0 && rsuser_enabled) {
         fd = rs232drv_open(rsuser_device);
     }
-#ifdef BMC64_DEBUG_PROFILE
+#if BMC64_RS232_LOG_LEVEL >= BMC64_LOG_DEBUG
     rsuser_dbg_log_state("setup-open");
 #endif
     alarm_set(rsuser_alarm, maincpu_clk + char_clk_ticks / 10);
@@ -571,7 +572,7 @@ static void rsuser_write_ctrl(uint8_t status, int pulse)
                fd, status, dtr ? 1 : 0, rts ? 1 : 0);
     }
 #endif
-#ifdef BMC64_DEBUG_PROFILE
+#if BMC64_RS232_LOG_LEVEL >= BMC64_LOG_DEBUG
     {
         static int dbg_oldstatus = -1;
         if (status != dbg_oldstatus) {
@@ -675,7 +676,7 @@ static void check_tx_buffer(void)
     if (valid >= 10) {     /* (valid-1)-th bit is not set = start bit! */
         if (!(buf & masks[valid - 10])) {
             log_error(LOG_DEFAULT, "rsuser: framing mismatch - outgoing baudrates ok?");
-#ifdef BMC64_DEBUG_PROFILE
+#if BMC64_RS232_LOG_LEVEL >= BMC64_LOG_DEBUG
             rsuser_dbg_mismatch_count++;
             if (rsuser_dbg_mismatch_count <= 32 || (rsuser_dbg_mismatch_count % 64) == 0) {
                 BMC64_RS232_DEBUG("userport mismatch #%u fd %d dev %d baud %d valid %u "
@@ -700,7 +701,7 @@ static void check_tx_buffer(void)
             c = (buf >> (valid - 9)) & 0xff;
             if (fd >= 0) {
                 LOG_DEBUG(("\"%c\" (%02x).", code[c], code[c]));
-#ifdef BMC64_DEBUG_PROFILE
+#if BMC64_RS232_LOG_LEVEL >= BMC64_LOG_DEBUG
                 rsuser_dbg_tx_count++;
                 if (rsuser_dbg_tx_count <= 32 || (rsuser_dbg_tx_count % 64) == 0) {
                     BMC64_RS232_TRACE("userport tx #%u raw 0x%02x data 0x%02x '%c' "
@@ -763,7 +764,7 @@ static void rsuser_set_tx_bit(uint8_t b)
         return;
     }
 
-#ifdef BMC64_DEBUG_PROFILE
+#if BMC64_RS232_LOG_LEVEL >= BMC64_LOG_DEBUG
     rsuser_dbg_log_tx_edge(b ? 1 : 0);
 #endif
 
@@ -880,6 +881,16 @@ static void int_rsuser(CLOCK offset, void *data)
     switch (rxstate) {
         case 0:
             if ((rsuser_rtsinv ? 0 : RTS_OUT) == rts && fd >= 0 && rs232drv_getc(fd, &rxdata)) {
+#if BMC64_RS232_LOG_LEVEL >= BMC64_LOG_TRACE
+                rsuser_dbg_rx_count++;
+                if (rsuser_dbg_rx_count <= 32 || (rsuser_dbg_rx_count % 64) == 0) {
+                    BMC64_RS232_TRACE("userport rx #%u data 0x%02x '%c' fd %d baud %d clk %lu",
+                                      rsuser_dbg_rx_count, rxdata,
+                                      (rxdata >= 32 && rxdata < 127) ? rxdata : '.',
+                                      fd, rsuser_baudrate,
+                                      RSUSER_DBG_CLK(maincpu_clk));
+                }
+#endif
                 /* byte received, signal startbit on flag */
                 rxstate++;
                 if (start_bit_trigger) {
@@ -896,7 +907,13 @@ static void int_rsuser(CLOCK offset, void *data)
             }
             rxstate = 0;
             clk_start_rx = 0;
-            alarm_set(rsuser_alarm, maincpu_clk + char_clk_ticks / 10);
+            /* The C64 KERNAL misses every second byte when 2400-baud frames
+               arrive with only one stop bit.  Leave one additional idle bit
+               before accepting the next byte; slower rates do not need it. */
+            alarm_set(rsuser_alarm, maincpu_clk + char_clk_ticks / 10
+                      + (!rsuser_up9600 && rsuser_baudrate >= 2400
+                             ? bit_clk_ticks
+                             : 0));
             break;
         case 2:
             /* RTS disabled */

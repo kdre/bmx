@@ -106,6 +106,20 @@ bool SupportsAciaRs232(MachineId id) {
          id == MachineId::VIC20 || id == MachineId::PLUS4;
 }
 
+int CopyPassword(const char *configured, char *password,
+                 unsigned password_size) {
+  if (password == nullptr || password_size == 0 || configured == nullptr) {
+    return 0;
+  }
+  const size_t size = std::strlen(configured);
+  if (size >= password_size) {
+    password[0] = '\0';
+    return 0;
+  }
+  std::memcpy(password, configured, size + 1U);
+  return 1;
+}
+
 }  // namespace
 
 void RunMainProgram(const char *timing_option,
@@ -270,18 +284,27 @@ extern "C" int emux_get_developer_password(char *password,
   if (password == nullptr || password_size == 0 || options == nullptr) {
     return 0;
   }
-  const char *configured = options->GetDeveloperPassword();
-  const size_t size = std::strlen(configured);
-  if (size >= password_size) {
-    password[0] = '\0';
-    return 0;
-  }
-  std::memcpy(password, configured, size + 1);
-  return 1;
+  return bmc64::vice::CopyPassword(options->GetDeveloperPassword(), password,
+                                   password_size);
 }
 
 extern "C" unsigned emux_get_developer_log_buffer_kb(void) {
   ViceOptions *options = ViceOptions::Get();
   return options != nullptr ? options->GetDeveloperLogBufferKB()
                             : BMX_DEVELOPER_LOG_BUFFER_DEFAULT_KB;
+}
+
+extern "C" int emux_api_mode_enabled(void) {
+  ViceOptions *options = ViceOptions::Get();
+  return options != nullptr && options->ApiModeEnabled() ? 1 : 0;
+}
+
+extern "C" int emux_get_api_password(char *password,
+                                      unsigned password_size) {
+  ViceOptions *options = ViceOptions::Get();
+  if (password == nullptr || password_size == 0 || options == nullptr) {
+    return 0;
+  }
+  return bmc64::vice::CopyPassword(options->GetApiPassword(), password,
+                                   password_size);
 }

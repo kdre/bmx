@@ -31,6 +31,7 @@
 #define NETWORK_WIFI_PSK_LEN 64
 #define NETWORK_WIFI_COUNTRY_LEN 3
 #define DEVELOPER_PASSWORD_LEN (BMX_DEVELOPER_PASSWORD_MAX_LEN + 1U)
+#define API_PASSWORD_LEN (BMX_API_PASSWORD_MAX_LEN + 1U)
 
 enum TBmxNetworkAdapter {
   BMX_NETWORK_OFF = 0,
@@ -70,6 +71,8 @@ public:
   bool DeveloperModeEnabled(void) const;
   const char *GetDeveloperPassword(void) const;
   unsigned GetDeveloperLogBufferKB(void) const;
+  bool ApiModeEnabled(void) const;
+  const char *GetApiPassword(void) const;
   const char *GetDiskVolume(void) const;
   unsigned long GetCyclesPerSecond(void) const;
   TVCHIQSoundDestination GetAudioOut(void) const;
@@ -132,6 +135,8 @@ private:
   bool m_bDeveloperModeEnabled;
   char m_developerPassword[DEVELOPER_PASSWORD_LEN];
   unsigned m_developerLogBufferKB;
+  bool m_bApiModeEnabled;
+  char m_apiPassword[API_PASSWORD_LEN];
   char m_disk_volume[VOLUME_NAME_LEN];
   unsigned long m_nCyclesPerSecond;
   TVCHIQSoundDestination m_audioOut;

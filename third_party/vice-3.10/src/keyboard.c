@@ -149,6 +149,28 @@ signed long key_joy_keypad[KBD_JOY_KEYPAD_ROWS][KBD_JOY_KEYPAD_COLS]; /* FIXME *
  */
 static int kbd_statusbar_enabled = 0;
 
+/** \brief  Enable scan-safe, two-phase transitions for de-shifted keys */
+static int keyboard_staged_deshift_enabled = 0;
+
+typedef enum {
+    STAGED_DESHIFT_NONE = 0,
+    STAGED_DESHIFT_PRESS_TARGET,
+    STAGED_DESHIFT_RELEASE_MODIFIERS
+} staged_deshift_phase_t;
+
+typedef struct {
+    staged_deshift_phase_t phase;
+    int row;
+    int column;
+    int shift;
+} staged_deshift_t;
+
+static staged_deshift_t staged_deshift = {
+    STAGED_DESHIFT_NONE, 0, 0, 0
+};
+
+#define STAGED_DESHIFT_DELAY 1000
+
 typedef struct {
     signed long key;
     int mod;
@@ -238,6 +260,20 @@ static CLOCK kbd_make_event_timestap(CLOCK offset, int num)
 
     keyboard_latch_timestamp = offset;
     return offset;
+}
+
+/* Keep the two visible DESHIFT matrix changes apart without adding the
+   normal random host-key delay. */
+static void kbd_schedule_staged_deshift(void)
+{
+    CLOCK timestamp = maincpu_clk;
+
+    if (timestamp < keyboard_latch_timestamp) {
+        timestamp = keyboard_latch_timestamp;
+    }
+    timestamp += STAGED_DESHIFT_DELAY;
+    keyboard_latch_timestamp = timestamp;
+    alarm_set(keyboard_alarm, timestamp);
 }
 
 static void kbd_limit_pointers(void)
@@ -683,13 +719,19 @@ int keyboard_keymap_lookup(signed long key, int mod,
  * key: host key
  * mod: host key modifier
  * pressed: press (=1) or release (=0)
+ * allow_staging: allow this event to start a two-phase DESHIFT transition
+ * returns 1 if a staged transition was started, otherwise 0
  */
-static void kbd_key_pressed(signed long key, int mod, int pressed)
+static int kbd_key_pressed(signed long key, int mod, int pressed,
+                           int allow_staging)
 {
     int keynum;
+    int row;
+    int column;
+    int shift;
 
     if (keyconvmap == NULL) {
-        return;
+        return 0;
     }
 
     keynum = keyb_find_in_keyconvtab((int)key, mod);
@@ -698,21 +740,41 @@ static void kbd_key_pressed(signed long key, int mod, int pressed)
                 pressed ? "D" : "U",
                 key, pressed));
     } else {
+        row = keyconvmap[keynum].row;
+        column = keyconvmap[keynum].column;
+        shift = keyconvmap[keynum].shift;
         DBGKEY(("kbd_key_pressed [mapped]    %s row:%d col:%d pressed:%d shift:0x%04x key:%3ld mod:0x%04x",
                 pressed ? "D" : "U",
-                keyconvmap[keynum].row, keyconvmap[keynum].column,
+                row, column,
                 pressed,
-                keyconvmap[keynum].shift,
+                shift,
                 key, (unsigned)mod
                 ));
-        if (keyboard_key_matrix_pressed(keyconvmap[keynum].row,
-                                        keyconvmap[keynum].column,
-                                        keyconvmap[keynum].shift,
+
+        if (allow_staging && keyboard_staged_deshift_enabled
+            && !network_connected() && (shift & DESHIFT_SHIFT)
+            && !key_is_modifier(row, column)) {
+            if (pressed) {
+                if (!keyboard_key_pressed_matrix(row, column, shift)) {
+                    return 0;
+                }
+                staged_deshift.phase = STAGED_DESHIFT_PRESS_TARGET;
+            } else {
+                keyboard_set_latch_keyarr(row, column, 0);
+                staged_deshift.phase = STAGED_DESHIFT_RELEASE_MODIFIERS;
+            }
+            staged_deshift.row = row;
+            staged_deshift.column = column;
+            staged_deshift.shift = shift;
+            return 1;
+        }
+
+        if (keyboard_key_matrix_pressed(row, column, shift,
                                         pressed)) {
             /* modifier latching is handled in keyboard_latch_modifier_states()
                via keyboard_key_matrix_pressed() */
-            if (!key_is_modifier(keyconvmap[keynum].row, keyconvmap[keynum].column)) {
-                keyboard_set_latch_keyarr(keyconvmap[keynum].row, keyconvmap[keynum].column, pressed);
+            if (!key_is_modifier(row, column)) {
+                keyboard_set_latch_keyarr(row, column, pressed);
             }
             if (network_connected()) {
 #if 0
@@ -724,6 +786,21 @@ static void kbd_key_pressed(signed long key, int mod, int pressed)
             }
         }
     }
+    return 0;
+}
+
+static void kbd_finish_staged_deshift(void)
+{
+    if (staged_deshift.phase == STAGED_DESHIFT_PRESS_TARGET) {
+        keyboard_set_latch_keyarr(staged_deshift.row,
+                                  staged_deshift.column, 1);
+    } else if (staged_deshift.phase
+               == STAGED_DESHIFT_RELEASE_MODIFIERS) {
+        keyboard_key_released_matrix(staged_deshift.row,
+                                     staged_deshift.column,
+                                     staged_deshift.shift);
+    }
+    staged_deshift.phase = STAGED_DESHIFT_NONE;
 }
 
 /* keyboard alarm handler, this consumes the host keyboard queue */
@@ -731,9 +808,18 @@ static void keyboard_alarm_handler(CLOCK offset, void *data)
 {
     int key, mod, pressed;
     int queuepos;
+    int transition_started;
 
     alarm_unset(keyboard_alarm);
     alarm_context_update_next_pending(keyboard_alarm->context);
+
+    if (staged_deshift.phase != STAGED_DESHIFT_NONE) {
+        kbd_finish_staged_deshift();
+        keyboard_latch_matrix(offset);
+        keyboard_event_record();
+        kbd_retrigger_alarm();
+        return;
+    }
 
     if(kbd_queue_popkey(&key, &mod, &pressed) == 0) {
         DBGKEY(("keyboard_alarm_handler: [no more keys] maincpu_clk: %12lu offset: %12lu",
@@ -762,19 +848,24 @@ static void keyboard_alarm_handler(CLOCK offset, void *data)
                 (kbd_queue[queuepos].key == key)) {
                 DBGKEY(("keyboard_alarm_handler: [release older]                          key:%3d mod:0x%04x",
                         key, (unsigned)mod));
-                kbd_key_pressed(kbd_queue[queuepos].key, kbd_queue[queuepos].mod & ~mod, 0);
+                kbd_key_pressed(kbd_queue[queuepos].key,
+                                kbd_queue[queuepos].mod & ~mod, 0, 0);
                 break;
             }
         }
         DBGKEY(("keyboard_alarm_handler: [%s]                                key:%3d mod:0x%04x",
                pressed ? "pressed" : "release", key, (unsigned)mod));
         /* press or release the new key */
-        kbd_key_pressed(key, mod, pressed);
+        transition_started = kbd_key_pressed(key, mod, pressed, 1);
 
         keyboard_latch_matrix(offset);
         keyboard_event_record();
 
-        kbd_retrigger_alarm();
+        if (transition_started) {
+            kbd_schedule_staged_deshift();
+        } else {
+            kbd_retrigger_alarm();
+        }
     }
 }
 
@@ -882,6 +973,7 @@ void keyboard_key_released(signed long key, int mod)
 
 static void keyboard_key_clear_internal(void)
 {
+    staged_deshift.phase = STAGED_DESHIFT_NONE;
     keyboard_clear_keymatrix();
     clear_virtual_modifier_flags();
     joystick_clear_all();
@@ -1202,6 +1294,12 @@ static int keyboard_set_keyboard_statusbar(int val, void *param)
     return 0;   /* Okidoki */
 }
 
+static int keyboard_set_staged_deshift(int val, void *param)
+{
+    keyboard_staged_deshift_enabled = val ? 1 : 0;
+    return 0;
+}
+
 /** \brief  Get "KbdStatusbar" directly
  *
  * For UIs: get "KbdStatusbar" resource value without going through the
@@ -1325,6 +1423,8 @@ int keyboard_snapshot_read_module(snapshot_t *s)
 static const resource_int_t resources_int[] = {
     { "KbdStatusbar", 0, RES_EVENT_NO, NULL,
       &kbd_statusbar_enabled, keyboard_set_keyboard_statusbar, NULL },
+    { "KeyboardStagedDeshift", 1, RES_EVENT_NO, NULL,
+      &keyboard_staged_deshift_enabled, keyboard_set_staged_deshift, NULL },
     RESOURCE_INT_LIST_END
 };
 

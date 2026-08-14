@@ -1,10 +1,44 @@
+Version 2026.08.14
+------------------
+* New features
+  * Redesigned Circle's network as a Core-0 servie.
+  * Improved menu navigation: Arrow right: open menu, arrow left: close menu.
+    Enter: displays text files. If you return from a folder the cursor is not
+    placed on top, but on the position of the folder where you came from.
+  * Added a non-developer REST interface. Disabled per default (still work in
+    progress).
+  * Added a keyboard mapping editor to edit the cusom layouts and/or inspect
+    the other available mappings (positional etc.).
+  * Replaced the BMX menu font with unscii 2.1. The content of disk images
+    is rendered using the native maschine font.
+  * The BMX menu now appears in exactly the same size on all maschines. The
+    size and the gap between two lines can be configured in Prefs->Menu.
+  * Added original Vice symbolic and position keymaps back to BMX. The current
+    and default keymap is called "PI/PC (BMX)".
+
+* Bugfixes
+  * Backported selected post-3.10 VICE fixes for custom C128 C64 KERNALs, 
+    VIA timers and 1541 ports, virtual-drive file creation, VIC-II collision 
+    interrupts, and SCPU64 REU DMA.
+  * Network performance and stability fixes.
+  * Fix for RS232 timing issues.
+  * Recover halted xHCI endpoints after USB errors (fix for some Keyboard/Mouse
+    combos).
+  * 8BitDo V1 dongles were not working.
+  * Pressing two keys on the host to emulate one key in the emulated maschine
+    can occassionally result in wrong characters (e.g. pressing left shift + + 
+    many time will result in screen code 64 instead of the expected asterix).
+    The fix can be turned on/off in the Keyboard menu.
+  * The online updater could not replace files when the filename is different.
+    This is will be needed for the next update.
+
 Version 2026.08.06
 ------------------
 * New features
   * Added a Raspberry Pi 4/5 overclocking menu. If something goes wrong, you 
     have to manually edit config.txt! USE AT YOUR OWN RISK!
   * Added a developer mode to BMX which can be enabled/disabled in the system
-    menu. When enabled a rest interface and a web ui is available to support 
+    menu. When enabled a REST interface and a web ui is available to support 
     development and diagnostics (still work in progress). Nothing will ever
     leave your network!
   * Generic USB HID-Interfaces are now routed to the mouse, gamepad, or 
@@ -28,7 +62,7 @@ Version 2026.08.06
   * GPIO outputs can be enabled in the GPIO menu. Manual editing of 
     cmdline.txt is not necessary.
 
-* Bugfix
+* Bugfixes
   * The host keyboard was interpreted as US during entries (e.g filenames). Now
     it repects the keyboard mapping (in the sense that z and y are swapped).
   * Fixed erratic 1351 mouse movement in GEOS 128 by backporting the VICE
@@ -39,6 +73,11 @@ Version 2026.08.06
     PETSCIIBOARD to Custom.
   * Multi-report USB HID mouse devices were not handled correctly. Reports are
     now decoded according to their HID report descriptors.
+  * Some shifted keys occassionally resulted in a wrong displayed character
+    due to an old Vice bug. (eg Left Shift + + displayed occassionally screen
+    code 64, instead of asterix). Because I do not know if the fix has any
+    side effects, you can turn it on/off in the keyboard menu (safe shifted
+    symbols).
 
 Version 2026.07.31
 ------------------

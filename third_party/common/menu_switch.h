@@ -197,6 +197,9 @@ int bmx_boot_plan_set_developer_password(struct bmx_boot_plan *plan,
                                          const char *password);
 int bmx_boot_plan_set_developer_log_buffer_kb(struct bmx_boot_plan *plan,
                                               unsigned buffer_kb);
+int bmx_boot_plan_set_api_mode(struct bmx_boot_plan *plan, int enabled);
+int bmx_boot_plan_set_api_password(struct bmx_boot_plan *plan,
+                                   const char *password);
 int bmx_boot_plan_add_overclock(struct bmx_boot_plan *plan,
                                const struct bmx_overclock_config *config);
 

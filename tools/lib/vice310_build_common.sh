@@ -109,7 +109,7 @@ case "$BMX_BUILD_CLEAN" in
   0|1) ;;
   *) echo "BMX_BUILD_CLEAN must be exactly 0 or 1" >&2; return 2 ;;
 esac
-BMX_UPDATE_UPDATER_ABI="${BMX_UPDATE_UPDATER_ABI:-1}"
+BMX_UPDATE_UPDATER_ABI="${BMX_UPDATE_UPDATER_ABI:-2}"
 if [ "$BMX_BUILD_BOARD" = pi5 ]; then
   BMX_PI5_SID_WORKER="${BMX_PI5_SID_WORKER:-1}"
 else

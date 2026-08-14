@@ -1,6 +1,6 @@
 #include "update/update_service.h"
 
-#include "network/network_manager.h"
+#include "network/network_service.h"
 #include "update/build_info.h"
 #include "update/circle_secure_stream.h"
 #include "update/config_migration.h"
@@ -22,8 +22,11 @@
 #if defined(RASPI_COMPILE)
 #include <circle/startup.h>
 #include <circle/timer.h>
-extern "C" int emux_prepare_shutdown(void);
-extern "C" int circle_prepare_system_shutdown(void);
+extern "C" {
+#include "ui.h"
+int emux_prepare_shutdown(void);
+int circle_prepare_system_shutdown(void);
+}
 #endif
 
 #include <stdio.h>
@@ -54,6 +57,8 @@ struct ServiceState {
     GitHubReleaseAsset *github_assets;
     ManifestFile *manifest_files;
     ManifestDirectory *manifest_directories;
+    ManifestDeletion *manifest_deletions;
+    ManifestReplacement *manifest_replacements;
     ZipEntry *zip_entries;
     ZipExpectedFile *expected_files;
     const char **expected_directories;
@@ -144,6 +149,10 @@ bool AllocateState()
     g_state.manifest_files = new ManifestFile[kMaximumManifestFiles];
     g_state.manifest_directories =
         new ManifestDirectory[kMaximumManifestDirectories];
+    g_state.manifest_deletions =
+        new ManifestDeletion[kMaximumManifestDeletions];
+    g_state.manifest_replacements =
+        new ManifestReplacement[kMaximumManifestReplacements];
     g_state.zip_entries = new ZipEntry[kZipMaximumEntries];
     g_state.expected_files = new ZipExpectedFile[kMaximumManifestFiles];
     g_state.expected_directories =
@@ -158,6 +167,8 @@ bool AllocateState()
         g_state.github_tokens != 0 && g_state.manifest_tokens != 0 &&
         g_state.github_assets != 0 && g_state.manifest_files != 0 &&
         g_state.manifest_directories != 0 && g_state.zip_entries != 0 &&
+        g_state.manifest_deletions != 0 &&
+        g_state.manifest_replacements != 0 &&
         g_state.expected_files != 0 && g_state.expected_directories != 0 &&
         g_state.file_actions != 0 && g_state.zip_workspace != 0 &&
         g_state.installer_io_buffer != 0 && g_state.https_workspace != 0;
@@ -172,6 +183,8 @@ bool AllocateState()
         delete[] g_state.github_assets;
         delete[] g_state.manifest_files;
         delete[] g_state.manifest_directories;
+        delete[] g_state.manifest_deletions;
+        delete[] g_state.manifest_replacements;
         delete[] g_state.zip_entries;
         delete[] g_state.expected_files;
         delete[] g_state.expected_directories;
@@ -189,6 +202,8 @@ bool AllocateState()
         g_state.github_assets = 0;
         g_state.manifest_files = 0;
         g_state.manifest_directories = 0;
+        g_state.manifest_deletions = 0;
+        g_state.manifest_replacements = 0;
         g_state.zip_entries = 0;
         g_state.expected_files = 0;
         g_state.expected_directories = 0;
@@ -305,7 +320,9 @@ ReleaseOfferStorage OfferStorage()
         g_state.github_assets, kMaximumGitHubReleaseAssets,
         g_state.manifest_tokens, kMaximumManifestTokens,
         g_state.manifest_files, kMaximumManifestFiles,
-        g_state.manifest_directories, kMaximumManifestDirectories};
+        g_state.manifest_directories, kMaximumManifestDirectories,
+        g_state.manifest_deletions, kMaximumManifestDeletions,
+        g_state.manifest_replacements, kMaximumManifestReplacements};
     return storage;
 }
 
@@ -434,6 +451,18 @@ CurrentConfigStatus AssessCurrentConfiguration(char *detail,
         } else {
             area.classification = ConfigClassification::ResetRequired;
             ++plan.reset_count;
+        }
+    }
+    if (manifest.asset.configuration_reset_required) {
+        for (size_t index = 0U; index < plan.area_count; ++index) {
+            ConfigAreaAssessment &area = plan.areas[index];
+            if (area.area == ConfigArea::ConfigManagedBlock &&
+                area.classification == ConfigClassification::Compatible) {
+                area.classification = ConfigClassification::ResetRequired;
+                --plan.compatible_count;
+                ++plan.reset_count;
+                break;
+            }
         }
     }
     plan.decision = plan.reset_count == 0U
@@ -752,7 +781,9 @@ int PreparedDraftTestAvailableForMenu()
 #endif
 }
 
-int BeginPreparedDraftTestFromMenu(char *message, unsigned message_size)
+int BeginPreparedDraftTestFromMenu(
+    char *message, unsigned message_size,
+    UpdateForegroundProgress *progress_override)
 {
     if (message == 0 || message_size == 0U) return -1;
     message[0] = '\0';
@@ -778,7 +809,8 @@ int BeginPreparedDraftTestFromMenu(char *message, unsigned message_size)
         return -1;
     }
     CNetSubSystem *network = GetActiveNetworkSubsystem();
-    UpdateForegroundProgress *progress = ActiveMenuUpdateForegroundProgress();
+    UpdateForegroundProgress *progress = progress_override != 0
+        ? progress_override : ActiveMenuUpdateForegroundProgress();
     if (network == 0 || !network->IsRunning() || progress == 0 ||
         !AllocateState() || ReadInstalledBuild() != LocalReadStatus::Ok) {
         Message(message, message_size,
@@ -842,8 +874,9 @@ int BeginPreparedDraftTestFromMenu(char *message, unsigned message_size)
     return 1;
 }
 
-int CompletePreparedDraftTestFromMenu(char *message,
-                                      unsigned message_size)
+int CompletePreparedDraftTestFromMenu(
+    char *message, unsigned message_size,
+    UpdateForegroundProgress *progress_override)
 {
     if (message == 0 || message_size == 0U) return -1;
     message[0] = '\0';
@@ -855,7 +888,8 @@ int CompletePreparedDraftTestFromMenu(char *message,
     bool network_feature_enabled = false;
     bool network_ready = false;
     CNetSubSystem *network = GetActiveNetworkSubsystem();
-    UpdateForegroundProgress *progress = ActiveMenuUpdateForegroundProgress();
+    UpdateForegroundProgress *progress = progress_override != 0
+        ? progress_override : ActiveMenuUpdateForegroundProgress();
     if (!ReadNetworkFeatureState(&network_feature_enabled, &network_ready) ||
         !network_feature_enabled || !network_ready || network == 0 ||
         !network->IsRunning() || progress == 0) {
@@ -955,7 +989,9 @@ void CancelPendingUpdateFromMenu()
     ClearDraftAuthorization();
 }
 
-int CheckForUpdateFromMenu(char *message, unsigned message_size)
+int CheckForUpdateFromMenu(
+    char *message, unsigned message_size,
+    UpdateForegroundProgress *progress_override)
 {
     if (message == 0 || message_size == 0U) return -1;
     message[0] = '\0';
@@ -976,7 +1012,8 @@ int CheckForUpdateFromMenu(char *message, unsigned message_size)
         return -1;
     }
     CNetSubSystem *network = GetActiveNetworkSubsystem();
-    UpdateForegroundProgress *progress = ActiveMenuUpdateForegroundProgress();
+    UpdateForegroundProgress *progress = progress_override != 0
+        ? progress_override : ActiveMenuUpdateForegroundProgress();
     if (network == 0 || !network->IsRunning() || progress == 0) {
         Message(message, message_size,
                 "Network or foreground update progress is unavailable. No update check was made.");
@@ -1040,8 +1077,9 @@ int CheckForUpdateFromMenu(char *message, unsigned message_size)
     return AcceptOffer(message, message_size, false);
 }
 
-int InstallCheckedUpdateFromMenu(bool destructive_reset_consent,
-                                 char *message, unsigned message_size)
+int InstallCheckedUpdateFromMenu(
+    bool destructive_reset_consent, char *message, unsigned message_size,
+    UpdateForegroundProgress *progress_override, bool defer_reboot)
 {
     if (message == 0 || message_size == 0U) return -1;
     DraftAuthorizationCleanup draft_cleanup;
@@ -1054,7 +1092,8 @@ int InstallCheckedUpdateFromMenu(bool destructive_reset_consent,
     bool network_feature_enabled = false;
     bool network_ready = false;
     CNetSubSystem *network = GetActiveNetworkSubsystem();
-    UpdateForegroundProgress *progress = ActiveMenuUpdateForegroundProgress();
+    UpdateForegroundProgress *progress = progress_override != 0
+        ? progress_override : ActiveMenuUpdateForegroundProgress();
     if (!ReadNetworkFeatureState(&network_feature_enabled, &network_ready) ||
         !network_feature_enabled || !network_ready || network == 0 ||
         !network->IsRunning() || progress == 0) {
@@ -1179,6 +1218,11 @@ int InstallCheckedUpdateFromMenu(bool destructive_reset_consent,
                 "Update files are installed, but the one-use draft ticket could not be removed. Reboot manually and remove the ticket before another draft test.");
         return 0;
     }
+    if (defer_reboot) {
+        Message(message, message_size,
+                "Update installed successfully. Preparing reboot.");
+        return kUpdateServiceRebootReady;
+    }
     if (!PrepareAndReboot(progress)) {
         Message(message, message_size,
                 "Update installed successfully. Automatic reboot preparation failed; use System > Reboot. Do not remove power before the reboot completes.");
@@ -1187,13 +1231,111 @@ int InstallCheckedUpdateFromMenu(bool destructive_reset_consent,
     return 0;
 }
 
+int ExecuteNetworkServiceOperation(
+    UpdateServiceOperation operation, bool destructive_reset_consent,
+    char *message, unsigned message_size,
+    UpdateForegroundProgress *progress)
+{
+    switch (operation) {
+    case UpdateServiceOperation::Check:
+        return CheckForUpdateFromMenu(message, message_size, progress);
+    case UpdateServiceOperation::DraftBegin:
+        return BeginPreparedDraftTestFromMenu(message, message_size, progress);
+    case UpdateServiceOperation::DraftComplete:
+        return CompletePreparedDraftTestFromMenu(
+            message, message_size, progress);
+    case UpdateServiceOperation::Cancel:
+        CancelPendingUpdateFromMenu();
+        if (message != 0 && message_size != 0U) message[0] = '\0';
+        return 0;
+    case UpdateServiceOperation::Install:
+        return InstallCheckedUpdateFromMenu(
+            destructive_reset_consent, message, message_size,
+            progress, true);
+    }
+    Message(message, message_size, "Invalid network update operation.");
+    return -1;
+}
+
+int CompleteDeferredUpdateReboot(char *message, unsigned message_size)
+{
+    UpdateForegroundProgress *progress = ActiveMenuUpdateForegroundProgress();
+    if (progress != 0 && PrepareAndReboot(progress)) return 0;
+    Message(message, message_size,
+            "Update installed successfully. Automatic reboot preparation failed; use System > Reboot. Do not remove power before the reboot completes.");
+    return 0;
+}
+
 }  // namespace update
 }  // namespace bmx
+
+#if defined(RASPI_COMPILE)
+namespace {
+
+int RunNetworkUpdateJob(bmx::update::UpdateServiceOperation operation,
+                        bool destructive_reset_consent,
+                        char *message, unsigned message_size)
+{
+    if (message == 0 || message_size == 0U) return -1;
+    message[0] = '\0';
+    uint32_t token = 0U;
+    if (!bmx::SubmitNetworkUpdateJob(
+            operation, destructive_reset_consent, &token)) {
+        snprintf(message, message_size,
+                 "Network service is busy or unavailable.");
+        message[message_size - 1U] = '\0';
+        return -1;
+    }
+
+    for (;;) {
+        bmx::NetworkUpdateJobSnapshot snapshot = {};
+        const bmx::NetworkJobPollStatus status =
+            bmx::PollNetworkUpdateJob(token, &snapshot);
+        if (status == bmx::NetworkJobPollStatus::Complete) {
+            snprintf(message, message_size, "%s", snapshot.message);
+            message[message_size - 1U] = '\0';
+            if (snapshot.result == bmx::update::kUpdateServiceRebootReady) {
+                return bmx::update::CompleteDeferredUpdateReboot(
+                    message, message_size);
+            }
+            return snapshot.result;
+        }
+        if (status == bmx::NetworkJobPollStatus::Missing) {
+            snprintf(message, message_size,
+                     "Network service lost the update operation.");
+            message[message_size - 1U] = '\0';
+            return -1;
+        }
+        if (operation != bmx::update::UpdateServiceOperation::Cancel) {
+            if (snapshot.progress_valid) {
+                ui_update_progress_present(
+                    static_cast<unsigned>(snapshot.progress.phase),
+                    static_cast<unsigned>(snapshot.progress.progress_per_mille),
+                    snapshot.progress.determinate ? 1 : 0,
+                    snapshot.progress.cancel_enabled ? 1 : 0,
+                    snapshot.progress.cancel_pending ? 1 : 0);
+            }
+            if (ui_update_progress_pump() != 0) {
+                bmx::CancelNetworkUpdateJob(token);
+            }
+        }
+        bmx::WaitForNetworkServiceProgress();
+    }
+}
+
+}  // namespace
+#endif
 
 extern "C" int emux_update_check_explicit(char *message,
                                             unsigned message_size)
 {
+#if defined(RASPI_COMPILE)
+    return RunNetworkUpdateJob(
+        bmx::update::UpdateServiceOperation::Check, false,
+        message, message_size);
+#else
     return bmx::update::CheckForUpdateFromMenu(message, message_size);
+#endif
 }
 
 extern "C" int emux_update_draft_test_available(void)
@@ -1204,19 +1346,38 @@ extern "C" int emux_update_draft_test_available(void)
 extern "C" int emux_update_draft_begin_explicit(char *message,
                                                    unsigned message_size)
 {
+#if defined(RASPI_COMPILE)
+    return RunNetworkUpdateJob(
+        bmx::update::UpdateServiceOperation::DraftBegin, false,
+        message, message_size);
+#else
     return bmx::update::BeginPreparedDraftTestFromMenu(message, message_size);
+#endif
 }
 
 extern "C" int emux_update_draft_complete_explicit(
     char *message, unsigned message_size)
 {
+#if defined(RASPI_COMPILE)
+    return RunNetworkUpdateJob(
+        bmx::update::UpdateServiceOperation::DraftComplete, false,
+        message, message_size);
+#else
     return bmx::update::CompletePreparedDraftTestFromMenu(message,
                                                            message_size);
+#endif
 }
 
 extern "C" void emux_update_cancel_explicit(void)
 {
+#if defined(RASPI_COMPILE)
+    char ignored[1];
+    (void) RunNetworkUpdateJob(
+        bmx::update::UpdateServiceOperation::Cancel, false,
+        ignored, sizeof ignored);
+#else
     bmx::update::CancelPendingUpdateFromMenu();
+#endif
 }
 
 extern "C" int emux_update_channel_info(char *label, unsigned label_size)
@@ -1237,6 +1398,12 @@ extern "C" int emux_update_install_explicit(int destructive_reset_consent,
                                               char *message,
                                               unsigned message_size)
 {
+#if defined(RASPI_COMPILE)
+    return RunNetworkUpdateJob(
+        bmx::update::UpdateServiceOperation::Install,
+        destructive_reset_consent != 0, message, message_size);
+#else
     return bmx::update::InstallCheckedUpdateFromMenu(
         destructive_reset_consent != 0, message, message_size);
+#endif
 }

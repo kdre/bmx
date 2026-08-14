@@ -31,12 +31,28 @@ struct DeveloperFileInfo {
     uint8_t sha256[bmx::update::kSha256DigestBytes];
 };
 
+enum class UpdateRenameStatus : uint8_t {
+    Ok = 0,
+    Missing,
+    WrongType,
+    AlreadyExists,
+    SourceError,
+    TargetError,
+    RenameError
+};
+
 typedef void (*DeveloperFileYield)(void *context);
 
 DeveloperFileStatus ProbeDeveloperFile(
     bmx::update::UpdateFileSystem *file_system, const char *path,
     DeveloperFileInfo *info, DeveloperFileYield yield = 0,
     void *yield_context = 0);
+
+bool CreateDirectoryTree(bmx::update::UpdateFileSystem *file_system,
+                         const char *path);
+UpdateRenameStatus RenameUpdateNode(
+    bmx::update::UpdateFileSystem *file_system, const char *source,
+    const char *target, bmx::update::UpdateNodeType expected_type);
 
 bool DecodeSha256Hex(const char *text,
                      uint8_t digest[bmx::update::kSha256DigestBytes]);

@@ -48,6 +48,8 @@ HttpRequestParseStatus ParseMethod(const uint8_t *value, size_t size,
         *method = HttpMethod::Put;
     } else if (size == 4U && memcmp(value, "POST", 4U) == 0) {
         *method = HttpMethod::Post;
+    } else if (size == 6U && memcmp(value, "DELETE", 6U) == 0) {
+        *method = HttpMethod::Delete;
     } else {
         return HttpRequestParseStatus::UnsupportedMethod;
     }

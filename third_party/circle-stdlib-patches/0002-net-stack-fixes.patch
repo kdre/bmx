@@ -1,5 +1,5 @@
 diff --git a/libs/circle/include/circle/net/dhcpclient.h b/libs/circle/include/circle/net/dhcpclient.h
-index 6bbd148..a1d3603 100644
+index 6bbd1489..a1d36036 100644
 --- a/libs/circle/include/circle/net/dhcpclient.h
 +++ b/libs/circle/include/circle/net/dhcpclient.h
 @@ -31,7 +31,9 @@ enum TDHCPStatus
@@ -27,7 +27,7 @@ index 6bbd148..a1d3603 100644
  	boolean SendDiscover (void);
  	boolean SendRequest (u32 nCIAddr);
 diff --git a/libs/circle/include/circle/net/linklayer.h b/libs/circle/include/circle/net/linklayer.h
-index a269416..a34a1fe 100644
+index a269416d..a34a1fe9 100644
 --- a/libs/circle/include/circle/net/linklayer.h
 +++ b/libs/circle/include/circle/net/linklayer.h
 @@ -68,6 +68,7 @@ public:
@@ -39,7 +39,7 @@ index a269416..a34a1fe 100644
  	// nProtocolType is in host byte order
  	boolean EnableReceiveRaw (u16 nProtocolType);
 diff --git a/libs/circle/include/circle/net/netdevlayer.h b/libs/circle/include/circle/net/netdevlayer.h
-index 466ad52..437e062 100644
+index 466ad520..437e062a 100644
 --- a/libs/circle/include/circle/net/netdevlayer.h
 +++ b/libs/circle/include/circle/net/netdevlayer.h
 @@ -43,6 +43,7 @@ public:
@@ -51,7 +51,7 @@ index 466ad52..437e062 100644
  	boolean IsRunning (void) const;		// is net device available and link up?
  
 diff --git a/libs/circle/lib/net/dhcpclient.cpp b/libs/circle/lib/net/dhcpclient.cpp
-index cad2177..febfe4e 100644
+index cad21776..febfe4e3 100644
 --- a/libs/circle/lib/net/dhcpclient.cpp
 +++ b/libs/circle/lib/net/dhcpclient.cpp
 @@ -102,6 +102,155 @@ PACKED;
@@ -599,7 +599,7 @@ index cad2177..febfe4e 100644
  }
  
 diff --git a/libs/circle/lib/net/linklayer.cpp b/libs/circle/lib/net/linklayer.cpp
-index ad4d7c3..a3f06ad 100644
+index ad4d7c31..a3f06ad3 100644
 --- a/libs/circle/lib/net/linklayer.cpp
 +++ b/libs/circle/lib/net/linklayer.cpp
 @@ -20,15 +20,220 @@
@@ -909,7 +909,7 @@ index ad4d7c3..a3f06ad 100644
  {
  	if (m_nRawProtocolType != 0)
 diff --git a/libs/circle/lib/net/netbufferqueue.cpp b/libs/circle/lib/net/netbufferqueue.cpp
-index dd77059..80c1d9a 100644
+index dd770591..80c1d9af 100644
 --- a/libs/circle/lib/net/netbufferqueue.cpp
 +++ b/libs/circle/lib/net/netbufferqueue.cpp
 @@ -53,7 +53,7 @@ size_t CNetBufferQueue::GetBytesQueued (void) const
@@ -974,7 +974,7 @@ index dd77059..80c1d9a 100644
  
  	return pEntry;
 diff --git a/libs/circle/lib/net/netdevlayer.cpp b/libs/circle/lib/net/netdevlayer.cpp
-index b706b83..a5a3c87 100644
+index b706b83b..a5a3c872 100644
 --- a/libs/circle/lib/net/netdevlayer.cpp
 +++ b/libs/circle/lib/net/netdevlayer.cpp
 @@ -28,11 +28,198 @@
@@ -1227,7 +1227,7 @@ index b706b83..a5a3c87 100644
  {
  	return m_pDevice != 0 && m_pDevice->IsLinkUp ();
 diff --git a/libs/circle/lib/net/networklayer.cpp b/libs/circle/lib/net/networklayer.cpp
-index e4edcda..dbff05c 100644
+index e4edcda4..dbff05c3 100644
 --- a/libs/circle/lib/net/networklayer.cpp
 +++ b/libs/circle/lib/net/networklayer.cpp
 @@ -21,8 +21,276 @@
@@ -1628,7 +1628,7 @@ index e4edcda..dbff05c 100644
  		}
  	}
 diff --git a/libs/circle/lib/net/retranstimeoutcalc.cpp b/libs/circle/lib/net/retranstimeoutcalc.cpp
-index b10e7be..3aee87f 100644
+index b10e7bee..3aee87f6 100644
 --- a/libs/circle/lib/net/retranstimeoutcalc.cpp
 +++ b/libs/circle/lib/net/retranstimeoutcalc.cpp
 @@ -55,7 +55,7 @@ CRetransmissionTimeoutCalculator::CRetransmissionTimeoutCalculator (void)
@@ -1641,7 +1641,7 @@ index b10e7be..3aee87f 100644
  
  	m_pTimer = 0;
 diff --git a/libs/circle/lib/net/tcpconnection.cpp b/libs/circle/lib/net/tcpconnection.cpp
-index d1b5c12..ba90a5e 100644
+index d1b5c121..40d8a009 100644
 --- a/libs/circle/lib/net/tcpconnection.cpp
 +++ b/libs/circle/lib/net/tcpconnection.cpp
 @@ -37,7 +37,9 @@
@@ -1687,7 +1687,32 @@ index d1b5c12..ba90a5e 100644
  		m_Checksum.SetDestinationAddress (rSenderIP);
  	}
  
-@@ -1299,7 +1308,23 @@ int CTCPConnection::PacketReceived (CNetBuffer	*pPacket,
+@@ -1140,6 +1149,24 @@ int CTCPConnection::PacketReceived (CNetBuffer	*pPacket,
+ 		// step 4 (check SYN bit)
+ 		if (nFlags & TCP_FLAG_SYN)
+ 		{
++			// A retransmitted initial SYN can arrive while a passive
++			// connection is waiting for the final ACK. Re-send the original
++			// SYN+ACK instead of dropping back to LISTEN. This is especially
++			// important on high-latency links, where the retransmitted SYN may
++			// already be in flight when the first SYN+ACK reaches the peer.
++			if (   m_State == TCPStateSynReceived
++			    && !m_bActiveOpen
++			    && nSEG_SEQ == m_nIRS
++			    && nDataLength == 0
++			    && !(nFlags & (TCP_FLAG_ACK | TCP_FLAG_RESET | TCP_FLAG_FIN)))
++			{
++				SendSegment (TCP_FLAG_SYN | TCP_FLAG_ACK, m_nISS, m_nRCV_NXT);
++
++				delete pPacket;
++
++				return 1;
++			}
++
+ 			// RFC 1122 section 4.2.2.20 (e)
+ 			if (   m_State == TCPStateSynReceived
+ 			    && !m_bActiveOpen)
+@@ -1299,7 +1326,23 @@ int CTCPConnection::PacketReceived (CNetBuffer	*pPacket,
  			}
  			else if (le (nSEG_ACK, m_nSND_UNA))	// RFC 1122 section 4.2.2.20 (g)
  			{
@@ -1713,7 +1738,7 @@ index d1b5c12..ba90a5e 100644
  				// RFC 1122 section 4.2.2.20 (g)
  				if (bwlh (m_nSND_UNA, nSEG_ACK, m_nSND_NXT))
 diff --git a/libs/circle/lib/net/transportlayer.cpp b/libs/circle/lib/net/transportlayer.cpp
-index 453d01c..c49ebeb 100644
+index 453d01c8..c49ebeb9 100644
 --- a/libs/circle/lib/net/transportlayer.cpp
 +++ b/libs/circle/lib/net/transportlayer.cpp
 @@ -23,6 +23,9 @@
@@ -1831,7 +1856,7 @@ index 453d01c..c49ebeb 100644
  
  	assert (m_pNetConfig != 0);
 diff --git a/libs/circle/lib/net/udpconnection.cpp b/libs/circle/lib/net/udpconnection.cpp
-index 526468f..963bfd9 100644
+index 526468f6..963bfd97 100644
 --- a/libs/circle/lib/net/udpconnection.cpp
 +++ b/libs/circle/lib/net/udpconnection.cpp
 @@ -21,6 +21,10 @@

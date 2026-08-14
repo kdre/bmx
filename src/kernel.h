@@ -176,6 +176,8 @@ private:
   void ApplyUSBAudioChange();
   void PublishCurrentSoundOutput();
   void ProcessRemoteCommand();
+  void ProcessControlRequest();
+  void CompleteAudioCapture(const int16_t *samples, size_t sample_count);
   void DispatchUSBKeyboardState();
   void ReleaseDispatchedUSBKeyboardState();
   bool EndRawKeyboardMonitor();
@@ -216,6 +218,12 @@ private:
   int mNumCoresComplete;
   bool mNeedSoundInit;
   int mNumSoundChannels;
+  uint64_t mSchedulerSafePoints;
+  uint64_t mSchedulerRounds;
+  uint64_t mSchedulerExtraRounds;
+  uint64_t mSchedulerPumpUS;
+  uint64_t mSchedulerPumpMaxUS;
+  uint64_t mSchedulerPumpBudgetStops;
 
   int gpio_debounce_state[NUM_GPIO_PINS];
 

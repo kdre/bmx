@@ -76,6 +76,7 @@
 
 #ifdef RASPI_COMPILE
 extern int emux_network_is_ready(void);
+extern int emux_network_io_allowed(void);
 extern int emux_network_socket_close(int fd);
 #endif
 
@@ -336,6 +337,13 @@ static int vice_network_close_raw_socket(SOCKET sockfd)
 static int socket_init(void)
 {
     static int init_done = 0;
+
+#ifdef RASPI_COMPILE
+    if (!emux_network_io_allowed()) {
+        errno = EPERM;
+        return -1;
+    }
+#endif
 
     if (init_done) {
         return 0;

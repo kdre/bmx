@@ -672,6 +672,37 @@ bool FrameBufferLayer::Initialize() {
   return true;
 }
 
+bool FrameBufferLayer::CaptureDimensions(int *width, int *height) {
+  DISPMANX_MODEINFO_T info;
+  if (width == nullptr || height == nullptr || !initialized_ ||
+      vc_dispmanx_display_get_info(dispman_display_, &info) != 0) {
+    return false;
+  }
+  *width = (int)info.width;
+  *height = (int)info.height;
+  return *width > 0 && *height > 0;
+}
+
+bool FrameBufferLayer::CaptureRgb888(uint8_t *output, int width, int height,
+                                     unsigned pitch) {
+  if (output == nullptr || width <= 0 || height <= 0 ||
+      pitch < (unsigned)width * 3U || !initialized_) return false;
+  uint32_t native_image = 0U;
+  DISPMANX_RESOURCE_HANDLE_T resource = vc_dispmanx_resource_create(
+      VC_IMAGE_RGB888, (uint32_t)width, (uint32_t)height, &native_image);
+  if (resource == 0) return false;
+  VC_RECT_T rect;
+  vc_dispmanx_rect_set(&rect, 0U, 0U, (uint32_t)width, (uint32_t)height);
+  const int snapshot = vc_dispmanx_snapshot(
+      dispman_display_, resource, DISPMANX_NO_ROTATE);
+  const int read = snapshot == 0
+                       ? vc_dispmanx_resource_read_data(resource, &rect,
+                                                        output, pitch)
+                       : -1;
+  vc_dispmanx_resource_delete(resource);
+  return snapshot == 0 && read == 0;
+}
+
 int FrameBufferLayer::Allocate(int pixelmode, uint8_t **pixels,
                                int width, int height, int *pitch) {
   int ret;

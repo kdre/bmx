@@ -90,6 +90,56 @@ DeveloperFileStatus ProbeDeveloperFile(
     return DeveloperFileStatus::Ok;
 }
 
+bool CreateDirectoryTree(bmx::update::UpdateFileSystem *file_system,
+                         const char *path)
+{
+    if (file_system == 0 || path == 0) return false;
+    char working[kDeveloperFilePathBytes];
+    const size_t length = strlen(path);
+    if (length == 0U || length >= sizeof(working)) return false;
+    memcpy(working, path, length + 1U);
+    for (size_t index = 0U; index <= length; ++index) {
+        if (working[index] != '/' && working[index] != '\0') continue;
+        const char saved = working[index];
+        working[index] = '\0';
+        const bool created = file_system->CreateDirectory(working);
+        working[index] = saved;
+        if (!created) return false;
+    }
+    return true;
+}
+
+UpdateRenameStatus RenameUpdateNode(
+    bmx::update::UpdateFileSystem *file_system, const char *source,
+    const char *target, bmx::update::UpdateNodeType expected_type)
+{
+    if (file_system == 0 || source == 0 || target == 0) {
+        return UpdateRenameStatus::SourceError;
+    }
+    bmx::update::UpdateFileStat source_stat;
+    bmx::update::UpdateFileStat target_stat;
+    if (!file_system->Stat(source, &source_stat)) {
+        return UpdateRenameStatus::SourceError;
+    }
+    if (!file_system->Stat(target, &target_stat)) {
+        return UpdateRenameStatus::TargetError;
+    }
+    if (source_stat.type == bmx::update::UpdateNodeType::Missing) {
+        return UpdateRenameStatus::Missing;
+    }
+    if (source_stat.type != expected_type) {
+        return UpdateRenameStatus::WrongType;
+    }
+    if (target_stat.type != bmx::update::UpdateNodeType::Missing) {
+        return UpdateRenameStatus::AlreadyExists;
+    }
+    if (!file_system->Rename(source, target, false) ||
+        !file_system->SyncContainingDirectory(target)) {
+        return UpdateRenameStatus::RenameError;
+    }
+    return UpdateRenameStatus::Ok;
+}
+
 bool DecodeSha256Hex(
     const char *text, uint8_t digest[bmx::update::kSha256DigestBytes])
 {

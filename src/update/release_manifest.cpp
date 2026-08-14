@@ -24,8 +24,6 @@ static_assert(sizeof(path_policy::kSourceSha256) == 65U,
               "generated path policy must contain a SHA-256 identifier");
 static_assert(path_policy::kRequiredKernelMachineCount <= 16U,
               "required machine inventory uses sixteen bits of flags");
-static_assert(path_policy::kMachineKernelBaseCount == 2U,
-              "manifest parser requires pi4 and pi5 kernel bases");
 
 static const uint16_t kRequiredKernelMachineMask = static_cast<uint16_t>(
     (UINT16_C(1) << path_policy::kRequiredKernelMachineCount) - 1U);
@@ -144,10 +142,6 @@ ManifestParseStatus RegistryStatusToManifestStatus(
     return ManifestParseStatus::UnsupportedConfiguration;
 }
 
-bool StartsWith(const char *value, const char *prefix) {
-    return strncmp(value, prefix, strlen(prefix)) == 0;
-}
-
 bool IsSafeManifestPath(const char *path) {
     return ValidateFatRelativePath(path, kMaximumManifestPathBytes) ==
            FatPathValidationStatus::Ok;
@@ -171,6 +165,30 @@ bool ParseMachineKernelSuffix(const char *suffix, uint16_t *machine_bit) {
             ? static_cast<uint16_t>(UINT16_C(1) << machine_index) : 0U;
     }
     return true;
+}
+
+bool ParseMachineKernelPath(const char *path, char *common_base,
+                            size_t common_base_size,
+                            uint16_t *machine_bit) {
+    if (path == 0 || common_base == 0 || common_base_size == 0U ||
+        strchr(path, '/') != 0) return false;
+    const char *const suffix = strrchr(path, '.');
+    if (suffix == 0 || suffix == path ||
+        !ParseMachineKernelSuffix(suffix + 1U, machine_bit)) return false;
+    const size_t base_size = static_cast<size_t>(suffix - path);
+    static const char kImageSuffix[] = ".img";
+    if (base_size < sizeof(kImageSuffix) - 1U ||
+        strncmp(path, "kernel", 6U) != 0 ||
+        memcmp(path + base_size - (sizeof(kImageSuffix) - 1U),
+               kImageSuffix, sizeof(kImageSuffix) - 1U) != 0 ||
+        base_size + 1U > common_base_size) return false;
+    if (common_base[0] == '\0') {
+        memcpy(common_base, path, base_size);
+        common_base[base_size] = '\0';
+        return true;
+    }
+    return strlen(common_base) == base_size &&
+           memcmp(common_base, path, base_size) == 0;
 }
 
 class Parser {
@@ -200,6 +218,10 @@ class Parser {
     ManifestParseStatus ParseDirectories(int index, bool store,
                                          ManifestAsset *asset);
     ManifestParseStatus ParseFiles(int index, bool store, ManifestAsset *asset);
+    ManifestParseStatus ParseDeletions(int index, bool store,
+                                       ManifestAsset *asset);
+    ManifestParseStatus ParseReplacements(int index, bool store,
+                                          ManifestAsset *asset);
     const char *json_;
     const JsonToken *tokens_;
     size_t token_count_;
@@ -592,6 +614,7 @@ ManifestParseStatus Parser::ParseFiles(int index, bool store,
     char previous[kMaximumManifestPathBytes + 1U] = {0};
     uint64_t installed_size = 0U;
     uint16_t required_machine_kernels = 0U;
+    char machine_kernel_base[kMaximumManifestPathBytes + 1U] = {0};
     bool required_config = false;
     bool has_tryboot = false;
     bool required_active_selector = false;
@@ -647,35 +670,18 @@ ManifestParseStatus Parser::ParseFiles(int index, bool store,
         }
         installed_size += parsed.size;
 
-        const size_t board_index = asset->board == BoardFamily::Pi4Pi400
-            ? 0U : 1U;
-        const char *const board_kernel =
-            path_policy::kMachineKernelBases[board_index];
-        const char *const other_board_kernel =
-            path_policy::kMachineKernelBases[1U - board_index];
-        if (StartsWith(parsed.path, other_board_kernel)) {
-            return ManifestParseStatus::InventoryMismatch;
-        }
-        if (strcmp(parsed.path, board_kernel) == 0) {
-            return ManifestParseStatus::InventoryMismatch;
-        } else {
-            const size_t kernel_size = strlen(board_kernel);
-            if (strncmp(parsed.path, board_kernel, kernel_size) == 0 &&
-                parsed.path[kernel_size] == '.') {
-                uint16_t machine_bit = 0U;
-                if (!ParseMachineKernelSuffix(
-                        parsed.path + kernel_size + 1U, &machine_bit)) {
+        if (parsed.policy == ManifestFilePolicy::Kernel) {
+            uint16_t machine_bit = 0U;
+            if (!ParseMachineKernelPath(
+                    parsed.path, machine_kernel_base,
+                    sizeof(machine_kernel_base), &machine_bit)) {
+                return ManifestParseStatus::InventoryMismatch;
+            }
+            if (machine_bit != 0U) {
+                if ((required_machine_kernels & machine_bit) != 0U) {
                     return ManifestParseStatus::InventoryMismatch;
                 }
-                if (parsed.policy != ManifestFilePolicy::Kernel) {
-                    return ManifestParseStatus::InventoryMismatch;
-                }
-                if (machine_bit != 0U) {
-                    if ((required_machine_kernels & machine_bit) != 0U) {
-                        return ManifestParseStatus::InventoryMismatch;
-                    }
-                    required_machine_kernels |= machine_bit;
-                }
+                required_machine_kernels |= machine_bit;
             }
         }
         required_config = required_config || strcmp(parsed.path, "config.txt") == 0;
@@ -700,14 +706,123 @@ ManifestParseStatus Parser::ParseFiles(int index, bool store,
     return ManifestParseStatus::Ok;
 }
 
+ManifestParseStatus Parser::ParseDeletions(int index, bool store,
+                                           ManifestAsset *asset) {
+    if (manifest_->manifest_version < 3U) {
+        asset->deletions = 0;
+        asset->deletion_count = 0U;
+        return ManifestParseStatus::Ok;
+    }
+    if (index < 0 || tokens_[index].type != JSON_TOKEN_ARRAY) {
+        return ManifestParseStatus::WrongType;
+    }
+    const size_t count = DirectChildren(index);
+    if (count > kMaximumManifestDeletions) {
+        return ManifestParseStatus::LimitExceeded;
+    }
+    if (store && count > storage_.deletion_capacity) {
+        return ManifestParseStatus::StorageTooSmall;
+    }
+    char previous[kMaximumManifestPathBytes + 1U] = {0};
+    for (size_t i = 0U; i < count; ++i) {
+        char path[kMaximumManifestPathBytes + 1U];
+        if (!CopyString(DirectChild(index, i), path, sizeof(path)) ||
+            !IsSafeManifestPath(path) ||
+            (i != 0U && strcmp(previous, path) >= 0)) {
+            return ManifestParseStatus::InvalidValue;
+        }
+        if (store) {
+            memcpy(storage_.deletions[i].path, path, strlen(path) + 1U);
+        }
+        memcpy(previous, path, strlen(path) + 1U);
+    }
+    if (store) {
+        asset->deletions = storage_.deletions;
+        asset->deletion_count = count;
+    }
+    return ManifestParseStatus::Ok;
+}
+
+ManifestParseStatus Parser::ParseReplacements(int index, bool store,
+                                              ManifestAsset *asset) {
+    if (manifest_->manifest_version < 3U) {
+        asset->replacements = 0;
+        asset->replacement_count = 0U;
+        return ManifestParseStatus::Ok;
+    }
+    if (index < 0 || tokens_[index].type != JSON_TOKEN_ARRAY) {
+        return ManifestParseStatus::WrongType;
+    }
+    const size_t count = DirectChildren(index);
+    if (count > kMaximumManifestReplacements) {
+        return ManifestParseStatus::LimitExceeded;
+    }
+    if (store && count > storage_.replacement_capacity) {
+        return ManifestParseStatus::StorageTooSmall;
+    }
+    static const char *const kFields[] = {"path", "replaced_by"};
+    char previous[kMaximumManifestPathBytes + 1U] = {0};
+    for (size_t i = 0U; i < count; ++i) {
+        const int entry = DirectChild(index, i);
+        char path[kMaximumManifestPathBytes + 1U];
+        char replaced_by[kMaximumManifestPathBytes + 1U];
+        if (!ExactObject(entry, kFields,
+                         sizeof(kFields) / sizeof(kFields[0])) ||
+            !CopyString(Member(entry, "path"), path, sizeof(path)) ||
+            !CopyString(Member(entry, "replaced_by"), replaced_by,
+                        sizeof(replaced_by)) ||
+            !IsSafeManifestPath(path) || !IsSafeManifestPath(replaced_by) ||
+            strcmp(path, replaced_by) == 0 ||
+            (i != 0U && strcmp(previous, path) >= 0)) {
+            return ManifestParseStatus::InvalidValue;
+        }
+        bool replacement_exists = !store;
+        if (store) {
+            for (size_t file_index = 0U;
+                 file_index < asset->file_count; ++file_index) {
+                const ManifestFile &file = asset->files[file_index];
+                if (strcmp(file.path, replaced_by) == 0 &&
+                    (file.policy == ManifestFilePolicy::Kernel ||
+                     file.policy == ManifestFilePolicy::ManagedReplace)) {
+                    replacement_exists = true;
+                    break;
+                }
+            }
+        }
+        if (!replacement_exists) return ManifestParseStatus::InventoryMismatch;
+        if (store) {
+            memcpy(storage_.replacements[i].path, path, strlen(path) + 1U);
+            memcpy(storage_.replacements[i].replaced_by, replaced_by,
+                   strlen(replaced_by) + 1U);
+        }
+        memcpy(previous, path, strlen(path) + 1U);
+    }
+    if (store) {
+        asset->replacements = storage_.replacements;
+        asset->replacement_count = count;
+    }
+    return ManifestParseStatus::Ok;
+}
+
 ManifestParseStatus Parser::ParseAsset(int index, bool store,
                                        ManifestAsset *asset) {
-    static const char *const kFields[] = {
+    static const char *const kV2Fields[] = {
         "board_family", "supported_models", "filename", "download_size",
         "sha256", "installed_size", "required_peak_bytes", "zip_profile",
         "directories", "files"
     };
-    if (!ExactObject(index, kFields, sizeof(kFields) / sizeof(kFields[0]))) {
+    static const char *const kV3Fields[] = {
+        "board_family", "supported_models", "filename", "download_size",
+        "sha256", "installed_size", "required_peak_bytes", "zip_profile",
+        "directories", "files", "configuration_reset_required",
+        "deletions", "replacements"
+    };
+    const bool fields_valid = manifest_->manifest_version >= 3U
+        ? ExactObject(index, kV3Fields,
+                      sizeof(kV3Fields) / sizeof(kV3Fields[0]))
+        : ExactObject(index, kV2Fields,
+                      sizeof(kV2Fields) / sizeof(kV2Fields[0]));
+    if (!fields_valid) {
         return ManifestParseStatus::UnknownField;
     }
     char board[8];
@@ -778,7 +893,18 @@ ManifestParseStatus Parser::ParseAsset(int index, bool store,
     if (status != ManifestParseStatus::Ok) return status;
     status = ParseFiles(Member(index, "files"), store, asset);
     if (status != ManifestParseStatus::Ok) return status;
-    return ManifestParseStatus::Ok;
+    asset->configuration_reset_required = false;
+    if (manifest_->manifest_version >= 3U) {
+        const int reset = Member(index, "configuration_reset_required");
+        if (reset < 0 || static_cast<size_t>(reset) >= token_count_ ||
+            JsonGetBool(tokens_[reset],
+                        &asset->configuration_reset_required) != JSON_OK) {
+            return ManifestParseStatus::WrongType;
+        }
+    }
+    status = ParseDeletions(Member(index, "deletions"), store, asset);
+    if (status != ManifestParseStatus::Ok) return status;
+    return ParseReplacements(Member(index, "replacements"), store, asset);
 }
 
 bool AsciiCaseEqual(const char *left, const char *right) {
@@ -852,6 +978,40 @@ ManifestParseStatus Parser::ParseAssets(int index) {
             }
         }
     }
+    for (size_t i = 0U; i < manifest_->asset.deletion_count; ++i) {
+        for (size_t j = 0U; j < manifest_->asset.file_count; ++j) {
+            if (AsciiCaseEqual(manifest_->asset.deletions[i].path,
+                               manifest_->asset.files[j].path)) {
+                return ManifestParseStatus::InventoryMismatch;
+            }
+        }
+        for (size_t j = i + 1U; j < manifest_->asset.deletion_count; ++j) {
+            if (AsciiCaseEqual(manifest_->asset.deletions[i].path,
+                               manifest_->asset.deletions[j].path)) {
+                return ManifestParseStatus::InventoryMismatch;
+            }
+        }
+    }
+    for (size_t i = 0U; i < manifest_->asset.replacement_count; ++i) {
+        for (size_t j = 0U; j < manifest_->asset.file_count; ++j) {
+            if (AsciiCaseEqual(manifest_->asset.replacements[i].path,
+                               manifest_->asset.files[j].path)) {
+                return ManifestParseStatus::InventoryMismatch;
+            }
+        }
+        for (size_t j = 0U; j < manifest_->asset.deletion_count; ++j) {
+            if (AsciiCaseEqual(manifest_->asset.replacements[i].path,
+                               manifest_->asset.deletions[j].path)) {
+                return ManifestParseStatus::InventoryMismatch;
+            }
+        }
+        for (size_t j = i + 1U; j < manifest_->asset.replacement_count; ++j) {
+            if (AsciiCaseEqual(manifest_->asset.replacements[i].path,
+                               manifest_->asset.replacements[j].path)) {
+                return ManifestParseStatus::InventoryMismatch;
+            }
+        }
+    }
     return ManifestParseStatus::Ok;
 }
 
@@ -866,8 +1026,8 @@ ManifestParseStatus Parser::Parse() {
                      sizeof(kRootFields) / sizeof(kRootFields[0]))) {
         return ManifestParseStatus::UnknownField;
     }
-    uint64_t version = 0U;
-    if (!Uint64(Member(0, "manifest_version"), 2U, 2U, &version)) {
+    if (!Uint32(Member(0, "manifest_version"), 2U, 3U,
+                &manifest_->manifest_version)) {
         return ManifestParseStatus::UnsupportedVersion;
     }
     ManifestParseStatus status = ParseRelease(Member(0, "release"));
@@ -888,6 +1048,8 @@ ManifestParseStatus ParseReleaseManifest(ByteView encoded,
         storage.tokens == 0 || storage.token_capacity == 0U ||
         storage.files == 0 || storage.file_capacity == 0U ||
         storage.directories == 0 || storage.directory_capacity == 0U ||
+        storage.deletions == 0 || storage.deletion_capacity == 0U ||
+        storage.replacements == 0 || storage.replacement_capacity == 0U ||
         !IsKnownBoardFamily(target_board)) {
         return ManifestParseStatus::InvalidArgument;
     }

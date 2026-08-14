@@ -1,9 +1,10 @@
 /*
  * BMC64 UART diagnostics.
  *
- * Release builds compile these paths out. Debug builds keep compact events
- * enabled by default; noisy byte/register traces require explicit per-domain
- * log level defines.
+ * Release builds compile these paths out by default.  An explicit RS232 log
+ * level may be used for a narrowly instrumented hardware-test build without
+ * enabling the full debug profile.  Debug builds keep compact events enabled
+ * by default; noisy byte/register traces require explicit per-domain levels.
  */
 
 #ifndef BMC64_LOG_H
@@ -27,10 +28,11 @@
 #define BMC64_NET_LOG_LEVEL BMC64_LOG_EVENT
 #endif
 #else
-#undef BMC64_RS232_LOG_LEVEL
+#ifndef BMC64_RS232_LOG_LEVEL
+#define BMC64_RS232_LOG_LEVEL BMC64_LOG_OFF
+#endif
 #undef BMC64_ACIA_LOG_LEVEL
 #undef BMC64_NET_LOG_LEVEL
-#define BMC64_RS232_LOG_LEVEL BMC64_LOG_OFF
 #define BMC64_ACIA_LOG_LEVEL BMC64_LOG_OFF
 #define BMC64_NET_LOG_LEVEL BMC64_LOG_OFF
 #endif

@@ -63,6 +63,7 @@ struct SimpleUpdateResult {
     size_t changed_file_count;
     size_t unchanged_file_count;
     size_t preserved_file_count;
+    size_t deleted_file_count;
     uint64_t changed_bytes;
     uint64_t required_free_bytes;
     uint64_t available_free_bytes;
@@ -74,6 +75,9 @@ public:
 
     // archive_bytes_authenticated must be true only after the complete ZIP
     // was received under verified TLS and matched the signed asset size/hash.
+    // Signed deletions run only after replacement files, kernels, and any
+    // consented configuration templates have been published. BMX-BUILD.json
+    // is committed last so an interrupted update remains safely retryable.
     SimpleUpdateResult Install(SeekableZipSource *archive,
                                const ReleaseManifest &manifest,
                                bool reset_configuration,

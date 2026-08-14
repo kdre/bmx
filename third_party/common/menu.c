@@ -41,6 +41,7 @@
 #include "demo.h"
 #include "joy.h"
 #include "kbd.h"
+#include "keymap_editor.h"
 #include "menu_confirm_osd.h"
 #include "menu_reset_osd.h"
 #include "menu_tape_osd.h"
@@ -52,6 +53,7 @@
 #include "overlay.h"
 #include "raspi_util.h"
 #include "ui.h"
+#include "ui_geometry.h"
 
 #include "charset.h"
 #include "imagecontents.h"
@@ -119,6 +121,10 @@ extern void poweroff(void);
 
 #define BMX_OVERCLOCK_AUTO_CHOICE INT_MIN
 
+#define TEXT_FILE_VIEW_MAX_BYTES 8192U
+#define TEXT_FILE_VIEW_MAX_ROWS 256U
+#define TEXT_FILE_VIEW_TRUNCATION_MARKER "[File truncated]"
+
 typedef enum {
   MACHINE_EMULATOR_X64,
   MACHINE_EMULATOR_X64SC,
@@ -173,6 +179,8 @@ static void overclock_restore_defaults(void);
 static void show_overclock_config_error(void);
 static void build_overclock_menu(struct menu_item *parent);
 static void refresh_overclock_diagnostics(void);
+static int menu_file_item_to_dir_index(struct menu_item *item);
+static int show_text_file_if_supported(struct menu_item *item);
 
 // For filename filters
 typedef enum {
@@ -260,6 +268,26 @@ static int keyboard_monitor_last_hid_usage;
 static long keyboard_monitor_last_keycode;
 static int keyboard_monitor_last_pressed;
 static unsigned char keyboard_monitor_last_modifiers;
+
+static unsigned keymap_editor_capture_enabled;
+static unsigned keymap_editor_capture_ready;
+static unsigned keymap_editor_capture_wait_neutral;
+static long keymap_editor_capture_keycode;
+static unsigned char keymap_editor_capture_modifiers;
+static struct keymap_editor_model keymap_editor_model;
+static struct menu_item *keymap_editor_target_items[KEYMAP_EDITOR_MAX_TARGETS];
+static size_t keymap_editor_binding_cursor[KEYMAP_EDITOR_MAX_TARGETS];
+static int keymap_editor_active;
+static int keymap_editor_editable;
+static int keymap_editor_waiting_target = -1;
+static size_t keymap_editor_waiting_binding;
+static int keymap_editor_waiting_add;
+static int keymap_editor_pending_target = -1;
+static size_t keymap_editor_pending_binding;
+static int keymap_editor_pending_add;
+static long keymap_editor_pending_keycode;
+static int keymap_editor_pending_flags;
+static int keymap_editor_return_add;
 
 static struct menu_item *keyboard_monitor_device_item;
 static struct menu_item *keyboard_monitor_event_item;
@@ -785,10 +813,14 @@ static int files_left_right_listener(struct menu_item* parent,
                                      struct menu_item* current, int right);
 
 static struct menu_item *add_image_content_line(struct menu_item *root,
-                                                const char *line) {
+                                                const char *line,
+                                                ui_text_encoding_t encoding) {
   char display[MAX_MENU_STR];
+  struct menu_item *item;
   snprintf(display, sizeof display, "%s", line ? line : "");
-  return ui_menu_add_button(MENU_ID_DO_NOTHING, root, display);
+  item = ui_menu_add_button(MENU_ID_DO_NOTHING, root, display);
+  ui_menu_set_name_encoding(item, encoding);
+  return item;
 }
 
 static image_contents_t *read_supported_image_contents(const char *path) {
@@ -831,23 +863,25 @@ static void show_image_contents(DirType dir_type, const char *name) {
   root->left_right_listener_func = files_left_right_listener;
 
   snprintf(title, sizeof title, "Contents: %s", name);
-  add_image_content_line(root, title);
+  add_image_content_line(root, title, UI_TEXT_ENCODING_LATIN1);
   ui_menu_add_divider(root);
 
   contents = read_supported_image_contents(path);
   if (contents == NULL) {
-    add_image_content_line(root, "(Cannot read image contents)");
+    add_image_content_line(root, "(Cannot read image contents)",
+                           UI_TEXT_ENCODING_LATIN1);
     return;
   }
 
-  tmp = image_contents_to_string(contents, IMAGE_CONTENTS_STRING_ASCII);
-  add_image_content_line(root, tmp);
+  tmp = image_contents_to_string(contents, IMAGE_CONTENTS_STRING_PETSCII);
+  add_image_content_line(root, tmp, UI_TEXT_ENCODING_PETSCII_NATIVE);
   lib_free(tmp);
 
   for (entry = contents->file_list; entry != NULL; entry = entry->next) {
     struct menu_item *item;
-    tmp = image_contents_file_to_string(entry, IMAGE_CONTENTS_STRING_ASCII);
-    item = add_image_content_line(root, tmp);
+    tmp = image_contents_file_to_string(entry, IMAGE_CONTENTS_STRING_PETSCII);
+    item = add_image_content_line(root, tmp,
+                                  UI_TEXT_ENCODING_PETSCII_NATIVE);
     item->value = (int)++program_number;
     item->on_value_changed = autostart_image_content_entry;
     snprintf(item->str_value, sizeof item->str_value, "%s", path);
@@ -858,14 +892,14 @@ static void show_image_contents(DirType dir_type, const char *name) {
   if (blocks >= 0) {
     char blocks_free[MAX_MENU_STR];
     snprintf(blocks_free, sizeof blocks_free, "%d BLOCKS FREE.", blocks);
-    add_image_content_line(root, blocks_free);
+    add_image_content_line(root, blocks_free, UI_TEXT_ENCODING_LATIN1);
   }
 
   image_contents_destroy(contents);
 }
 
-static void show_files(DirType dir_type, FileFilter filter, int menu_id,
-                       int reset_cur_pos) {
+static struct menu_item *show_files(DirType dir_type, FileFilter filter,
+                                    int menu_id, int reset_cur_pos) {
   int has_name_field =
       menu_id == MENU_SAVE_SNAP_FILE ||
       menu_id == MENU_SAVE_REU_FILE ||
@@ -875,7 +909,7 @@ static void show_files(DirType dir_type, FileFilter filter, int menu_id,
   struct menu_item *file_root = ui_push_menu(-1, -1);
   if (file_root == NULL) {
     printf("ERROR: cannot show file browser, menu stack is full\n");
-    return;
+    return NULL;
   }
 
   // Keep the type of files this list is for in value field.
@@ -909,6 +943,8 @@ static void show_files(DirType dir_type, FileFilter filter, int menu_id,
      // Position cursor to last known location for this dir type.
      ui_set_cur_pos(current_dir_pos[dir_type]);
   }
+
+  return file_root;
 }
 
 
@@ -987,17 +1023,32 @@ static const struct license_menu_entry *find_license_menu_entry(int id) {
   return NULL;
 }
 
-static void add_license_text_segment(struct menu_item *root, const char *start, int len) {
+static int add_text_viewer_row(struct menu_item *root, const char *text,
+                               unsigned *row_count, unsigned max_rows) {
+  if (row_count != NULL && *row_count >= max_rows) {
+    return 0;
+  }
+  ui_menu_add_button(MENU_TEXT, root, text);
+  if (row_count != NULL) {
+    (*row_count)++;
+  }
+  return 1;
+}
+
+static int add_text_viewer_segment(struct menu_item *root, const char *start,
+                                   int len, unsigned *row_count,
+                                   unsigned max_rows) {
   char segment[MAX_MENU_STR];
   if (len >= MAX_MENU_STR) {
     len = MAX_MENU_STR - 1;
   }
   memcpy(segment, start, len);
   segment[len] = 0;
-  ui_menu_add_button(MENU_TEXT, root, segment);
+  return add_text_viewer_row(root, segment, row_count, max_rows);
 }
 
-static void add_license_text_line(struct menu_item *root, char *line) {
+static int add_text_viewer_line(struct menu_item *root, char *line,
+                                unsigned *row_count, unsigned max_rows) {
   int len;
   char *p;
 
@@ -1016,8 +1067,7 @@ static void add_license_text_line(struct menu_item *root, char *line) {
     p++;
   }
   if (!*p) {
-    ui_menu_add_button(MENU_TEXT, root, "");
-    return;
+    return add_text_viewer_row(root, "", row_count, max_rows);
   }
 
   while (*p) {
@@ -1030,8 +1080,7 @@ static void add_license_text_line(struct menu_item *root, char *line) {
     }
     remaining = strlen(p);
     if (remaining <= MAX_MENU_STR - 1) {
-      ui_menu_add_button(MENU_TEXT, root, p);
-      return;
+      return add_text_viewer_row(root, p, row_count, max_rows);
     }
 
     take = MAX_MENU_STR - 1;
@@ -1042,9 +1091,12 @@ static void add_license_text_line(struct menu_item *root, char *line) {
     if (break_at > 0) {
       take = break_at;
     }
-    add_license_text_segment(root, p, take);
+    if (!add_text_viewer_segment(root, p, take, row_count, max_rows)) {
+      return 0;
+    }
     p += take;
   }
+  return 1;
 }
 
 static void show_license_file(const struct license_menu_entry *entry) {
@@ -1069,7 +1121,7 @@ static void show_license_file(const struct license_menu_entry *entry) {
   }
 
   while (fgets(line, sizeof(line), fp)) {
-    add_license_text_line(license_root, line);
+    add_text_viewer_line(license_root, line, NULL, 0);
   }
   fclose(fp);
 }
@@ -1213,6 +1265,10 @@ static struct menu_item *developer_buffer_size_item;
 static int developer_mode_target;
 static char developer_password_target[BMX_DEVELOPER_PASSWORD_MAX_LEN + 1];
 static unsigned developer_buffer_size_target;
+static struct menu_item *api_status_item;
+static struct menu_item *api_password_item;
+static int api_mode_target;
+static char api_password_target[BMX_API_PASSWORD_MAX_LEN + 1];
 
 static int save_network_cmdline(void);
 static int append_network_boot_options(struct bmx_boot_plan *plan);
@@ -1628,7 +1684,9 @@ static void show_machine_switch_error(const struct bmx_machine *machine,
 static int apply_pending_system_changes(int force_network_save,
                                         int developer_mode,
                                         const char *developer_password,
-                                        unsigned developer_buffer_kb) {
+                                        unsigned developer_buffer_kb,
+                                        int api_mode,
+                                        const char *api_password) {
   int machine_pending = machine_change_pending();
   int network_pending = network_menu_requires_reboot();
   int overclock_pending = overclock_change_pending();
@@ -1638,6 +1696,7 @@ static int apply_pending_system_changes(int force_network_save,
   int apply_network = force_network_save || network_pending;
   int apply_developer = developer_mode >= 0 || developer_password != NULL ||
                         developer_buffer_kb != 0U;
+  int apply_api = api_mode >= 0 || api_password != NULL;
   const struct bmx_machine *machine = machine_selected_machine();
   const struct bmx_machine_mode *mode = machine_selected_mode();
   BMC64C64Core c64_core = machine_selected_c64_core();
@@ -1645,8 +1704,7 @@ static int apply_pending_system_changes(int force_network_save,
   int status;
 
   if (!machine_pending && !apply_network && !overclock_pending &&
-      !gpio_pending &&
-      !apply_developer) {
+      !gpio_pending && !apply_developer && !apply_api) {
     return 1;
   }
   if (apply_network && !validate_network_menu()) {
@@ -1695,6 +1753,16 @@ static int apply_pending_system_changes(int force_network_save,
     ui_error("Problem changing Developer settings");
     return 0;
   }
+  if (api_mode >= 0 &&
+      bmx_boot_plan_set_api_mode(&plan, api_mode) != 0) {
+    ui_error("Problem changing Remote API settings");
+    return 0;
+  }
+  if (api_password != NULL &&
+      bmx_boot_plan_set_api_password(&plan, api_password) != 0) {
+    ui_error("Problem changing Remote API settings");
+    return 0;
+  }
   if (gpio_pending &&
       (gpio_outputs_item->value
            ? bmx_boot_plan_set_cmdline_option(
@@ -1708,8 +1776,8 @@ static int apply_pending_system_changes(int force_network_save,
   if (status != 0) {
     if (machine_pending || overclock_pending) {
       show_machine_switch_error(machine, c64_core, status);
-    } else if (apply_developer) {
-      ui_error("Problem changing Developer settings");
+    } else if (apply_developer || apply_api) {
+      ui_error("Problem changing remote interface settings");
     } else if (gpio_pending) {
       ui_error("Problem changing GPIO Outputs");
     } else {
@@ -1746,13 +1814,16 @@ static void perform_system_action(SystemAction action,
                                   int force_network_save,
                                   int developer_mode,
                                   const char *developer_password,
-                                  unsigned developer_buffer_kb) {
+                                  unsigned developer_buffer_kb,
+                                  int api_mode,
+                                  const char *api_password) {
   if (rs232net_dirty && !apply_rs232net_config(1)) {
     return;
   }
   if (!apply_pending_system_changes(force_network_save, developer_mode,
                                     developer_password,
-                                    developer_buffer_kb)) {
+                                    developer_buffer_kb, api_mode,
+                                    api_password)) {
     return;
   }
   if (!prepare_system_shutdown_storage()) {
@@ -1791,6 +1862,26 @@ static void show_developer_settings_confirm(void) {
            developer_buffer_size_target);
   ui_confirm_wrapped_cancel_default("Apply Developer Settings?", message, 0,
                                     MENU_CONFIRM_SYSTEM_DEVELOPER);
+}
+
+static void show_api_settings_confirm(void) {
+  char message[320];
+
+  if (api_status_item == NULL || api_password_item == NULL) {
+    ui_error("Remote API settings unavailable");
+    return;
+  }
+  api_mode_target = api_status_item->value ? 1 : 0;
+  strncpy(api_password_target, api_password_item->str_value,
+          sizeof api_password_target - 1);
+  api_password_target[sizeof api_password_target - 1] = '\0';
+  snprintf(message, sizeof message,
+           "Apply Remote API settings and reboot? Status: %s. Password: %s. "
+           "BMX will update cmdline.txt and apply any pending system changes.",
+           api_mode_target ? "Enabled" : "Disabled",
+           api_password_target[0] == '\0' ? "None" : "Set");
+  ui_confirm_wrapped_cancel_default("Apply Remote API Settings?", message, 0,
+                                    MENU_CONFIRM_SYSTEM_API);
 }
 
 static void show_system_action_confirm(SystemAction action) {
@@ -2267,7 +2358,9 @@ static void keyboard_monitor_publish_event(int device, int hid_usage,
 
 int emu_wants_raw_keyboard(void) {
   return ui_enabled &&
-         __atomic_load_n(&keyboard_monitor_enabled, __ATOMIC_ACQUIRE) != 0;
+         (__atomic_load_n(&keyboard_monitor_enabled, __ATOMIC_ACQUIRE) != 0 ||
+          __atomic_load_n(&keymap_editor_capture_enabled,
+                          __ATOMIC_ACQUIRE) != 0);
 }
 
 void emu_set_raw_keyboard(unsigned device, unsigned char modifiers,
@@ -2280,9 +2373,15 @@ void emu_set_raw_keyboard(unsigned device, unsigned char modifiers,
   int event_usage = 0;
   long event_keycode = KEYCODE_NONE;
   int event_pressed = 0;
+  int monitor_active = __atomic_load_n(&keyboard_monitor_enabled,
+                                       __ATOMIC_ACQUIRE) != 0;
+  int capture_active = __atomic_load_n(&keymap_editor_capture_enabled,
+                                       __ATOMIC_ACQUIRE) != 0;
+  int capture_wait_neutral = __atomic_load_n(
+      &keymap_editor_capture_wait_neutral, __ATOMIC_ACQUIRE) != 0;
 
-  if (!__atomic_load_n(&keyboard_monitor_enabled, __ATOMIC_ACQUIRE) ||
-      device >= MAX_USB_DEVICES || raw_keys == NULL) {
+  if ((!monitor_active && !capture_active) || device >= MAX_USB_DEVICES ||
+      raw_keys == NULL) {
     return;
   }
 
@@ -2301,8 +2400,10 @@ void emu_set_raw_keyboard(unsigned device, unsigned char modifiers,
   if (error) {
     for (i = 0; i < KEYBOARD_MONITOR_REPORT_KEYS; i++) {
       if (raw_keys[i] >= 1 && raw_keys[i] <= 3) {
-        keyboard_monitor_publish_event((int)device, raw_keys[i],
-                                       KEYCODE_NONE, -1, modifiers);
+        if (monitor_active) {
+          keyboard_monitor_publish_event((int)device, raw_keys[i],
+                                         KEYCODE_NONE, -1, modifiers);
+        }
         break;
       }
     }
@@ -2351,16 +2452,39 @@ void emu_set_raw_keyboard(unsigned device, unsigned char modifiers,
     __atomic_store_n(&keyboard_monitor_held_keys[device][i], raw_keys[i],
                      __ATOMIC_RELAXED);
   }
-  if (event_published) {
+  if (capture_active && capture_wait_neutral) {
+    int neutral = modifiers == 0;
+    for (i = 0; neutral && i < KEYBOARD_MONITOR_REPORT_KEYS; ++i) {
+      neutral = raw_keys[i] == 0;
+    }
+    if (neutral) {
+      __atomic_store_n(&keymap_editor_capture_wait_neutral, 0U,
+                       __ATOMIC_RELEASE);
+    }
+  }
+  if (event_published && monitor_active) {
     keyboard_monitor_publish_event((int)device, event_usage, event_keycode,
                                    event_pressed, modifiers);
   }
 
+  if (event_published && capture_active && !capture_wait_neutral &&
+      ((event_usage < 0xe0 && event_pressed) ||
+       (event_usage >= 0xe0 && !event_pressed))) {
+    __atomic_store_n(&keymap_editor_capture_keycode, event_keycode,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&keymap_editor_capture_modifiers, modifiers,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&keymap_editor_capture_ready, 1U, __ATOMIC_RELEASE);
+    __atomic_store_n(&keymap_editor_capture_enabled, 0U, __ATOMIC_RELEASE);
+  }
+
   /* The raw mode consumes all input, so explicitly retain exit keys. */
-  if (!keyboard_monitor_contains(raw_keys, KEYCODE_Escape) &&
+  if (monitor_active && !capture_active &&
+      !keyboard_monitor_contains(raw_keys, KEYCODE_Escape) &&
       keyboard_monitor_contains(previous_keys, KEYCODE_Escape)) {
     emu_ui_key_interrupt(KEYCODE_Escape, 0);
-  } else if (!keyboard_monitor_contains(raw_keys, KEYCODE_F12) &&
+  } else if (monitor_active && !capture_active &&
+             !keyboard_monitor_contains(raw_keys, KEYCODE_F12) &&
              keyboard_monitor_contains(previous_keys, KEYCODE_F12)) {
     emu_ui_key_interrupt(KEYCODE_F12, 0);
   }
@@ -2594,6 +2718,343 @@ static void show_keyboard_monitor(void) {
   keyboard_monitor_reset_data();
   __atomic_store_n(&keyboard_monitor_enabled, 1U, __ATOMIC_RELEASE);
   keyboard_monitor_refresh();
+}
+
+static void keymap_editor_logical_target_name(size_t target_index,
+                                              char *buffer,
+                                              size_t buffer_size) {
+  const struct keymap_editor_target *target;
+  char raw[64];
+  const char *logical = NULL;
+  if (target_index >= keymap_editor_model.target_count) {
+    snprintf(buffer, buffer_size, "Unknown");
+    return;
+  }
+  target = &keymap_editor_model.targets[target_index];
+  if (!emux_keyboard_mapping_target_name(target->row, target->column,
+                                         target->flags, raw, sizeof raw)) {
+    snprintf(buffer, buffer_size, "Row %d, column %d",
+             target->row, target->column);
+    return;
+  }
+  if (strcmp(raw, "Shift+F1") == 0) logical = "F2";
+  else if (strcmp(raw, "Shift+F3") == 0) logical = "F4";
+  else if (strcmp(raw, "Shift+F5") == 0) logical = "F6";
+  else if (strcmp(raw, "Shift+F7") == 0) logical = "F8";
+  else if (strcmp(raw, "Shift+Cursor Right") == 0) logical = "Cursor Left";
+  else if (strcmp(raw, "Shift+Cursor Down") == 0) logical = "Cursor Up";
+  snprintf(buffer, buffer_size, "%s", logical != NULL ? logical : raw);
+}
+
+static void keymap_editor_refresh_target(size_t target_index) {
+  const struct keymap_editor_binding *binding;
+  struct menu_item *item;
+  size_t binding_index;
+  size_t count;
+  char value[64];
+  if (target_index >= keymap_editor_model.target_count) return;
+  item = keymap_editor_target_items[target_index];
+  if (item == NULL) return;
+  count = keymap_editor_target_binding_count(&keymap_editor_model,
+                                             target_index);
+  if (count == 0) {
+    keymap_editor_binding_cursor[target_index] = 0;
+  } else if (keymap_editor_binding_cursor[target_index] >= count) {
+    keymap_editor_binding_cursor[target_index] = count - 1;
+  }
+  binding_index = keymap_editor_binding_cursor[target_index];
+  binding = keymap_editor_target_binding(&keymap_editor_model,
+                                         target_index, binding_index);
+  if (binding == NULL) {
+    snprintf(value, sizeof value, "(unassigned)");
+  } else {
+    if (!keymap_editor_format_host_binding_for_layout(
+            binding->keycode, binding->flags,
+            emu_ui_uses_german_keyboard_layout(), value, sizeof value)) {
+      snprintf(value, sizeof value, "HID 0x%02lX", binding->keycode);
+    }
+    if (count > 1) {
+      size_t used = strlen(value);
+      snprintf(value + used, sizeof value - used, " [%u/%u]",
+               (unsigned)(binding_index + 1), (unsigned)count);
+    }
+  }
+  ui_menu_set_button_value_fitted(item, value, 1);
+}
+
+static int keymap_editor_usb_host_flags(long keycode,
+                                        unsigned char modifiers) {
+  int flags = 0;
+  if (modifiers & ((1U << 2) | (1U << 3) | (1U << 7))) {
+    return -1;
+  }
+  if (modifiers & ((1U << 1) | (1U << 5))) {
+    flags |= KEYMAP_EDITOR_MAP_MOD_SHIFT;
+  }
+  if (modifiers & ((1U << 0) | (1U << 4))) {
+    flags |= KEYMAP_EDITOR_MAP_MOD_CTRL;
+  }
+  if (modifiers & (1U << 6)) {
+    flags |= KEYMAP_EDITOR_MAP_MOD_RIGHT_ALT;
+  }
+  if (keycode == KEYCODE_LeftShift || keycode == KEYCODE_RightShift) {
+    flags &= ~KEYMAP_EDITOR_MAP_MOD_SHIFT;
+  } else if (keycode == KEYCODE_LeftControl ||
+             keycode == KEYCODE_RightControl) {
+    flags &= ~KEYMAP_EDITOR_MAP_MOD_CTRL;
+  } else if (keycode == KEYCODE_RightAlt) {
+    flags &= ~KEYMAP_EDITOR_MAP_MOD_RIGHT_ALT;
+  }
+  return flags;
+}
+
+static void keymap_editor_capture_start(int target_index, int add,
+                                        int wait_neutral) {
+  size_t count;
+  if (!keymap_editor_active || !keymap_editor_editable || target_index < 0 ||
+      (size_t)target_index >= keymap_editor_model.target_count) return;
+  count = keymap_editor_target_binding_count(
+      &keymap_editor_model, (size_t)target_index);
+  __atomic_store_n(&keymap_editor_capture_enabled, 0U, __ATOMIC_RELEASE);
+  keyboard_monitor_reset_data();
+  __atomic_store_n(&keymap_editor_capture_ready, 0U, __ATOMIC_RELAXED);
+  __atomic_store_n(&keymap_editor_capture_wait_neutral,
+                   wait_neutral ? 1U : 0U,
+                   __ATOMIC_RELAXED);
+  keymap_editor_waiting_target = target_index;
+  keymap_editor_waiting_binding = keymap_editor_binding_cursor[target_index];
+  keymap_editor_waiting_add = add || count == 0;
+  /* Raw capture consumes the physical Shift release after Shift+Enter. */
+  ui_keyboard_clear_shift();
+  ui_menu_set_button_value_fitted(
+      keymap_editor_target_items[target_index], "(waiting)", 1);
+  __atomic_store_n(&keymap_editor_capture_enabled, 1U, __ATOMIC_RELEASE);
+}
+
+static void keymap_editor_apply_pending(void) {
+  int conflict;
+  int applied;
+  int target = keymap_editor_pending_target;
+  if (!keymap_editor_editable || target < 0 ||
+      (size_t)target >= keymap_editor_model.target_count) return;
+  conflict = keymap_editor_find_conflict(
+      &keymap_editor_model, (size_t)target, keymap_editor_pending_keycode,
+      keymap_editor_pending_flags);
+  if (keymap_editor_pending_add) {
+    applied = keymap_editor_add_binding(
+        &keymap_editor_model, (size_t)target,
+        keymap_editor_pending_keycode, keymap_editor_pending_flags);
+  } else {
+    applied = keymap_editor_replace_binding(
+        &keymap_editor_model, (size_t)target,
+        keymap_editor_pending_binding, keymap_editor_pending_keycode,
+        keymap_editor_pending_flags);
+  }
+  if (applied) {
+    size_t count = keymap_editor_target_binding_count(
+        &keymap_editor_model, (size_t)target);
+    if (keymap_editor_pending_add && count > 0) {
+      keymap_editor_binding_cursor[target] = count - 1;
+    }
+    keymap_editor_refresh_target((size_t)target);
+    if (conflict >= 0) keymap_editor_refresh_target((size_t)conflict);
+  } else {
+    keymap_editor_refresh_target((size_t)target);
+    ui_error("Could not assign key");
+  }
+  keymap_editor_pending_target = -1;
+  keymap_editor_pending_binding = 0;
+  keymap_editor_pending_add = 0;
+}
+
+static void keymap_editor_refresh_capture(void) {
+  int target;
+  int flags;
+  int conflict;
+  long keycode;
+  unsigned char modifiers;
+  char current_target[64];
+  char new_target[64];
+  char message[256];
+
+  if (!keymap_editor_active || !keymap_editor_editable ||
+      !__atomic_exchange_n(&keymap_editor_capture_ready, 0U,
+                           __ATOMIC_ACQ_REL)) return;
+  target = keymap_editor_waiting_target;
+  keymap_editor_waiting_target = -1;
+  keycode = __atomic_load_n(&keymap_editor_capture_keycode,
+                            __ATOMIC_RELAXED);
+  modifiers = __atomic_load_n(&keymap_editor_capture_modifiers,
+                              __ATOMIC_RELAXED);
+  if (target < 0 || (size_t)target >= keymap_editor_model.target_count) return;
+  flags = keymap_editor_usb_host_flags(keycode, modifiers);
+  if (flags < 0) {
+    keymap_editor_refresh_target((size_t)target);
+    ui_error_wrapped("Left Alt and Super cannot be used as chord modifiers. "
+                     "They can still be assigned as individual keys.");
+    return;
+  }
+  conflict = keymap_editor_find_conflict(&keymap_editor_model,
+                                         (size_t)target, keycode, flags);
+  if (conflict >= 0) {
+    keymap_editor_pending_target = target;
+    keymap_editor_pending_binding = keymap_editor_waiting_binding;
+    keymap_editor_pending_add = keymap_editor_waiting_add;
+    keymap_editor_pending_keycode = keycode;
+    keymap_editor_pending_flags = flags;
+    keymap_editor_logical_target_name((size_t)conflict,
+                                      current_target, sizeof current_target);
+    keymap_editor_logical_target_name((size_t)target,
+                                      new_target, sizeof new_target);
+    snprintf(message, sizeof message,
+             "This PC binding is assigned to %s. Move it to %s?",
+             current_target, new_target);
+    ui_confirm_wrapped_cancel_default(
+        "Key already assigned", message, target,
+        MENU_CONFIRM_KEYBOARD_EDITOR_CONFLICT);
+    return;
+  }
+  keymap_editor_pending_target = target;
+  keymap_editor_pending_binding = keymap_editor_waiting_binding;
+  keymap_editor_pending_add = keymap_editor_waiting_add;
+  keymap_editor_pending_keycode = keycode;
+  keymap_editor_pending_flags = flags;
+  keymap_editor_apply_pending();
+}
+
+static int keymap_editor_key_pressed(struct menu_item *root,
+                                     struct menu_item *current, long key) {
+  (void)root;
+  if (!keymap_editor_active || !keymap_editor_editable || current == NULL ||
+      current->id != MENU_KEYBOARD_EDITOR_TARGET) return 0;
+  if (current->value < 0 ||
+      (size_t)current->value >= keymap_editor_model.target_count) return 0;
+  if (key == KEYCODE_Return) {
+    keymap_editor_return_add = ui_keyboard_shift_active();
+    return 0;
+  }
+  if (key != KEYCODE_Delete && key != KEYCODE_Backspace) return 0;
+  if (ui_keyboard_shift_active()) {
+    keymap_editor_clear(&keymap_editor_model, (size_t)current->value);
+    keymap_editor_binding_cursor[current->value] = 0;
+  } else {
+    keymap_editor_remove_binding(
+        &keymap_editor_model, (size_t)current->value,
+        keymap_editor_binding_cursor[current->value]);
+  }
+  keymap_editor_refresh_target((size_t)current->value);
+  return 1;
+}
+
+static int keymap_editor_left_right(struct menu_item *root,
+                                    struct menu_item *current, int right) {
+  size_t count;
+  size_t target;
+  (void)root;
+  if (!keymap_editor_active || current == NULL ||
+      current->id != MENU_KEYBOARD_EDITOR_TARGET) return 0;
+  if (current->value < 0 ||
+      (size_t)current->value >= keymap_editor_model.target_count) return 0;
+  target = (size_t)current->value;
+  count = keymap_editor_target_binding_count(&keymap_editor_model, target);
+  if (count > 1) {
+    if (right) {
+      keymap_editor_binding_cursor[target] =
+          (keymap_editor_binding_cursor[target] + 1) % count;
+    } else if (keymap_editor_binding_cursor[target] == 0) {
+      keymap_editor_binding_cursor[target] = count - 1;
+    } else {
+      --keymap_editor_binding_cursor[target];
+    }
+    keymap_editor_refresh_target(target);
+  }
+  return 1;
+}
+
+static void keymap_editor_popped(struct menu_item *old_root,
+                                 struct menu_item *new_root) {
+  (void)old_root;
+  (void)new_root;
+  __atomic_store_n(&keymap_editor_capture_enabled, 0U, __ATOMIC_RELEASE);
+  __atomic_store_n(&keymap_editor_capture_ready, 0U, __ATOMIC_RELEASE);
+  __atomic_store_n(&keymap_editor_capture_wait_neutral, 0U,
+                   __ATOMIC_RELEASE);
+  memset(keymap_editor_target_items, 0, sizeof keymap_editor_target_items);
+  memset(keymap_editor_binding_cursor, 0,
+         sizeof keymap_editor_binding_cursor);
+  keymap_editor_waiting_target = -1;
+  keymap_editor_waiting_binding = 0;
+  keymap_editor_waiting_add = 0;
+  keymap_editor_pending_target = -1;
+  keymap_editor_pending_binding = 0;
+  keymap_editor_pending_add = 0;
+  keymap_editor_return_add = 0;
+  keymap_editor_active = 0;
+  keymap_editor_editable = 0;
+}
+
+static void show_keymap_editor(void) {
+  struct menu_item *root;
+  struct menu_item *item;
+  char error[128];
+  size_t i;
+
+  if (!emux_keymap_editor_begin(&keymap_editor_model,
+                                &keymap_editor_editable,
+                                error, sizeof error)) {
+    ui_error("%s", error);
+    return;
+  }
+  root = ui_push_menu(-1, -1);
+  if (root == NULL) {
+    keymap_editor_editable = 0;
+    return;
+  }
+  root->on_popped_off = keymap_editor_popped;
+  root->key_listener_func = keymap_editor_key_pressed;
+  root->left_right_listener_func = keymap_editor_left_right;
+  keymap_editor_active = 1;
+  keymap_editor_waiting_target = -1;
+  keymap_editor_waiting_binding = 0;
+  keymap_editor_waiting_add = 0;
+  keymap_editor_pending_target = -1;
+  keymap_editor_pending_binding = 0;
+  keymap_editor_pending_add = 0;
+  keymap_editor_return_add = 0;
+  memset(keymap_editor_target_items, 0, sizeof keymap_editor_target_items);
+  memset(keymap_editor_binding_cursor, 0,
+         sizeof keymap_editor_binding_cursor);
+
+  ui_menu_add_button(MENU_TEXT, root, "Mapping Editor");
+  ui_menu_add_button_with_value(MENU_TEXT, root, "File", 0, "",
+                                emux_keyboard_mapping_file());
+  ui_menu_add_button_with_value(
+      MENU_TEXT, root, "Mode", 0, "",
+      keymap_editor_editable ? "Editable" : "Read only");
+  ui_menu_add_button(MENU_TEXT, root,
+                     "Left/Right: select binding");
+  if (keymap_editor_editable) {
+    ui_menu_add_button(MENU_KEYBOARD_EDITOR_SAVE, root, "Save & Apply");
+    ui_menu_add_button(MENU_KEYBOARD_EDITOR_RESTORE, root,
+                       "Restore Defaults...");
+    ui_menu_add_button(MENU_TEXT, root,
+                       "Enter: replace   Shift+Enter: add");
+    ui_menu_add_button(MENU_TEXT, root,
+                       "Del: remove   Shift+Del: clear all");
+  } else {
+    ui_menu_add_button(MENU_TEXT, root,
+                       "Select Mapping: Custom to edit");
+  }
+  ui_menu_add_divider(root);
+
+  for (i = 0; i < keymap_editor_model.target_count; ++i) {
+    char name[MAX_MENU_STR];
+    keymap_editor_logical_target_name(i, name, sizeof name);
+    item = ui_menu_add_button_with_value(
+        MENU_KEYBOARD_EDITOR_TARGET, root, name, (int)i, "", "");
+    keymap_editor_target_items[i] = item;
+    keymap_editor_refresh_target(i);
+  }
 }
 
 void emu_set_mouse_info(int present, const char *product) {
@@ -3103,6 +3564,7 @@ static void refresh_dhcp_network_fields(void) {
 }
 
 void menu_before_render(void) {
+  keymap_editor_refresh_capture();
   keyboard_monitor_refresh();
   mouse_monitor_refresh();
   gpio_monitor_refresh();
@@ -3767,6 +4229,18 @@ static void next_integer_scaling(int layer,
   }
 }
 
+static void menu_scale_changed(struct menu_item *item) {
+  if (!ui_set_menu_scale_percent(item->value)) {
+    item->value = ui_get_menu_scale_percent();
+  }
+}
+
+static void menu_row_gap_changed(struct menu_item *item) {
+  if (!ui_set_menu_row_gap(item->value)) {
+    item->value = ui_get_menu_row_gap();
+  }
+}
+
 static int save_settings() {
   FILE *fp;
   switch (emux_machine_class) {
@@ -3946,9 +4420,15 @@ static int save_settings() {
 
   emux_save_additional_settings(fp);
 
-  fclose(fp);
+  int failed = ferror(fp) != 0;
+  if (fclose(fp) != 0) {
+    failed = 1;
+  }
+  if (failed) {
+    return 1;
+  }
 
-  return 0;
+  return ui_save_appearance_settings();
 }
 
 static void apply_sound_output_priority_setting(int value) {
@@ -4502,6 +4982,10 @@ static ReuFilenameStatus normalize_reu_filename(char *filename,
 static void select_file(struct menu_item *item) {
   ReuFilenameStatus reu_filename_status;
 
+  if (show_text_file_if_supported(item)) {
+    return;
+  }
+
   switch (item->id) {
      case MENU_IEC_DIR:
        emux_set_iec_dir(unit, fullpath(DIR_IEC, ""));
@@ -4815,16 +5299,151 @@ static int menu_file_item_to_dir_index(struct menu_item *item) {
   }
 }
 
+static int text_file_extension_supported(const char *name) {
+  static const char *const extensions[] = {
+    ".txt", ".md", ".nfo", ".log", ".ini", ".cfg", ".conf", ".csv",
+    ".json", ".xml", ".html", ".htm", ".css", ".js", ".mjs", ".vkm",
+  };
+  const char *extension;
+  unsigned i;
+
+  if (name == NULL) {
+    return 0;
+  }
+  extension = strrchr(name, '.');
+  if (extension == NULL || extension == name) {
+    return 0;
+  }
+  for (i = 0; i < sizeof extensions / sizeof extensions[0]; i++) {
+    if (strcasecmp(extension, extensions[i]) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void sanitize_text_file_contents(char *text, size_t length) {
+  size_t i;
+
+  for (i = 0; i < length; i++) {
+    unsigned char character = (unsigned char)text[i];
+    if (character < 0x20 && character != '\n' && character != '\r' &&
+        character != '\t') {
+      text[i] = '?';
+    } else if (character == 0x7f) {
+      text[i] = '?';
+    }
+  }
+}
+
+static int show_text_file_if_supported(struct menu_item *item) {
+  static const char empty_file_message[] = "[Empty file]";
+  unsigned row_count = 0;
+  int dir_index;
+  int truncated;
+  char path[sizeof full_path_str];
+  char *line;
+  char *text;
+  FILE *fp;
+  size_t i;
+  size_t length;
+  struct menu_item *viewer_root;
+
+  if (item == NULL || item->type != BUTTON ||
+      !text_file_extension_supported(item->str_value)) {
+    return 0;
+  }
+
+  dir_index = menu_file_item_to_dir_index(item);
+  if (dir_index < 0 ||
+      build_path(path, sizeof path, current_volume_names[dir_index],
+                 current_dir_names[dir_index], item->str_value) != 0) {
+    ui_error("Cannot open text file");
+    return 1;
+  }
+
+  fp = fopen(path, "rb");
+  if (fp == NULL) {
+    ui_error("Cannot open text file");
+    return 1;
+  }
+
+  text = (char *)malloc(TEXT_FILE_VIEW_MAX_BYTES + 1U);
+  if (text == NULL) {
+    fclose(fp);
+    ui_error("Out of memory");
+    return 1;
+  }
+
+  length = fread(text, 1, TEXT_FILE_VIEW_MAX_BYTES, fp);
+  if (ferror(fp)) {
+    fclose(fp);
+    free(text);
+    ui_error("Cannot read text file");
+    return 1;
+  }
+  truncated = fgetc(fp) != EOF;
+  if (ferror(fp)) {
+    fclose(fp);
+    free(text);
+    ui_error("Cannot read text file");
+    return 1;
+  }
+  fclose(fp);
+
+  sanitize_text_file_contents(text, length);
+  text[length] = '\0';
+
+  viewer_root = ui_push_menu(-1, -1);
+  if (viewer_root == NULL) {
+    free(text);
+    return 1;
+  }
+  viewer_root->sub_id = MENU_SUB_TEXT_CONTENTS;
+  viewer_root->left_right_listener_func = files_left_right_listener;
+  ui_menu_add_button(MENU_TEXT, viewer_root, item->str_value);
+  ui_menu_add_divider(viewer_root);
+
+  if (length == 0U) {
+    add_text_viewer_row(viewer_root, empty_file_message, &row_count,
+                        TEXT_FILE_VIEW_MAX_ROWS);
+  } else {
+    line = text;
+    for (i = 0; i < length; i++) {
+      if (text[i] != '\n') {
+        continue;
+      }
+      text[i] = '\0';
+      if (!add_text_viewer_line(viewer_root, line, &row_count,
+                                TEXT_FILE_VIEW_MAX_ROWS - 1U)) {
+        truncated = 1;
+        break;
+      }
+      line = text + i + 1U;
+    }
+    if (i == length && line < text + length &&
+        !add_text_viewer_line(viewer_root, line, &row_count,
+                              TEXT_FILE_VIEW_MAX_ROWS - 1U)) {
+      truncated = 1;
+    }
+  }
+
+  if (truncated) {
+    add_text_viewer_row(viewer_root, TEXT_FILE_VIEW_TRUNCATION_MARKER,
+                        &row_count, TEXT_FILE_VIEW_MAX_ROWS);
+  }
+  free(text);
+  return 1;
+}
+
 // Utility function to re-list same type of files given
 // a file item.
-static void relist_files_after_dir_change(int menu_id) {
+static struct menu_item *relist_files_after_dir_change(int menu_id) {
   switch (menu_id) {
   case MENU_LOAD_SNAP_FILE:
-    show_files(DIR_SNAPS, FILTER_SNAP, menu_id, 1);
-    break;
+    return show_files(DIR_SNAPS, FILTER_SNAP, menu_id, 1);
   case MENU_SAVE_SNAP_FILE:
-    show_files(DIR_SNAPS, FILTER_SNAP, menu_id, 1);
-    break;
+    return show_files(DIR_SNAPS, FILTER_SNAP, menu_id, 1);
   case MENU_DEFAULT_DISK_FILE:
   case MENU_DISK_FILE:
   case MENU_CREATE_D64_FILE:
@@ -4841,19 +5460,15 @@ static void relist_files_after_dir_change(int menu_id) {
   case MENU_CREATE_P64_FILE:
   case MENU_CREATE_X64_FILE:
   case MENU_CREATE_DHD_FILE:
-    show_files(DIR_DISKS, FILTER_DISK, menu_id, 1);
-    break;
+    return show_files(DIR_DISKS, FILTER_DISK, menu_id, 1);
   case MENU_TAPE_FILE:
   case MENU_CREATE_TAP_FILE:
-    show_files(DIR_TAPES, FILTER_TAPE, menu_id, 1);
-    break;
+    return show_files(DIR_TAPES, FILTER_TAPE, menu_id, 1);
   case MENU_C64_CART_FILE:
-    show_files(DIR_CARTS, FILTER_CART, menu_id, 1);
-    break;
+    return show_files(DIR_CARTS, FILTER_CART, menu_id, 1);
   case MENU_LOAD_REU_FILE:
   case MENU_SAVE_REU_FILE:
-    show_files(DIR_CARTS, FILTER_REU, menu_id, 1);
-    break;
+    return show_files(DIR_CARTS, FILTER_REU, menu_id, 1);
   case MENU_C64_CART_8K_FILE:
   case MENU_C64_CART_16K_FILE:
   case MENU_C64_CART_ULTIMAX_FILE:
@@ -4876,8 +5491,7 @@ static void relist_files_after_dir_change(int menu_id) {
   case MENU_PLUS4_CART_C1_HI_FILE:
   case MENU_PLUS4_CART_C2_LO_FILE:
   case MENU_PLUS4_CART_C2_HI_FILE:
-    show_files(DIR_CARTS, FILTER_NONE, menu_id, 1);
-    break;
+    return show_files(DIR_CARTS, FILTER_NONE, menu_id, 1);
   case MENU_KERNAL_FILE:
   case MENU_BASIC_FILE:
   case MENU_CHARGEN_FILE:
@@ -4887,49 +5501,77 @@ static void relist_files_after_dir_change(int menu_id) {
   case MENU_C128_LOAD_CHARGEN_FILE:
   case MENU_C128_LOAD_64_KERNAL_FILE:
   case MENU_C128_LOAD_64_BASIC_FILE:
-    show_files(DIR_ROMS, FILTER_NONE, menu_id, 1);
-    break;
+    return show_files(DIR_ROMS, FILTER_NONE, menu_id, 1);
   case MENU_DRIVE_ROM_FILE_1541:
   case MENU_DRIVE_ROM_FILE_1541II:
   case MENU_DRIVE_ROM_FILE_1551:
   case MENU_DRIVE_ROM_FILE_1571:
   case MENU_DRIVE_ROM_FILE_1581:
   case MENU_DRIVE_ROM_FILE_CMDHD:
-    show_files(DIR_DRIVE_ROMS, FILTER_NONE, menu_id, 1);
-    break;
+    return show_files(DIR_DRIVE_ROMS, FILTER_NONE, menu_id, 1);
   case MENU_AUTOSTART_FILE:
-    show_files(DIR_DISKS, FILTER_NONE, menu_id, 1);
-    break;
+    return show_files(DIR_DISKS, FILTER_NONE, menu_id, 1);
   case MENU_LOADPRG_FILE:
-    show_files(DIR_ROOT, FILTER_PRGS, menu_id, 1);
-    break;
+    return show_files(DIR_ROOT, FILTER_PRGS, menu_id, 1);
   case MENU_RS232NET_PHONEBOOK_FILE:
-    show_files(DIR_PHONEBOOK, FILTER_PHONEBOOK, menu_id, 1);
-    break;
+    return show_files(DIR_PHONEBOOK, FILTER_PHONEBOOK, menu_id, 1);
   case MENU_IEC_DIR:
-    show_files(DIR_IEC, FILTER_DIRS, menu_id, 1);
-    break;
+    return show_files(DIR_IEC, FILTER_DIRS, menu_id, 1);
   default:
-    break;
+    return NULL;
+  }
+}
+
+static int file_entry_position(struct menu_item *root, int sub_id,
+                               const char *str_value) {
+  int position = 0;
+  struct menu_item *item;
+
+  if (root == NULL || str_value == NULL) {
+    return -1;
+  }
+
+  for (item = root->first_child; item != NULL; item = item->next) {
+    if (item->hidden) {
+      continue;
+    }
+    if (item->sub_id == sub_id && strcmp(item->str_value, str_value) == 0) {
+      return position;
+    }
+    position++;
+  }
+
+  return -1;
+}
+
+static void restore_file_cursor_to_dir(struct menu_item *root,
+                                       int dir_index,
+                                       const char *dir_name) {
+  int position = file_entry_position(root, MENU_SUB_ENTER_DIR, dir_name);
+
+  if (position >= 0) {
+    current_dir_pos[dir_index] = position;
+    ui_set_cur_pos(position);
   }
 }
 
 static void up_dir(struct menu_item *item) {
-  int i;
   int dir_index = menu_file_item_to_dir_index(item);
   int menu_id = item->id;
+  char dir_name[MAX_STR_VAL_LEN];
+  const char *last_separator;
+  struct menu_item *file_root;
   if (dir_index < 0)
     return;
-  // Remove last directory from current_dir_names
-  i = strlen(current_dir_names[dir_index]) - 1;
-  while (current_dir_names[dir_index][i] != '/' && i > 0)
-    i--;
-  current_dir_names[dir_index][i] = '\0';
-  if (strlen(current_dir_names[dir_index]) == 0) {
-    strcpy(current_dir_names[dir_index], "/");
-  }
+
+  last_separator = strrchr(current_dir_names[dir_index], '/');
+  snprintf(dir_name, sizeof dir_name, "%s",
+           last_separator != NULL ? last_separator + 1
+                                  : current_dir_names[dir_index]);
+  remove_dir(current_dir_names[dir_index]);
   ui_pop_menu();
-  relist_files_after_dir_change(menu_id);
+  file_root = relist_files_after_dir_change(menu_id);
+  restore_file_cursor_to_dir(file_root, dir_index, dir_name);
 }
 
 static void enter_dir(struct menu_item *item) {
@@ -4953,7 +5595,8 @@ static void enter_dir(struct menu_item *item) {
 
 static int files_left_right_listener(struct menu_item* parent,
                                      struct menu_item* current, int right) {
-  if (parent->sub_id == MENU_SUB_IMAGE_CONTENTS) {
+  if (parent->sub_id == MENU_SUB_IMAGE_CONTENTS ||
+      parent->sub_id == MENU_SUB_TEXT_CONTENTS) {
     if (!right) {
       ui_pop_menu();
     }
@@ -5108,16 +5751,6 @@ static void do_video_settings(int layer) {
      use_h_int_stretch, use_v_int_stretch,
      lpad, rpad, tpad, bpad, zlayer);
 
-  if (layer == FB_LAYER_VIC) {
-     // Make UI match VIC settings except for padding.
-     emux_apply_video_adjustments(
-        FB_LAYER_UI, hc, vc,
-        h, v,
-        hs, vs,
-        h_integer_stretch[0], v_integer_stretch[0],
-        use_h_integer_stretch[0], use_v_integer_stretch[0],
-        0, 0, 0, 0, 3);
-  }
 }
 
 static void menu_sync_c128_active_display_to_column_key(void) {
@@ -5399,6 +6032,41 @@ static void menu_value_changed(struct menu_item *item) {
     return;
   case MENU_KEYBOARD_MONITOR:
     show_keyboard_monitor();
+    return;
+  case MENU_KEYBOARD_EDITOR:
+    show_keymap_editor();
+    return;
+  case MENU_KEYBOARD_EDITOR_TARGET:
+    if (!keymap_editor_editable) return;
+    keymap_editor_capture_start(item->value, keymap_editor_return_add,
+                                ui_keyboard_shift_active());
+    keymap_editor_return_add = 0;
+    return;
+  case MENU_KEYBOARD_EDITOR_SAVE: {
+    char error[128];
+    if (!keymap_editor_editable) {
+      ui_info("Select Mapping: Custom to edit");
+      return;
+    }
+    if (emux_keymap_editor_save(&keymap_editor_model,
+                                error, sizeof error)) {
+      ui_info("Custom keymap saved and applied");
+    } else {
+      ui_error("%s", error);
+    }
+    return;
+  }
+  case MENU_KEYBOARD_EDITOR_RESTORE:
+    if (!keymap_editor_editable) {
+      ui_info("Select Mapping: Custom to edit");
+      return;
+    }
+    ui_confirm_wrapped_cancel_default(
+        "Restore defaults",
+        "Remove all assignments created by this editor and reload the "
+        "default custom keymap? Manual entries outside the editor block "
+        "are preserved.",
+        0, MENU_CONFIRM_KEYBOARD_EDITOR_RESTORE);
     return;
   case MENU_DEFAULT_DISK_IMAGE:
     show_files(DIR_DISKS, FILTER_DISK, MENU_DEFAULT_DISK_FILE, 0);
@@ -5760,7 +6428,7 @@ static void menu_value_changed(struct menu_item *item) {
     demo_reset();
     return;
   case MENU_NETWORK_SAVE:
-    perform_system_action(SYSTEM_ACTION_REBOOT, 1, -1, NULL, 0U);
+    perform_system_action(SYSTEM_ACTION_REBOOT, 1, -1, NULL, 0U, -1, NULL);
     return;
   case MENU_SYSTEM_DEVELOPER_STATUS:
   case MENU_SYSTEM_DEVELOPER_PASSWORD:
@@ -5768,6 +6436,12 @@ static void menu_value_changed(struct menu_item *item) {
     return;
   case MENU_SYSTEM_DEVELOPER_APPLY:
     show_developer_settings_confirm();
+    return;
+  case MENU_SYSTEM_API_STATUS:
+  case MENU_SYSTEM_API_PASSWORD:
+    return;
+  case MENU_SYSTEM_API_APPLY:
+    show_api_settings_confirm();
     return;
   case MENU_OVERCLOCK_ARM_FREQ:
   case MENU_OVERCLOCK_VOLTAGE_DELTA:
@@ -6137,16 +6811,31 @@ static void menu_value_changed(struct menu_item *item) {
       menu_update_confirm_accepting_pop = 1;
     }
     ui_pop_menu();
-    if (confirm_sub_id == MENU_PENDING_REBOOT) {
-      perform_system_action(SYSTEM_ACTION_REBOOT, 0, -1, NULL, 0U);
+    if (confirm_sub_id == MENU_CONFIRM_KEYBOARD_EDITOR_CONFLICT) {
+      if (keymap_editor_editable) keymap_editor_apply_pending();
+    } else if (confirm_sub_id == MENU_CONFIRM_KEYBOARD_EDITOR_RESTORE) {
+      char error[128];
+      if (!keymap_editor_editable) {
+        ui_info("Select Mapping: Custom to edit");
+      } else if (emux_keymap_editor_restore_defaults(error, sizeof error)) {
+        ui_pop_menu();
+        ui_info("Custom keymap defaults restored");
+      } else {
+        ui_error("%s", error);
+      }
+    } else if (confirm_sub_id == MENU_PENDING_REBOOT) {
+      perform_system_action(SYSTEM_ACTION_REBOOT, 0, -1, NULL, 0U, -1, NULL);
     } else if (confirm_sub_id == MENU_CONFIRM_SYSTEM_DEVELOPER) {
       perform_system_action(SYSTEM_ACTION_REBOOT, 0, developer_mode_target,
                             developer_password_target,
-                            developer_buffer_size_target);
+                            developer_buffer_size_target, -1, NULL);
+    } else if (confirm_sub_id == MENU_CONFIRM_SYSTEM_API) {
+      perform_system_action(SYSTEM_ACTION_REBOOT, 0, -1, NULL, 0U,
+                            api_mode_target, api_password_target);
     } else if (confirm_sub_id == MENU_CONFIRM_SYSTEM_REBOOT) {
-      perform_system_action(SYSTEM_ACTION_REBOOT, 0, -1, NULL, 0U);
+      perform_system_action(SYSTEM_ACTION_REBOOT, 0, -1, NULL, 0U, -1, NULL);
     } else if (confirm_sub_id == MENU_CONFIRM_SYSTEM_POWER_OFF) {
-      perform_system_action(SYSTEM_ACTION_POWER_OFF, 0, -1, NULL, 0U);
+      perform_system_action(SYSTEM_ACTION_POWER_OFF, 0, -1, NULL, 0U, -1, NULL);
     } else {
       menu_update_confirm_ok(confirm_sub_id);
     }
@@ -6159,6 +6848,15 @@ static void menu_value_changed(struct menu_item *item) {
         item->sub_id == MENU_CONFIRM_UPDATE_RESET_WARNING ||
         item->sub_id == MENU_CONFIRM_UPDATE_RESET_INSTALL) {
       emux_update_cancel_explicit();
+    }
+    if (item->sub_id == MENU_CONFIRM_KEYBOARD_EDITOR_CONFLICT) {
+      if (keymap_editor_pending_target >= 0) {
+        keymap_editor_refresh_target(
+            (size_t)keymap_editor_pending_target);
+      }
+      keymap_editor_pending_target = -1;
+      keymap_editor_pending_binding = 0;
+      keymap_editor_pending_add = 0;
     }
     ui_pop_menu();
     break;
@@ -7727,6 +8425,8 @@ void build_menu(struct menu_item *root) {
   ui_menu_add_divider(parent);
 
   emux_add_keyboard_options(parent);
+  ui_menu_add_button(MENU_KEYBOARD_EDITOR, parent,
+                     "Mapping Editor...");
   ui_menu_add_button(MENU_KEYBOARD_MONITOR, parent, "Monitor...");
 
   if (emux_machine_class == BMC64_MACHINE_CLASS_C128) {
@@ -7913,6 +8613,21 @@ void build_menu(struct menu_item *root) {
 
   parent = ui_menu_add_folder(root, "Prefs");
 
+  struct menu_item *menu_appearance_parent =
+      ui_menu_add_folder(parent, "Menu");
+  struct menu_item *menu_scale_item = ui_menu_add_range(
+      MENU_ID_DO_NOTHING, menu_appearance_parent, "Menu Scale %",
+      UI_MENU_SCALE_MIN, UI_MENU_SCALE_MAX, UI_MENU_SCALE_STEP,
+      ui_get_menu_scale_percent());
+  menu_scale_item->ministep = UI_MENU_SCALE_FINE_STEP;
+  menu_scale_item->on_value_changed = menu_scale_changed;
+
+  struct menu_item *menu_row_gap_item = ui_menu_add_range(
+      MENU_ID_DO_NOTHING, menu_appearance_parent, "Row Gap px",
+      UI_MENU_ROW_GAP_MIN, UI_MENU_ROW_GAP_MAX, UI_MENU_ROW_GAP_STEP,
+      ui_get_menu_row_gap());
+  menu_row_gap_item->on_value_changed = menu_row_gap_changed;
+
   statusbar_item =
       ui_menu_add_multiple_choice(MENU_OVERLAY, parent, "Show Status Bar");
   statusbar_item->num_choices = 3;
@@ -7999,6 +8714,23 @@ void build_menu(struct menu_item *root) {
         BMX_DEVELOPER_LOG_BUFFER_STEP_KB,
         (int)emux_get_developer_log_buffer_kb());
     ui_menu_add_button(MENU_SYSTEM_DEVELOPER_APPLY, developer,
+                       "Apply and Reboot...");
+  }
+  {
+    char api_password[BMX_API_PASSWORD_MAX_LEN + 1] = "";
+    struct menu_item *api = ui_menu_add_folder(parent, "Remote API");
+
+    api_status_item = ui_menu_add_toggle_labels(
+        MENU_SYSTEM_API_STATUS, api, "Status",
+        emux_api_mode_enabled(), "Disabled", "Enabled");
+    if (!emux_get_api_password(api_password, sizeof api_password)) {
+      api_password[0] = '\0';
+    }
+    api_password_item = ui_menu_add_text_field_limited(
+        MENU_SYSTEM_API_PASSWORD, api, "Password",
+        api_password, BMX_API_PASSWORD_MAX_LEN);
+    ui_menu_set_text_field_display(api_password_item, 20, 1);
+    ui_menu_add_button(MENU_SYSTEM_API_APPLY, api,
                        "Apply and Reboot...");
   }
   build_overclock_menu(parent);
@@ -8401,9 +9133,8 @@ void emux_geometry_changed(int layer) {
   }
 
   if (layer == FB_LAYER_VIC) {
-     // When the first display changes, we need to update the UI since
-     // it's frame buffer dimensions must match.
-     ui_geometry_changed(dpx, dpy, fbw, fbh, sw, sh, dw, dh);
+     // UI size depends only on the physical output, never on VIC geometry.
+     ui_output_geometry_changed(dpx, dpy);
   }
 }
 

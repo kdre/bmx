@@ -261,6 +261,12 @@ struct bmx_diagnostics_snapshot {
   uint32_t emu_cycles_per_sec;
   uint32_t temperature_c;
   uint32_t throttle_clock_hz;
+  uint64_t scheduler_safe_points;
+  uint64_t scheduler_rounds;
+  uint64_t scheduler_extra_rounds;
+  uint64_t scheduler_pump_us;
+  uint64_t scheduler_pump_max_us;
+  uint64_t scheduler_pump_budget_stops;
 };
 
 extern void circle_get_diagnostics(struct bmx_diagnostics_snapshot *snapshot);

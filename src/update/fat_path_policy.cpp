@@ -165,5 +165,27 @@ FatPathValidationStatus ValidateDeveloperFatRelativePath(
     return FatPathValidationStatus::Ok;
 }
 
+FatPathValidationStatus ValidateMediaFatRelativePath(
+    const char *path, size_t maximum_path_bytes)
+{
+    const FatPathValidationStatus status =
+        ValidateDeveloperFatRelativePath(path, maximum_path_bytes);
+    if (status != FatPathValidationStatus::Ok) return status;
+
+    size_t root_size = 0U;
+    while (path[root_size] != '\0' && path[root_size] != '/') ++root_size;
+    static const char *const roots[] = {
+        "disks", "tapes", "carts", "snapshots"
+    };
+    for (size_t index = 0U; index < sizeof(roots) / sizeof(roots[0]); ++index) {
+        if (EqualsAsciiIgnoreCase(
+                reinterpret_cast<const uint8_t *>(path), root_size,
+                roots[index])) {
+            return FatPathValidationStatus::Ok;
+        }
+    }
+    return FatPathValidationStatus::InvalidPath;
+}
+
 }  // namespace update
 }  // namespace bmx

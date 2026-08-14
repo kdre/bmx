@@ -95,7 +95,7 @@ int ViceApp::circle_cycles_per_second() {
 bool ViceScreenApp::Initialize(void) {
   // Circle's non-throwing allocator may return null. Fail before either
   // boot-lifetime object can be dereferenced.
-  if (mEmulatorCore == nullptr || mNetworkManager == nullptr) {
+  if (mEmulatorCore == nullptr || mNetworkService == nullptr) {
     return false;
   }
 
@@ -166,12 +166,12 @@ bool ViceScreenApp::StartNetwork(void) {
   if (mNetworkStarted) {
     return true;
   }
-  if (mNetworkManager == nullptr) {
+  if (mNetworkService == nullptr) {
     return false;
   }
 
   mNetworkStarted = true;
-  if (!mNetworkManager->Initialize(mViceOptions)) {
+  if (!mNetworkService->Initialize(mViceOptions)) {
     return false;
   }
   EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
@@ -405,46 +405,53 @@ void ViceStdioApp::DisableBootStat() {
   CGlueStdioInitBootStat(0, nullptr, nullptr, nullptr);
 }
 
-void ViceStdioApp::StartDeveloperService(void) {
-  if (!mViceOptions.DeveloperModeEnabled() || mRemoteService != nullptr) {
+void ViceStdioApp::StartRemoteService(void) {
+  bool developer_enabled = mViceOptions.DeveloperModeEnabled();
+  const bool api_enabled = mViceOptions.ApiModeEnabled();
+  if ((!developer_enabled && !api_enabled) || mRemoteService != nullptr) {
     return;
   }
-  if (mDeveloperLogRing == nullptr) {
+  if (developer_enabled && mDeveloperLogRing == nullptr) {
     mLogger.Write(GetKernelName(), LogWarning,
                   "Developer Mode log buffer is unavailable");
-    return;
+    developer_enabled = false;
+    if (!api_enabled) return;
   }
-  CNetSubSystem *network = mNetworkManager != nullptr
-                               ? mNetworkManager->GetNetSubSystem()
+  CNetSubSystem *network = mNetworkService != nullptr
+                               ? mNetworkService->GetNetSubSystem()
                                : nullptr;
   if (network == nullptr) {
     mLogger.Write(GetKernelName(), LogNotice,
-                  "Developer Mode enabled; network is disabled");
+                  "Remote HTTP interface enabled; network is disabled");
     return;
   }
-  if (mDeveloperUsbDiagnostic == nullptr) {
+  if (developer_enabled && mDeveloperUsbDiagnostic == nullptr) {
     mDeveloperUsbDiagnostic = new bmx::remote::DeveloperUsbDiagnostic(
         WriteUsbDiagnosticLog, mDeveloperLogDevice);
   }
-  if (mDeveloperUsbDiagnostic != nullptr &&
+  if (developer_enabled && mDeveloperUsbDiagnostic != nullptr &&
       mCircleUsbDiagnosticAdapter == nullptr) {
     mCircleUsbDiagnosticAdapter =
         new bmx::remote::CircleUsbDiagnosticAdapter(mDeveloperUsbDiagnostic);
   }
-  if (mDeveloperUsbDiagnostic == nullptr ||
-      mCircleUsbDiagnosticAdapter == nullptr) {
+  if (developer_enabled && (mDeveloperUsbDiagnostic == nullptr ||
+      mCircleUsbDiagnosticAdapter == nullptr)) {
     delete mCircleUsbDiagnosticAdapter;
     delete mDeveloperUsbDiagnostic;
     mCircleUsbDiagnosticAdapter = nullptr;
     mDeveloperUsbDiagnostic = nullptr;
     mLogger.Write(GetKernelName(), LogWarning,
                   "Cannot allocate Developer USB diagnostic");
-    return;
+    developer_enabled = false;
+    if (!api_enabled) return;
   }
-  mUSBHCII.SetDiagnosticObserver(mCircleUsbDiagnosticAdapter);
+  if (developer_enabled) {
+    mUSBHCII.SetDiagnosticObserver(mCircleUsbDiagnosticAdapter);
+  }
   mRemoteService = new bmx::remote::RemoteService(
       mDeveloperLogRing, mDeveloperUsbDiagnostic,
-      mViceOptions.GetDeveloperPassword());
+      developer_enabled, mViceOptions.GetDeveloperPassword(),
+      api_enabled, mViceOptions.GetApiPassword());
   if (mRemoteService == nullptr || !mRemoteService->Start(network)) {
     delete mRemoteService;
     mRemoteService = nullptr;
@@ -454,15 +461,17 @@ void ViceStdioApp::StartDeveloperService(void) {
     mCircleUsbDiagnosticAdapter = nullptr;
     mDeveloperUsbDiagnostic = nullptr;
     mLogger.Write(GetKernelName(), LogWarning,
-                  "Cannot start Developer HTTP service");
+                  "Cannot start Remote HTTP service");
     return;
   }
   mLogger.Write(GetKernelName(), LogNotice,
-                "Developer HTTP service listening on port %u",
-                static_cast<unsigned>(bmx::remote::kRemoteHttpPort));
+                "Remote HTTP service listening on port %u (Developer: %s, API: %s)",
+                static_cast<unsigned>(bmx::remote::kRemoteHttpPort),
+                developer_enabled ? "enabled" : "disabled",
+                api_enabled ? "enabled" : "disabled");
 }
 
-void ViceStdioApp::StopDeveloperService(void) {
+void ViceStdioApp::StopRemoteService(void) {
   if (mRemoteService == nullptr) return;
   mRemoteService->Stop();
   delete mRemoteService;
@@ -515,7 +524,7 @@ bool ViceStdioApp::Initialize(void) {
     return false;
   }
 
-  StartDeveloperService();
+  StartRemoteService();
 
   // Now that emmc is initialized, launch
   // the emulator main loop on CORE 1 before USBHCII.
@@ -540,7 +549,7 @@ bool ViceStdioApp::Initialize(void) {
 int ViceStdioApp::PrepareSystemShutdown(void) {
   int status = 0;
 
-  StopDeveloperService();
+  StopRemoteService();
 
   if (CGlueStdioShutdown() != 0) {
     mLogger.Write(GetKernelName(), LogError, "Cannot close all stdio files");

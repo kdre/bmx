@@ -27,4 +27,20 @@ int keyboard_matrix_format_emulated_key(BmxKeyboardMatrix matrix,
                                         int row, int column, int flags,
                                         char *buffer, size_t buffer_size);
 
+/* Enumerate every physical key position in a machine keyboard matrix. */
+size_t keyboard_matrix_key_count(BmxKeyboardMatrix matrix);
+int keyboard_matrix_key_at(BmxKeyboardMatrix matrix, size_t index,
+                           int *row, int *column);
+
+/*
+ * Enumerate the stable, human-oriented target order used by the keymap
+ * editor.  flags contains the VICE mapping behavior required when a new
+ * binding is created for the target.  The catalog includes physical matrix
+ * keys, machine-specific special keys and the virtual modifier targets used
+ * by the shipped US and DE positional maps.
+ */
+size_t keyboard_matrix_editor_target_count(BmxKeyboardMatrix matrix);
+int keyboard_matrix_editor_target_at(BmxKeyboardMatrix matrix, size_t index,
+                                     int *row, int *column, int *flags);
+
 #endif

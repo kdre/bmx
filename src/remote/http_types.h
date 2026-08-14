@@ -14,7 +14,7 @@ static const size_t kHttpMaximumResponseHeaders = 16U;
 static const size_t kHttpMaximumResponseHeaderBytes = 2048U;
 static const size_t kHttpConnectionReadBufferBytes = 2048U;
 static const size_t kHttpResponseStreamBufferBytes = 1024U;
-static const size_t kHttpMaximumConnections = 2U;
+static const size_t kHttpMaximumConnections = 6U;
 
 struct HttpStringView {
     const char *data;
@@ -36,7 +36,8 @@ enum class HttpMethod : uint8_t {
     Get = 0,
     Head,
     Put,
-    Post
+    Post,
+    Delete
 };
 
 const char *HttpMethodName(HttpMethod method);

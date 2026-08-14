@@ -25,6 +25,7 @@
  */
 
 #include "ui.h"
+#include "ui_geometry.h"
 
 #include <assert.h>
 #include <stdarg.h>
@@ -35,6 +36,7 @@
 
 // RASPI includes
 #include "emux_api.h"
+#include "charset.h"
 #include "circle.h"
 #include "joy.h"
 #include "kbd.h"
@@ -52,8 +54,6 @@
 #define BORDER_COLOR 3
 #define TRANSPARENT_COLOR 16
 
-uint8_t *video_font;
-uint16_t video_font_translate[256];
 uint8_t *raw_video_font;
 
 // Is the UI layer enabled? (either OSD or MENU)
@@ -63,6 +63,8 @@ int ui_showing;
 int ui_toggle_pending;
 // One of the quick functions that can be invoked by button assignments
 int pending_emu_quick_func;
+
+static uint32_t ui_menu_revision;
 
 static int osd_active;
 static int ui_commodore_down;
@@ -82,8 +84,8 @@ void ui_pause_disable(void) { ui_pause_emulation(0); }
 int ui_pause_loop_iteration(void) { return ui_pause_active(); }
 
 // Width and height of our text menu in characters
-const int menu_width_chars = 40;
-const int menu_height_chars = 25;
+const int menu_width_chars = UI_MENU_WIDTH_CHARS;
+const int menu_height_chars = UI_MENU_HEIGHT_CHARS;
 
 // Stack of menu screens
 static int current_menu = -1;
@@ -161,6 +163,200 @@ static uint8_t* ui_fb;
 static int ui_fb_pitch;
 static int ui_fb_w;
 static int ui_fb_h;
+static int ui_display_width;
+static int ui_display_height;
+static int ui_layer_display_width;
+static int ui_layer_display_height;
+static int ui_target_width;
+static int ui_target_height;
+static int ui_menu_scale_percent = UI_MENU_SCALE_DEFAULT;
+static int ui_menu_row_gap = UI_MENU_ROW_GAP_DEFAULT;
+
+static void ui_apply_menu_row_gap_layout(void);
+
+static void ui_load_appearance_settings(void) {
+  FILE *fp;
+  char line[128];
+
+  ui_menu_scale_percent = UI_MENU_SCALE_DEFAULT;
+  ui_menu_row_gap = UI_MENU_ROW_GAP_DEFAULT;
+  fp = fopen("/settings-ui.txt", "r");
+  if (fp == NULL) {
+    return;
+  }
+
+  while (fgets(line, sizeof(line), fp) != NULL) {
+    char *end;
+    char *value_start;
+    int *setting;
+    long value;
+    long minimum;
+    long maximum;
+
+    if (strncmp(line, "menu_scale=", 11U) == 0) {
+      value_start = line + 11;
+      setting = &ui_menu_scale_percent;
+      minimum = UI_MENU_SCALE_MIN;
+      maximum = UI_MENU_SCALE_MAX;
+    } else if (strncmp(line, "menu_row_gap=", 13U) == 0) {
+      value_start = line + 13;
+      setting = &ui_menu_row_gap;
+      minimum = UI_MENU_ROW_GAP_MIN;
+      maximum = UI_MENU_ROW_GAP_MAX;
+    } else {
+      continue;
+    }
+    value = strtol(value_start, &end, 10);
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+      ++end;
+    }
+    if (end != value_start && *end == '\0' && value >= minimum &&
+        value <= maximum) {
+      *setting = (int)value;
+    }
+  }
+
+  fclose(fp);
+}
+
+int ui_save_appearance_settings(void) {
+  FILE *fp = fopen("/settings-ui.txt", "w");
+  int failed;
+
+  if (fp == NULL) {
+    return 1;
+  }
+  failed = fprintf(fp, "menu_scale=%d\n", ui_menu_scale_percent) < 0;
+  if (fprintf(fp, "menu_row_gap=%d\n", ui_menu_row_gap) < 0 || ferror(fp)) {
+    failed = 1;
+  }
+  if (fclose(fp) != 0) {
+    failed = 1;
+  }
+  return failed;
+}
+
+static int ui_apply_output_geometry(void) {
+  struct ui_output_geometry geometry;
+  double target_height_scale;
+  int output_changed;
+  int needs_allocation;
+
+  if (!ui_calculate_output_geometry(ui_display_width, ui_display_height,
+                                    ui_menu_scale_percent, &geometry)) {
+    return 0;
+  }
+
+  output_changed = ui_fb != NULL &&
+      (ui_layer_display_width != ui_display_width ||
+       ui_layer_display_height != ui_display_height);
+  needs_allocation = ui_fb == NULL ||
+      ui_fb_w != geometry.source_width ||
+      ui_fb_h != geometry.source_height || output_changed;
+
+  if (!needs_allocation && ui_target_width == geometry.target_width &&
+      ui_target_height == geometry.target_height) {
+    return 1;
+  }
+
+  if (ui_fb != NULL) {
+    circle_hide_fbl(FB_LAYER_UI);
+    ui_showing = 0;
+  }
+
+  if (needs_allocation) {
+    if (ui_fb != NULL) {
+      circle_free_fbl(FB_LAYER_UI);
+      ui_fb = NULL;
+      ui_fb_pitch = 0;
+      ui_fb_w = 0;
+      ui_fb_h = 0;
+    }
+    if (circle_alloc_fbl(FB_LAYER_UI, 0 /* indexed */, &ui_fb,
+                         geometry.source_width, geometry.source_height,
+                         &ui_fb_pitch) != 0) {
+      ui_fb = NULL;
+      ui_fb_pitch = 0;
+      return 0;
+    }
+    ui_fb_w = geometry.source_width;
+    ui_fb_h = geometry.source_height;
+    circle_clear_fbl(FB_LAYER_UI);
+  }
+
+  circle_set_zlayer_fbl(FB_LAYER_UI, 3);
+  circle_set_padding_fbl(FB_LAYER_UI, 0.0, 0.0, 0.0, 0.0);
+  circle_set_halign_fbl(FB_LAYER_UI, 0, 0);
+  circle_set_valign_fbl(FB_LAYER_UI, 0, 0);
+  circle_set_center_offset(FB_LAYER_UI, 0, 0);
+  circle_set_src_rect_fbl(FB_LAYER_UI,
+                          geometry.source_x, geometry.source_y,
+                          geometry.source_width, geometry.source_height);
+
+  /*
+   * SetStretch's two-integer mode has different legacy and Pi 5 semantics:
+   * Pi 5 treats it as an aspect-preserving fit to the complete output.  Use
+   * one exact dimension and derive the other from the output height so both
+   * backends produce the same target rectangle.  The half-pixel bias makes
+   * the backends' integer truncation deterministic.
+   */
+  target_height_scale =
+      ((double)geometry.target_height + 0.5) / (double)ui_display_height;
+  circle_set_stretch_fbl(FB_LAYER_UI, 1.0, target_height_scale,
+                         geometry.target_width, 0, 1, 0);
+
+  ui_layer_display_width = ui_display_width;
+  ui_layer_display_height = ui_display_height;
+  ui_target_width = geometry.target_width;
+  ui_target_height = geometry.target_height;
+  printf("ui: geometry source=%dx%d target=%dx%d display=%dx%d scale=%d%%\n",
+         geometry.source_width, geometry.source_height,
+         geometry.target_width, geometry.target_height,
+         ui_display_width, ui_display_height, ui_menu_scale_percent);
+  return 1;
+}
+
+int ui_get_menu_scale_percent(void) {
+  return ui_menu_scale_percent;
+}
+
+int ui_set_menu_scale_percent(int percent) {
+  int previous;
+
+  if (!ui_menu_scale_is_valid(percent)) {
+    return 0;
+  }
+  if (percent == ui_menu_scale_percent) {
+    return 1;
+  }
+
+  previous = ui_menu_scale_percent;
+  ui_menu_scale_percent = percent;
+  if (ui_display_width > 0 && ui_display_height > 0 &&
+      !ui_apply_output_geometry()) {
+    ui_menu_scale_percent = previous;
+    (void)ui_apply_output_geometry();
+    return 0;
+  }
+  return 1;
+}
+
+int ui_get_menu_row_gap(void) {
+  return ui_menu_row_gap;
+}
+
+int ui_set_menu_row_gap(int gap) {
+  if (!ui_menu_row_gap_is_valid(gap)) {
+    return 0;
+  }
+  if (gap == ui_menu_row_gap) {
+    return 1;
+  }
+
+  ui_menu_row_gap = gap;
+  ui_apply_menu_row_gap_layout();
+  return 1;
+}
 
 void ui_init_menu(void) {
   int i;
@@ -170,6 +366,7 @@ void ui_init_menu(void) {
   ui_enabled = 0;
   ui_showing = 0;
   current_menu = -1;
+  ui_load_appearance_settings();
 
   // Init menu roots
   for (i = 0; i < NUM_MENU_ROOTS; i++) {
@@ -197,10 +394,10 @@ void ui_init_menu(void) {
 // Draw a single character at x,y coords into the offscreen area
 static void ui_draw_char(uint8_t c, int pos_x, int pos_y, int color,
                          uint8_t *dst, int dst_pitch, int stretch,
-                         int translate) {
+                         const uint8_t *font) {
   int x, y, s;
   uint8_t fontchar;
-  uint8_t *font_pos;
+  const uint8_t *font_pos;
   uint8_t *draw_pos;
 
   // Destination is our ui frame buffer if not specified.
@@ -217,12 +414,7 @@ static void ui_draw_char(uint8_t c, int pos_x, int pos_y, int color,
     }
   }
 
-  if (translate) {
-     // Use translation table.
-     font_pos = &(video_font[video_font_translate[c]]);
-  } else {
-     font_pos = &(raw_video_font[c*8]);
-  }
+  font_pos = &font[c * 8U];
   draw_pos = &(dst[pos_x + pos_y * dst_pitch]);
 
   for (y = 0; y < 8*stretch; ++y) {
@@ -240,29 +432,63 @@ static void ui_draw_char(uint8_t c, int pos_x, int pos_y, int color,
 }
 
 // Draw a string of text at location x,y. Does not word wrap.
-void ui_draw_text_buf(const char *text, int x, int y, int color, uint8_t *dst,
-                      int dst_pitch, int stretch) {
+static void ui_draw_text_encoded_buf(const char *text, int x, int y, int color,
+                                     uint8_t *dst, int dst_pitch, int stretch,
+                                     ui_text_encoding_t encoding) {
   int i;
   int x2 = x;
   for (i = 0; i < strlen(text); i++) {
-    if (text[i] == '\n') {
+    uint8_t c = (uint8_t)text[i];
+    const uint8_t *font = (const uint8_t *)font8x8;
+
+    if (encoding == UI_TEXT_ENCODING_LATIN1 && text[i] == '\n') {
       y = y + 8*stretch;
       x2 = x;
     } else {
-      ui_draw_char(text[i], x2, y, color, dst, dst_pitch, stretch, 1);
+      if (encoding == UI_TEXT_ENCODING_LATIN1) {
+        if (c >= 0x80U && c < 0xa0U) {
+          c = (uint8_t)'?';
+        }
+      } else {
+        c = charset_petscii_to_screencode(c, 0);
+        if (encoding == UI_TEXT_ENCODING_PETSCII_NATIVE &&
+            raw_video_font != NULL) {
+          font = raw_video_font;
+        } else {
+          font = (const uint8_t *)font8x8_petscii_upper;
+        }
+      }
+      ui_draw_char(c, x2, y, color, dst, dst_pitch, stretch, font);
       x2 = x2 + 8*stretch;
     }
   }
 }
 
-// No font translation from ascii to petscii
+void ui_draw_text_buf(const char *text, int x, int y, int color, uint8_t *dst,
+                      int dst_pitch, int stretch) {
+  ui_draw_text_encoded_buf(text, x, y, color, dst, dst_pitch, stretch,
+                           UI_TEXT_ENCODING_LATIN1);
+}
+
+void ui_draw_text_petscii_buf(const char *text, int x, int y, int color,
+                              uint8_t *dst, int dst_pitch, int stretch) {
+  ui_draw_text_encoded_buf(text, x, y, color, dst, dst_pitch, stretch,
+                           UI_TEXT_ENCODING_PETSCII_UNSCII);
+}
+
+// Raw machine glyph, used for symbols such as the virtual keyboard keycaps.
 void ui_draw_char_raw(const char singlechar, int x, int y, int color,
                       uint8_t *dst, int dst_pitch, int stretch) {
-   ui_draw_char(singlechar, x, y, color, dst, dst_pitch, stretch, 0);
+   ui_draw_char((uint8_t)singlechar, x, y, color, dst, dst_pitch, stretch,
+                raw_video_font);
 }
 
 void ui_draw_text(const char *text, int x, int y, int color) {
   ui_draw_text_buf(text, x, y, color, NULL, 0, 1);
+}
+
+void ui_draw_text_petscii(const char *text, int x, int y, int color) {
+  ui_draw_text_petscii_buf(text, x, y, color, NULL, 0, 1);
 }
 
 // Draw a rectangle at x/y of given w/h into the offscreen area
@@ -297,12 +523,20 @@ void ui_draw_rect(int x, int y, int w, int h, int color, int fill) {
 // Returns the height/width the given text would occupy if drawn
 int ui_text_width(const char *text) { return 8 * strlen(text); }
 
-static void do_on_value_changed(struct menu_item *item) {
-  if (item->on_value_changed) {
-    item->on_value_changed(menu_cursor_item[current_menu]);
-  } else if (on_value_changed) {
-    on_value_changed(menu_cursor_item[current_menu]);
+void ui_menu_commit(struct menu_item *item) {
+  if (item == NULL) {
+    return;
   }
+  if (item->on_value_changed) {
+    item->on_value_changed(item);
+  } else if (on_value_changed) {
+    on_value_changed(item);
+  }
+  __atomic_add_fetch(&ui_menu_revision, 1U, __ATOMIC_RELEASE);
+}
+
+uint32_t ui_menu_change_revision(void) {
+  return __atomic_load_n(&ui_menu_revision, __ATOMIC_ACQUIRE);
 }
 
 static int do_on_text_field_return(struct menu_item *item) {
@@ -360,6 +594,12 @@ static void ui_key_pressed(long key) {
   // menu text and quick navigation use the labels printed on the keyboard.
   key = keycode_for_ui_layout(
       key, emu_ui_uses_german_keyboard_layout());
+
+  if (menu_roots[current_menu].key_listener_func != NULL &&
+      menu_roots[current_menu].key_listener_func(
+          &menu_roots[current_menu], cur, key)) {
+    return;
+  }
 
   // Anything other than left/right will reset transparency
   // and render current item only flags. They are applicable
@@ -521,6 +761,14 @@ static void ui_key_released(long key) {
     keyboard_shift &= ~2;
     return;
   }
+}
+
+int ui_keyboard_shift_active(void) {
+  return keyboard_shift != 0;
+}
+
+void ui_keyboard_clear_shift(void) {
+  keyboard_shift = 0;
 }
 
 // Do the next ui action based on key pressed and timeout
@@ -694,6 +942,7 @@ static void ui_toggle(void) {
     return;
   }
   ui_enabled = 1 - ui_enabled;
+  __atomic_add_fetch(&ui_menu_revision, 1U, __ATOMIC_RELEASE);
   if (ui_enabled) {
     emux_trap_main_loop_ui();
   }
@@ -716,7 +965,7 @@ static void cursor_pos_updated() {
 
 static void apply_text_field_before_focus_change(struct menu_item *item) {
   if (item != NULL && item->type == TEXTFIELD && !item->disabled) {
-    do_on_value_changed(item);
+    ui_menu_commit(item);
   }
 }
 
@@ -761,7 +1010,12 @@ static void ui_action(long action) {
       break;
     }
     if (cur->disabled) break;
-    if (cur->type == RANGE) {
+    if (action == ACTION_Left && cur->type == FOLDER) {
+      if (cur->is_expanded) {
+        cur->is_expanded = 0;
+        ui_menu_commit(cur);
+      }
+    } else if (cur->type == RANGE) {
       if (action == ACTION_MiniLeft)
          cur->value -= cur->ministep;
       else
@@ -770,7 +1024,7 @@ static void ui_action(long action) {
       if (cur->value < cur->min) {
         cur->value = cur->min;
       } else {
-        do_on_value_changed(menu_cursor_item[current_menu]);
+        ui_menu_commit(menu_cursor_item[current_menu]);
       }
     } else if (cur->type == MULTIPLE_CHOICE) {
       int orig = cur->value;
@@ -785,10 +1039,10 @@ static void ui_action(long action) {
       if (cur->value < 0) {
         cur->value = cur->num_choices - 1;
       }
-      do_on_value_changed(menu_cursor_item[current_menu]);
+      ui_menu_commit(menu_cursor_item[current_menu]);
     } else if (cur->type == TOGGLE) {
       cur->value = 1 - cur->value;
-      do_on_value_changed(menu_cursor_item[current_menu]);
+      ui_menu_commit(menu_cursor_item[current_menu]);
     } else if (cur->type == TEXTFIELD) {
       // Move cursor left
       cur->value--;
@@ -806,7 +1060,12 @@ static void ui_action(long action) {
       break;
     }
     if (cur->disabled) break;
-    if (cur->type == RANGE) {
+    if (action == ACTION_Right && cur->type == FOLDER) {
+      if (!cur->is_expanded) {
+        cur->is_expanded = 1;
+        ui_menu_commit(cur);
+      }
+    } else if (cur->type == RANGE) {
       if (action == ACTION_MiniRight)
          cur->value += cur->ministep;
       else
@@ -815,7 +1074,7 @@ static void ui_action(long action) {
       if (cur->value > cur->max) {
         cur->value = cur->max;
       } else {
-        do_on_value_changed(menu_cursor_item[current_menu]);
+        ui_menu_commit(menu_cursor_item[current_menu]);
       }
     } else if (cur->type == MULTIPLE_CHOICE) {
       int orig = cur->value;
@@ -826,10 +1085,10 @@ static void ui_action(long action) {
       while (cur->choice_disabled[cur->value] && cur->value != orig) {
         cur->value = (cur->value + 1) % cur->num_choices;
       }
-      do_on_value_changed(menu_cursor_item[current_menu]);
+      ui_menu_commit(menu_cursor_item[current_menu]);
     } else if (cur->type == TOGGLE) {
       cur->value = 1 - cur->value;
-      do_on_value_changed(menu_cursor_item[current_menu]);
+      ui_menu_commit(menu_cursor_item[current_menu]);
     } else if (cur->type == TEXTFIELD) {
       // Move cursor right
       cur->value++;
@@ -842,15 +1101,15 @@ static void ui_action(long action) {
     if (cur->disabled) break;
     if (cur->type == FOLDER) {
       cur->is_expanded = 1 - cur->is_expanded;
-      do_on_value_changed(menu_cursor_item[current_menu]);
+      ui_menu_commit(menu_cursor_item[current_menu]);
     } else if (cur->type == CHECKBOX) {
       cur->value = 1 - cur->value;
-      do_on_value_changed(menu_cursor_item[current_menu]);
+      ui_menu_commit(menu_cursor_item[current_menu]);
     } else if (cur->type == TOGGLE) {
       cur->value = 1 - cur->value;
-      do_on_value_changed(menu_cursor_item[current_menu]);
+      ui_menu_commit(menu_cursor_item[current_menu]);
     } else if (cur->type == BUTTON) {
-      do_on_value_changed(menu_cursor_item[current_menu]);
+      ui_menu_commit(menu_cursor_item[current_menu]);
     } else if (cur->type == MULTIPLE_CHOICE) {
       int orig = cur->value;
       cur->value += 1;
@@ -860,10 +1119,10 @@ static void ui_action(long action) {
       while (cur->choice_disabled[cur->value] && cur->value != orig) {
         cur->value = (cur->value + 1) % cur->num_choices;
       }
-      do_on_value_changed(menu_cursor_item[current_menu]);
+      ui_menu_commit(menu_cursor_item[current_menu]);
     } else if (cur->type == TEXTFIELD) {
       if (!do_on_text_field_return(menu_cursor_item[current_menu])) {
-        do_on_value_changed(menu_cursor_item[current_menu]);
+        ui_menu_commit(menu_cursor_item[current_menu]);
       }
     }
     break;
@@ -905,6 +1164,28 @@ void emu_ui_key_interrupt(long key, int pressed) {
   pending_ui_key_pressed[i] = pressed;
   pending_ui_key_tail++;
   circle_lock_release();
+}
+
+// Atomically append a bounded remote-input batch. Refuse the whole batch when
+// it would evict a press or release transition already waiting in the UI ring.
+int emu_ui_key_interrupt_batch(const long *keys, const int *pressed,
+                               size_t count) {
+  if ((count != 0U && (keys == NULL || pressed == NULL)) || count > 16U) {
+    return 0;
+  }
+  circle_lock_acquire();
+  if (count > 16U - (pending_ui_key_tail - pending_ui_key_head)) {
+    circle_lock_release();
+    return 0;
+  }
+  for (size_t n = 0U; n < count; ++n) {
+    int i = (int)(pending_ui_key_tail & 0xfU);
+    pending_ui_key[i] = keys[n];
+    pending_ui_key_pressed[i] = pressed[n];
+    pending_ui_key_tail++;
+  }
+  circle_lock_release();
+  return 1;
 }
 
 // Do key press/releases on the main loop
@@ -1257,6 +1538,15 @@ void ui_menu_set_button_value_fitted(struct menu_item *item,
   }
 }
 
+void ui_menu_set_name_encoding(struct menu_item *item,
+                               ui_text_encoding_t encoding) {
+  if (item == NULL || encoding < UI_TEXT_ENCODING_LATIN1 ||
+      encoding > UI_TEXT_ENCODING_PETSCII_UNSCII) {
+    return;
+  }
+  item->name_encoding = encoding;
+}
+
 struct menu_item *ui_menu_add_range(int id, struct menu_item *folder,
                                     char *name, int min, int max, int step,
                                     int initial_value) {
@@ -1314,7 +1604,8 @@ void ui_menu_set_text_field_display(struct menu_item *item, int width_chars,
 }
 
 static void ui_render_children(struct menu_item *node,
-                               int stack_index, int *index, int indent) {
+                               int stack_index, int *index, int indent,
+                               int row_pitch) {
   while (node != NULL) {
     if (node->hidden) {
       node->render_index = -1;
@@ -1328,7 +1619,8 @@ static void ui_render_children(struct menu_item *node,
     // Render a row
     if (*index >= menu_window_top[stack_index] &&
         *index < menu_window_bottom[stack_index]) {
-      int y = (*index - menu_window_top[stack_index]) * 8 + node->menu_top;
+      int y = (*index - menu_window_top[stack_index]) * row_pitch +
+              node->menu_top;
       if (*index == menu_cursor[stack_index]) {
         ui_draw_rect(node->menu_left, y, node->menu_width, 8, HILITE_COLOR, 1);
         menu_cursor_item[stack_index] = node;
@@ -1346,8 +1638,9 @@ static void ui_render_children(struct menu_item *node,
       if (!ui_render_current_item_only ||
           *index == menu_cursor[stack_index]) {
 
-        ui_draw_text(node->name,
-           node->menu_left + (indent + 1) * 8, y, colour);
+        ui_draw_text_encoded_buf(node->name,
+           node->menu_left + (indent + 1) * 8, y, colour, NULL, 0, 1,
+           node->name_encoding);
 
         if (node->type == FOLDER) {
           if (node->is_expanded)
@@ -1406,9 +1699,9 @@ static void ui_render_children(struct menu_item *node,
           ui_draw_rect(node->menu_left, y + 3, node->menu_width, 2, BORDER_COLOR, 1);
         } else if (node->type == BUTTON) {
           char *dsp_string = get_button_display_str(node);
-          ui_draw_text(dsp_string, node->menu_left + node->menu_width -
-                                       ui_text_width(dsp_string),
-                       y, colour);
+          int value_x = node->menu_left + node->menu_width -
+                        ui_text_width(dsp_string);
+          ui_draw_text(dsp_string, value_x, y, colour);
         } else if (node->type == TEXTFIELD) {
           int field_chars = node->text_field_display_width;
           int field_width;
@@ -1488,7 +1781,8 @@ static void ui_render_children(struct menu_item *node,
     *index = *index + 1;
     if (node->type == FOLDER && node->is_expanded &&
         node->first_child != NULL) {
-      ui_render_children(node->first_child, stack_index, index, indent + 1);
+      ui_render_children(node->first_child, stack_index, index, indent + 1,
+                         row_pitch);
     }
     node = node->next;
   }
@@ -1512,6 +1806,7 @@ static void ui_draw_shadow_text(const char* txt, int *x, int *y, int col) {
 void ui_render_now(int menu_stack_index) {
   int index = 0;
   int indent = 0;
+  const int row_pitch = ui_menu_row_pitch(ui_menu_row_gap);
 
   menu_before_render();
 
@@ -1535,7 +1830,7 @@ void ui_render_now(int menu_stack_index) {
                ptr->menu_height + 2, BORDER_COLOR, 0);
 
   // menu text
-  ui_render_children(ptr, menu_stack_index, &index, indent);
+  ui_render_children(ptr, menu_stack_index, &index, indent, row_pitch);
 
   max_index[menu_stack_index] = index;
 
@@ -1550,17 +1845,10 @@ void ui_render_now(int menu_stack_index) {
     char str2[32];
     int dpx, dpy, fbw, fbh, dw, dh, sw, sh;
 
-    // We're drawing into the UI layer so get it's fb dims.
-    circle_get_fbl_dimensions(FB_LAYER_UI,
-                              &dpx, &dpy,
-                              &fbw, &fbh,
-                              &sw, &sh,
-                              &dw, &dh);
-
-    // We can use the 1st display canvas info because our UI layer
-    // mirrors it's dimensions all the time.
-    int cx = canvas_state[VIC_INDEX].left + sw / 2 - 18 * 8 / 2;
-    int cy = canvas_state[VIC_INDEX].top + sh / 2 - 7 * 10 / 2;
+    int cx = menu_roots[0].menu_left +
+             menu_roots[0].menu_width / 2 - 18 * 8 / 2;
+    int cy = menu_roots[0].menu_top +
+             menu_roots[0].menu_height / 2 - 7 * 10 / 2;
 
     // Now get info about the layer we are djusting
     circle_get_fbl_dimensions(ui_transparent_layer,
@@ -1707,40 +1995,28 @@ struct menu_item *ui_pop_menu(void) {
   return &menu_roots[current_menu];
 }
 
-// left + border_w brings us to the left of gfx area
-// then we center the menu width inside the gfx_w area
-static int calc_root_menu_left() {
-   return
-       canvas_state[VIC_INDEX].left +
-          canvas_state[VIC_INDEX].border_w +
-             canvas_state[VIC_INDEX].gfx_w / 2 -
-                menu_width_chars * 8 / 2;
+static int calc_root_menu_left(void) {
+  return UI_MENU_ROOT_LEFT;
 }
 
-// top + border_h brings us to the top of the gfx area
-// then we center the menu height inside the gfx_h area
-// BUT must take into account raster_skip since we don't
-// double the height of the UI frame buffer like we do
-// the main display.
-static int calc_root_menu_top() {
-   int raster_skip = canvas_state[VIC_INDEX].raster_skip;
-
-   int ui_top = canvas_state[VIC_INDEX].first_displayed_line +
-       canvas_state[VIC_INDEX].max_border_h / raster_skip;
-
-   return ui_top + canvas_state[VIC_INDEX].gfx_h / 2 /
-                      canvas_state[VIC_INDEX].raster_skip -
-                         menu_height_chars * 8 / 2;
+static int calc_root_menu_top(void) {
+  return UI_MENU_ROOT_TOP;
 }
 
 struct menu_item *ui_push_menu(int w_chars, int h_chars) {
 
-  int menu_width = w_chars * 8;
-  int menu_height = h_chars * 8;
+  int menu_width = w_chars * UI_MENU_GLYPH_WIDTH;
+  int menu_height = ui_menu_height_for_rows(h_chars, ui_menu_row_gap);
   if (w_chars < 0)
-    menu_width = menu_width_chars * 8;
+    menu_width = menu_width_chars * UI_MENU_GLYPH_WIDTH;
   if (h_chars < 0)
-    menu_height = menu_height_chars * 8;
+    menu_height = menu_height_chars * UI_MENU_GLYPH_HEIGHT;
+
+  if (menu_height <= 0 || menu_height > UI_MENU_CONTENT_HEIGHT) {
+    printf("FATAL ERROR: invalid menu height %d for %d rows and gap %d\n",
+           menu_height, h_chars, ui_menu_row_gap);
+    return NULL;
+  }
 
   if (current_menu + 1 >= NUM_MENU_ROOTS) {
     printf("FATAL ERROR: tried to push menu beyond NUM_MENU_ROOTS\n");
@@ -1752,12 +2028,14 @@ struct menu_item *ui_push_menu(int w_chars, int h_chars) {
   // Client must set callback on each push so clear here.
   menu_roots[current_menu].on_value_changed = NULL;
   menu_roots[current_menu].left_right_listener_func = NULL;
+  menu_roots[current_menu].key_listener_func = NULL;
   menu_roots[current_menu].on_popped_off = NULL;
   menu_roots[current_menu].on_popped_to = NULL;
 
   // Set dimensions
   menu_roots[current_menu].menu_width = menu_width;
   menu_roots[current_menu].menu_height = menu_height;
+  menu_roots[current_menu].menu_rows = h_chars;
 
   if (w_chars == -2) {
     menu_roots[current_menu].menu_left = calc_root_menu_left();
@@ -1783,17 +2061,18 @@ struct menu_item *ui_push_menu(int w_chars, int h_chars) {
 
   menu_cursor[current_menu] = 0;
   menu_window_top[current_menu] = 0;
-  if (h_chars < 0) {
-     menu_window_bottom[current_menu] = menu_height_chars;
-  } else {
-     menu_window_bottom[current_menu] = h_chars;
-  }
+  menu_window_bottom[current_menu] =
+      ui_menu_visible_rows(menu_height, ui_menu_row_gap);
 
   return &menu_roots[current_menu];
 }
 
 void ui_set_on_value_changed_callback(void (*callback)(struct menu_item *)) {
   on_value_changed = callback;
+}
+
+struct menu_item *ui_menu_root(void) {
+  return current_menu >= 0 ? &menu_roots[0] : NULL;
 }
 
 void ui_set_on_text_field_return_callback(
@@ -2026,14 +2305,18 @@ struct menu_item *ui_confirm_wrapped_cancel_default(char *title,
 // These nav functions are really inefficient...but oh well.
 void ui_page_down() {
   int menu_index = current_menu;
-  for (int n=0;n<menu_height_chars && current_menu == menu_index;n++) {
+  int visible_rows = menu_window_bottom[current_menu] -
+                     menu_window_top[current_menu];
+  for (int n=0;n<visible_rows && current_menu == menu_index;n++) {
     ui_action(ACTION_Down);
   }
 }
 
 void ui_page_up() {
   int menu_index = current_menu;
-  for (int n=0;n<menu_height_chars && current_menu == menu_index;n++) {
+  int visible_rows = menu_window_bottom[current_menu] -
+                     menu_window_top[current_menu];
+  for (int n=0;n<visible_rows && current_menu == menu_index;n++) {
     ui_action(ACTION_Up);
   }
 }
@@ -2212,7 +2495,6 @@ void emu_exit(void) {
   // We should never get here.  If we do, it's probably
   // because essential roms are missing.  So display a message
   // to that effect.
-  int i;
   uint8_t *fb;
   int fb_pitch;
   int fb_width = 320;
@@ -2222,11 +2504,6 @@ void emu_exit(void) {
                       fb_width, fb_height, &fb_pitch);
   circle_clear_fbl(FB_LAYER_VIC);
   circle_show_fbl(FB_LAYER_VIC);
-
-  video_font = (uint8_t *)&font8x8_basic;
-  for (i = 0; i < 256; ++i) {
-    video_font_translate[i] = (8 * (i & 0x7f));
-  }
 
   int x = 0;
   int y = 3;
@@ -2282,45 +2559,92 @@ void emu_exit(void) {
   circle_present_fbl(FB_LAYER_MASK(FB_LAYER_VIC), 0);
 }
 
-static void ui_update_children(struct menu_item *node,
-                               int top, int left) {
+static void ui_update_children(struct menu_item *node, int top, int left,
+                               int width, int height) {
   while (node != NULL) {
     node->menu_top = top;
     node->menu_left = left;
+    node->menu_width = width;
+    node->menu_height = height;
 
     if (node->type == FOLDER && node->first_child != NULL) {
-      ui_update_children(node->first_child, top, left);
+      ui_update_children(node->first_child, top, left, width, height);
     }
     node = node->next;
   }
 }
 
-void ui_geometry_changed(int dpx, int dpy,
-                         int fbw, int fbh,
-                         int sw, int sh,
-                         int dw, int dh) {
+static void ui_reflow_menu_window(int menu_index) {
+  int capacity = ui_menu_visible_rows(
+      menu_roots[menu_index].menu_height, ui_menu_row_gap);
+  int top = menu_window_top[menu_index];
+  int max_top;
 
-  // For the UI, we don't want to double the height like we do
-  // with the actual display, so we take raster_skip into account
-  // here.
-  fbh = fbh / canvas_state[VIC_INDEX].raster_skip;
+  if (capacity < 1) {
+    capacity = 1;
+  }
+  max_top = max_index[menu_index] > capacity
+                ? max_index[menu_index] - capacity
+                : 0;
+  if (top > max_top) {
+    top = max_top;
+  }
+  if (menu_cursor[menu_index] < top) {
+    top = menu_cursor[menu_index];
+  } else if (menu_cursor[menu_index] >= top + capacity) {
+    top = menu_cursor[menu_index] - capacity + 1;
+  }
+  if (top < 0) {
+    top = 0;
+  } else if (top > max_top) {
+    top = max_top;
+  }
+  menu_window_top[menu_index] = top;
+  menu_window_bottom[menu_index] = top + capacity;
+}
 
-  // When the ui geometry changes, we need to update some menu
-  // fields to match.
-  if (fbw != ui_fb_w || fbh != ui_fb_h) {
-     // Destroy old fb.
-     if (ui_fb) {
-        circle_free_fbl(FB_LAYER_UI);
-     }
+static void ui_apply_menu_row_gap_layout(void) {
+  int menu_index;
 
-     circle_alloc_fbl(FB_LAYER_UI, 0 /* indexed */, &ui_fb,
-                      fbw, fbh, &ui_fb_pitch);
-     circle_clear_fbl(FB_LAYER_UI);
-     ui_fb_w = fbw;
-     ui_fb_h = fbh;
-   }
-   menu_roots[0].menu_top = calc_root_menu_top();
-   menu_roots[0].menu_left = calc_root_menu_left();
-   ui_update_children(&menu_roots[0],
-      menu_roots[0].menu_top, menu_roots[0].menu_left);
+  if (current_menu < 0) {
+    return;
+  }
+
+  for (menu_index = 0; menu_index <= current_menu; ++menu_index) {
+    struct menu_item *root = &menu_roots[menu_index];
+    int height = root->menu_rows < 0
+                     ? UI_MENU_CONTENT_HEIGHT
+                     : ui_menu_height_for_rows(root->menu_rows,
+                                               ui_menu_row_gap);
+
+    assert(height > 0 && height <= UI_MENU_CONTENT_HEIGHT);
+    root->menu_height = height;
+    root->menu_top = root->menu_rows < 0
+                         ? menu_roots[0].menu_top
+                         : menu_roots[0].menu_top +
+                               (menu_roots[0].menu_height - height) / 2;
+    ui_update_children(root, root->menu_top, root->menu_left,
+                       root->menu_width, root->menu_height);
+    ui_reflow_menu_window(menu_index);
+  }
+}
+
+void ui_output_geometry_changed(int display_width, int display_height) {
+  if (display_width <= 0 || display_height <= 0) {
+    return;
+  }
+
+  ui_display_width = display_width;
+  ui_display_height = display_height;
+  if (!ui_apply_output_geometry()) {
+    printf("ui: failed to configure output geometry for %dx%d\n",
+           display_width, display_height);
+    return;
+  }
+
+  menu_roots[0].menu_top = calc_root_menu_top();
+  menu_roots[0].menu_left = calc_root_menu_left();
+  ui_update_children(&menu_roots[0], menu_roots[0].menu_top,
+                     menu_roots[0].menu_left, menu_roots[0].menu_width,
+                     menu_roots[0].menu_height);
 }

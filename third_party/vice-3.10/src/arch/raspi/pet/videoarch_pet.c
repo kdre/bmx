@@ -77,15 +77,9 @@ void set_video_font(void) {
   }
 
   if (bytes_read >= 2048) {
-    video_font = chargen + 0x400;
     raw_video_font = chargen;
   } else {
-    video_font = (uint8_t *)&font8x8_basic;
-    raw_video_font = (uint8_t *)&font8x8_basic;
-  }
-
-  for (i = 0; i < 256; ++i) {
-    video_font_translate[i] = 8 * ascii_to_petscii[i];
+    raw_video_font = (uint8_t *)&font8x8;
   }
 }
 

@@ -1184,8 +1184,10 @@ int bmx_boot_plan_set_developer_mode(struct bmx_boot_plan *plan, int enabled) {
   return bmx_boot_plan_set_cmdline_option(plan, "developer_mode", "1");
 }
 
-int bmx_boot_plan_set_developer_password(struct bmx_boot_plan *plan,
-                                         const char *password) {
+static int boot_plan_set_encoded_password(struct bmx_boot_plan *plan,
+                                          const char *key,
+                                          const char *password,
+                                          size_t maximum_size) {
   static const char hex[] = "0123456789ABCDEF";
   char encoded[BMX_DEVELOPER_PASSWORD_MAX_LEN * 3 + 1];
   size_t input_size;
@@ -1196,11 +1198,11 @@ int bmx_boot_plan_set_developer_password(struct bmx_boot_plan *plan,
     return 1;
   }
   input_size = strlen(password);
-  if (input_size > BMX_DEVELOPER_PASSWORD_MAX_LEN) {
+  if (input_size > maximum_size || maximum_size > BMX_DEVELOPER_PASSWORD_MAX_LEN) {
     return 1;
   }
   if (input_size == 0) {
-    return bmx_boot_plan_manage_cmdline_key(plan, "developer_password");
+    return bmx_boot_plan_manage_cmdline_key(plan, key);
   }
 
   for (i = 0; i < input_size; ++i) {
@@ -1217,8 +1219,29 @@ int bmx_boot_plan_set_developer_password(struct bmx_boot_plan *plan,
     }
   }
   encoded[output_size] = '\0';
-  return bmx_boot_plan_set_cmdline_option(plan, "developer_password",
-                                          encoded);
+  return bmx_boot_plan_set_cmdline_option(plan, key, encoded);
+}
+
+int bmx_boot_plan_set_developer_password(struct bmx_boot_plan *plan,
+                                         const char *password) {
+  return boot_plan_set_encoded_password(
+      plan, "developer_password", password, BMX_DEVELOPER_PASSWORD_MAX_LEN);
+}
+
+int bmx_boot_plan_set_api_mode(struct bmx_boot_plan *plan, int enabled) {
+  if (enabled != 0 && enabled != 1) {
+    return 1;
+  }
+  if (!enabled) {
+    return bmx_boot_plan_manage_cmdline_key(plan, "api_mode");
+  }
+  return bmx_boot_plan_set_cmdline_option(plan, "api_mode", "1");
+}
+
+int bmx_boot_plan_set_api_password(struct bmx_boot_plan *plan,
+                                   const char *password) {
+  return boot_plan_set_encoded_password(
+      plan, "api_password", password, BMX_API_PASSWORD_MAX_LEN);
 }
 
 int bmx_boot_plan_set_developer_log_buffer_kb(struct bmx_boot_plan *plan,

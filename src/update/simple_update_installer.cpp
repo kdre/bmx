@@ -49,6 +49,33 @@ bool IsReservedPath(const char *path)
            FatPathEqual(path, "BMX-UPD.ZIP.part");
 }
 
+bool HasManagedReplacement(const ReleaseManifest &manifest, const char *path)
+{
+    for (size_t index = 0U; index < manifest.asset.file_count; ++index) {
+        const ManifestFile &file = manifest.asset.files[index];
+        if (FatPathEqual(file.path, path) &&
+            (file.policy == ManifestFilePolicy::Kernel ||
+             file.policy == ManifestFilePolicy::ManagedReplace)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RemoveSignedFile(UpdateFileSystem *file_system, const char *path,
+                      size_t *removed_count)
+{
+    UpdateFileStat stat;
+    if (!file_system->Stat(path, &stat) ||
+        (stat.type != UpdateNodeType::Missing &&
+         stat.type != UpdateNodeType::RegularFile)) return false;
+    if (stat.type == UpdateNodeType::Missing) return true;
+    if (!file_system->RemoveFile(path) ||
+        !file_system->SyncContainingDirectory(path)) return false;
+    if (removed_count != 0) ++*removed_count;
+    return true;
+}
+
 bool WorkspaceValid(const SimpleUpdateWorkspace &workspace,
                     const ReleaseManifest &manifest)
 {
@@ -281,8 +308,9 @@ bool IsBuildIdentity(const ManifestFile &file)
 
 unsigned InstallPass(const ManifestFile &file)
 {
-    if (IsBuildIdentity(file)) return 2U;
+    if (IsBuildIdentity(file)) return 3U;
     if (file.policy == ManifestFilePolicy::Kernel) return 1U;
+    if (file.policy == ManifestFilePolicy::ConfigTemplate) return 2U;
     return 0U;
 }
 
@@ -301,6 +329,8 @@ SimpleUpdateResult SimpleUpdateInstaller::Install(
     SimpleUpdateResult result = Result(SimpleUpdateStatus::InvalidArgument);
     if (file_system_ == 0 || archive == 0 || !archive_bytes_authenticated ||
         manifest.asset.files == 0 || manifest.asset.file_count == 0U ||
+        (manifest.asset.configuration_reset_required &&
+         !reset_configuration) ||
         !WorkspaceValid(workspace, manifest)) {
         return result;
     }
@@ -321,6 +351,43 @@ SimpleUpdateResult SimpleUpdateInstaller::Install(
         }
     }
     if (build_identity_count != 1U) return result;
+    if (manifest.asset.deletion_count != 0U &&
+        manifest.asset.deletions == 0) return result;
+    if (manifest.asset.replacement_count != 0U &&
+        manifest.asset.replacements == 0) return result;
+    for (size_t index = 0U; index < manifest.asset.deletion_count; ++index) {
+        const char *const path = manifest.asset.deletions[index].path;
+        if (IsReservedPath(path)) {
+            result.status = SimpleUpdateStatus::ReservedPathCollision;
+            return result;
+        }
+        for (size_t file_index = 0U;
+             file_index < manifest.asset.file_count; ++file_index) {
+            if (FatPathEqual(path,
+                             manifest.asset.files[file_index].path)) {
+                result.status = SimpleUpdateStatus::InvalidArgument;
+                return result;
+            }
+        }
+    }
+    for (size_t index = 0U; index < manifest.asset.replacement_count; ++index) {
+        const ManifestReplacement &replacement =
+            manifest.asset.replacements[index];
+        if (IsReservedPath(replacement.path) ||
+            FatPathEqual(replacement.path, replacement.replaced_by) ||
+            !HasManagedReplacement(manifest, replacement.replaced_by)) {
+            result.status = SimpleUpdateStatus::ReservedPathCollision;
+            return result;
+        }
+        for (size_t file_index = 0U;
+             file_index < manifest.asset.file_count; ++file_index) {
+            if (FatPathEqual(replacement.path,
+                             manifest.asset.files[file_index].path)) {
+                result.status = SimpleUpdateStatus::InvalidArgument;
+                return result;
+            }
+        }
+    }
 
     ZipExpectedInventory expected;
     if (!BuildExpectedInventory(manifest, workspace, &expected)) return result;
@@ -460,6 +527,39 @@ SimpleUpdateResult SimpleUpdateInstaller::Install(
             }
             installed += item.size;
         }
+    }
+    for (size_t index = 0U; index < manifest.asset.deletion_count; ++index) {
+        if (!RemoveSignedFile(file_system_,
+                              manifest.asset.deletions[index].path,
+                              &result.deleted_file_count)) {
+            result.status = SimpleUpdateStatus::PublishFailed;
+            return result;
+        }
+    }
+    for (size_t index = 0U; index < manifest.asset.replacement_count; ++index) {
+        if (!RemoveSignedFile(file_system_,
+                              manifest.asset.replacements[index].path,
+                              &result.deleted_file_count)) {
+            result.status = SimpleUpdateStatus::PublishFailed;
+            return result;
+        }
+    }
+    for (size_t index = 0U; index < manifest.asset.file_count; ++index) {
+        const ManifestFile &item = manifest.asset.files[index];
+        if (InstallPass(item) != 3U ||
+            workspace.file_actions[index] != InstallFile) {
+            continue;
+        }
+        SingleFileExtractSink sink(file_system_, item.path, installed,
+                                   stage_total, progress);
+        result.zip_status = reader.ExtractOne(
+            item.path, expected, &sink, &hash_sink);
+        if (result.zip_status != ZipStatus::Ok) {
+            (void) file_system_->RemoveFile(kSimpleUpdateTemporaryPath);
+            result.status = SimpleUpdateStatus::ExtractFailed;
+            return result;
+        }
+        installed += item.size;
     }
     if (!file_system_->RemoveFile(kSimpleUpdateTemporaryPath) ||
         !Report(progress, SimpleUpdatePhase::Install, stage_total,

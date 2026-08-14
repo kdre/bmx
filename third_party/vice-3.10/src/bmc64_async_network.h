@@ -18,6 +18,9 @@ enum {
 };
 
 bmc64_async_net_handle_t *bmc64_async_net_start(const char *target);
+// Enables the fixed rings before VICE starts. The NetworkService owns pumping.
+int bmc64_async_net_initialize(void);
+void bmc64_async_net_process(void);
 void bmc64_async_net_stop(bmc64_async_net_handle_t *handle);
 int bmc64_async_net_status(bmc64_async_net_handle_t *handle);
 int bmc64_async_net_error(bmc64_async_net_handle_t *handle);

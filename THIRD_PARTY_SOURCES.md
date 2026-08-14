@@ -139,7 +139,7 @@ its pinned checksum, validates the archive layout and records its source hash
 in each generated Circle tree. It never downloads source code.
 
 Circle compatibility code remains in
-`third_party/circle-stdlib-patches/0011-mbedtls-3.6.7-compat.patch`; the upstream
+`third_party/circle-stdlib-patches/0009-mbedtls-3.6.7-compat.patch`; the upstream
 Mbed TLS source is not embedded into that patch.
 
 ## miniz raw-Deflate decoder

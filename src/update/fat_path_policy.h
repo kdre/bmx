@@ -40,6 +40,13 @@ FatPathValidationStatus ValidateFatRelativePath(
 FatPathValidationStatus ValidateDeveloperFatRelativePath(
     const char *path, size_t maximum_path_bytes);
 
+// Media API paths use normal FatFs/OEM names, but their first component is
+// restricted to one of the user-content roots: disks, tapes, carts or
+// snapshots.  System roots such as roms and the volume root itself are never
+// accepted by this policy.
+FatPathValidationStatus ValidateMediaFatRelativePath(
+    const char *path, size_t maximum_path_bytes);
+
 }  // namespace update
 }  // namespace bmx
 

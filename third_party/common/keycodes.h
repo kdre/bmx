@@ -166,6 +166,13 @@ int keycode_format_vkm_token(long keycode, char *buffer, size_t buffer_size);
 // Returns -1 when the token is unknown.
 long keycode_from_vkm_token(const char *token);
 
+// Format the unmodified label printed on the physical key at this USB HID
+// position.  The German labels are encoded as single-byte Latin-1 for the
+// shared BMX UI font.  This function is display-only; the raw keycode must
+// still be used when serializing a .vkm.
+int keycode_format_keycap(long keycode, int german_layout,
+                          char *buffer, size_t buffer_size);
+
 // USB boot-keyboard usages describe physical key positions.  Translate the
 // positions whose labels differ before the menu turns them into text.
 long keycode_for_ui_layout(long keycode, int german_layout);

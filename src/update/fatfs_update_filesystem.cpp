@@ -53,6 +53,9 @@ bool ValidateRelativePath(const char *path, size_t *length,
         policy == FatFsUpdatePathPolicy::Developer
             ? ValidateDeveloperFatRelativePath(
                   path, kFatFsUpdateFileSystemRelativePathBytes)
+        : policy == FatFsUpdatePathPolicy::Media
+            ? ValidateMediaFatRelativePath(
+                  path, kFatFsUpdateFileSystemRelativePathBytes)
             : ValidateFatRelativePath(
                   path, kFatFsUpdateFileSystemRelativePathBytes);
     if (status != FatPathValidationStatus::Ok) {
@@ -533,6 +536,93 @@ bool FatFsUpdateFileSystem::RemoveFile(const char *path)
 #endif
 }
 
+bool FatFsUpdateFileSystem::RemoveDirectory(
+    const char *path, bool recursive, UpdateCooperativeYield yield,
+    void *yield_context)
+{
+    char root[kFatFsUpdateFileSystemAbsolutePathBytes];
+    if (!Resolve(path, root, sizeof(root))) return false;
+#if BMX_UPDATE_FILESYSTEM_HAS_FATFS
+    UpdateFileStat stat;
+    if (!StatAbsolute(root, &stat)) return false;
+    if (stat.type == UpdateNodeType::Missing) return true;
+    if (stat.type != UpdateNodeType::Directory) return false;
+    if (!recursive) return f_unlink(root) == FR_OK;
+
+    // Walk depth-first using the current path as the stack. Each directory is
+    // closed before descending, so memory use is constant even for deep trees.
+    char current[kFatFsUpdateFileSystemAbsolutePathBytes];
+    strcpy(current, root);
+    for (;;) {
+#if defined(BMX_TEST_FAKE_FF_DIRECTORY_TYPE)
+        FF_DIR directory;
+#else
+        DIR directory;
+#endif
+        memset(&directory, 0, sizeof(directory));
+        if (f_opendir(&directory, current) != FR_OK) return false;
+
+        FILINFO info;
+        bool found = false;
+        bool directory_child = false;
+        char child[kFatFsUpdateFileSystemAbsolutePathBytes];
+        for (;;) {
+            memset(&info, 0, sizeof(info));
+            const FRESULT read_status = f_readdir(&directory, &info);
+            if (read_status != FR_OK) {
+                (void)f_closedir(&directory);
+                return false;
+            }
+            if (info.fname[0] == '\0') break;
+            if ((info.fname[0] == '.' && info.fname[1] == '\0') ||
+                (info.fname[0] == '.' && info.fname[1] == '.' &&
+                 info.fname[2] == '\0')) {
+                continue;
+            }
+            const size_t current_size = strlen(current);
+            const size_t name_size = strlen(info.fname);
+            if (current_size + 1U + name_size + 1U > sizeof(child)) {
+                (void)f_closedir(&directory);
+                return false;
+            }
+            memcpy(child, current, current_size);
+            child[current_size] = '/';
+            memcpy(child + current_size + 1U, info.fname, name_size + 1U);
+            found = true;
+            directory_child = (info.fattrib & AM_DIR) != 0U;
+            break;
+        }
+        if (f_closedir(&directory) != FR_OK) return false;
+
+        if (found && directory_child) {
+            strcpy(current, child);
+            continue;
+        }
+        if (found) {
+            if (f_unlink(child) != FR_OK) return false;
+            if (yield != 0) yield(yield_context);
+            continue;
+        }
+
+        if (f_unlink(current) != FR_OK) return false;
+        if (yield != 0) yield(yield_context);
+        if (SameFatPath(current, root)) {
+            UpdateFileStat after;
+            return StatAbsolute(root, &after) &&
+                   after.type == UpdateNodeType::Missing;
+        }
+        char *slash = strrchr(current, '/');
+        if (slash == 0 || slash <= current + 2U) return false;
+        *slash = '\0';
+    }
+#else
+    (void)recursive;
+    (void)yield;
+    (void)yield_context;
+    return false;
+#endif
+}
+
 bool FatFsUpdateFileSystem::Rename(const char *source,
                                    const char *destination,
                                    bool replace_existing)
@@ -550,13 +640,15 @@ bool FatFsUpdateFileSystem::Rename(const char *source,
     UpdateFileStat destination_stat;
     if (!StatAbsolute(source_absolute, &source_stat) ||
         !StatAbsolute(destination_absolute, &destination_stat) ||
-        source_stat.type != UpdateNodeType::RegularFile ||
+        (source_stat.type != UpdateNodeType::RegularFile &&
+         source_stat.type != UpdateNodeType::Directory) ||
         destination_stat.type == UpdateNodeType::Directory ||
         destination_stat.type == UpdateNodeType::Other) {
         return false;
     }
     if (destination_stat.type != UpdateNodeType::Missing) {
-        if (!replace_existing) {
+        if (!replace_existing ||
+            source_stat.type != UpdateNodeType::RegularFile) {
             return false;
         }
         if (f_unlink(destination_absolute) != FR_OK) return false;
@@ -567,8 +659,9 @@ bool FatFsUpdateFileSystem::Rename(const char *source,
     return StatAbsolute(source_absolute, &source_after) &&
            StatAbsolute(destination_absolute, &destination_after) &&
            source_after.type == UpdateNodeType::Missing &&
-           destination_after.type == UpdateNodeType::RegularFile &&
-           destination_after.size == source_stat.size;
+           destination_after.type == source_stat.type &&
+           (source_stat.type != UpdateNodeType::RegularFile ||
+            destination_after.size == source_stat.size);
 #else
     (void)replace_existing;
     return false;

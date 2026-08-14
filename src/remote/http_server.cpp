@@ -4,7 +4,7 @@ namespace bmx {
 namespace remote {
 
 HttpServerConfig::HttpServerConfig()
-    : maximum_connections(2U),
+    : maximum_connections(kHttpMaximumConnections),
       header_timeout_ms(10000U),
       body_timeout_ms(300000U),
       idle_timeout_ms(10000U),
@@ -63,7 +63,11 @@ bool HttpConnection::Begin(HttpTransport *transport, HttpRouter *router,
 
 bool HttpConnection::Expired(uint64_t now_ms, uint64_t start_ms,
                              uint64_t duration_ms) {
-    return duration_ms != 0U && now_ms - start_ms >= duration_ms;
+    // Cooperative response polling may advance a connection recursively with
+    // a fresher timestamp before the outer server poll reaches that slot.
+    // The outer timestamp is then stale, not evidence of a huge timeout.
+    return duration_ms != 0U && now_ms >= start_ms &&
+           now_ms - start_ms >= duration_ms;
 }
 
 const HttpRequestHead *HttpConnection::ErrorRequest() const {
@@ -273,7 +277,7 @@ void HttpConnection::Terminate(HttpCompletionReason reason,
     state_ = kIdle;
 }
 
-void HttpConnection::PollResponse(uint64_t now_ms) {
+void HttpConnection::PollResponse(uint64_t now_ms, bool *poll_made_progress) {
     if (writer_.streaming() && read_offset_ < read_size_) {
         Terminate(HttpCompletionReason::TransportError,
                   HttpBodyAbortReason::UnexpectedData);
@@ -291,10 +295,13 @@ void HttpConnection::PollResponse(uint64_t now_ms) {
         return;
     }
 
-    bool made_progress = false;
+    bool response_progress = false;
     const HttpResponseWriteStatus status =
-        writer_.Poll(transport_, &made_progress);
-    if (made_progress) last_progress_ms_ = now_ms;
+        writer_.Poll(transport_, &response_progress);
+    if (response_progress) {
+        last_progress_ms_ = now_ms;
+        if (poll_made_progress != 0) *poll_made_progress = true;
+    }
     switch (status) {
     case HttpResponseWriteStatus::Pending:
         return;
@@ -337,7 +344,8 @@ void HttpConnection::PollResponse(uint64_t now_ms) {
     }
 }
 
-bool HttpConnection::Poll(uint64_t now_ms) {
+bool HttpConnection::Poll(uint64_t now_ms, bool *made_progress) {
+    if (made_progress != 0) *made_progress = false;
     if (!active_) return false;
     if (phase_timing_pending_) {
         phase_timing_pending_ = false;
@@ -345,7 +353,7 @@ bool HttpConnection::Poll(uint64_t now_ms) {
         last_progress_ms_ = now_ms;
     }
     if (state_ == kWritingResponse) {
-        PollResponse(now_ms);
+        PollResponse(now_ms, made_progress);
         return active_;
     }
 
@@ -364,6 +372,7 @@ bool HttpConnection::Poll(uint64_t now_ms) {
     }
 
     if (read_offset_ < read_size_) {
+        if (made_progress != 0) *made_progress = true;
         ProcessBufferedInput(now_ms);
         return active_;
     }
@@ -380,6 +389,7 @@ bool HttpConnection::Poll(uint64_t now_ms) {
         read_size_ = result.size;
         read_offset_ = 0U;
         last_progress_ms_ = now_ms;
+        if (made_progress != 0) *made_progress = true;
         ProcessBufferedInput(now_ms);
         return active_;
     case HttpIoStatus::WouldBlock:
@@ -444,7 +454,8 @@ void HttpServer::ReleaseFinished() {
     }
 }
 
-HttpServerPollStatus HttpServer::Poll(uint64_t now_ms) {
+HttpServerPollStatus HttpServer::Poll(uint64_t now_ms, bool *made_progress) {
+    if (made_progress != 0) *made_progress = false;
     if (!valid_) return HttpServerPollStatus::InvalidConfiguration;
     ReleaseFinished();
 
@@ -469,6 +480,7 @@ HttpServerPollStatus HttpServer::Poll(uint64_t now_ms) {
                 listener_->Release(accepted);
                 return HttpServerPollStatus::ListenerError;
             }
+            if (made_progress != 0) *made_progress = true;
         } else if (accepted != 0) {
             return HttpServerPollStatus::ListenerError;
         }
@@ -477,8 +489,12 @@ HttpServerPollStatus HttpServer::Poll(uint64_t now_ms) {
     for (size_t i = 0U; i < config_.maximum_connections; ++i) {
         if (connections_[i].active() && !polling_[i]) {
             polling_[i] = true;
-            connections_[i].Poll(now_ms);
+            bool connection_progress = false;
+            connections_[i].Poll(now_ms, &connection_progress);
             polling_[i] = false;
+            if (connection_progress && made_progress != 0) {
+                *made_progress = true;
+            }
         }
     }
     ReleaseFinished();

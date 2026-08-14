@@ -51,6 +51,7 @@ int g_effective_width = 0;
 int g_effective_height = 0;
 bool g_kms_active = false;
 bool g_interpolation_enabled = false;
+bool g_force_software_present = false;
 constexpr unsigned kKmsBufferCount = 2;
 pi5kms::Framebuffer g_kms_framebuffers[kKmsBufferCount] = {};
 pi5kms::Framebuffer g_kms_hwscale_framebuffers[FB_NUM_LAYERS][kKmsBufferCount] = {};
@@ -1163,7 +1164,8 @@ void FrameBufferLayer::PresentLayerList(bool sync, FrameBufferLayer **layers,
 
   sort_layers(active, active_count);
   const bool wait_for_vblank = sync || has_ui_layer;
-  if (TryKmsDirectScanout(active, active_count, screen_w, screen_h,
+  if (!g_force_software_present &&
+      TryKmsDirectScanout(active, active_count, screen_w, screen_h,
                           wait_for_vblank)) {
     if (sync && screen_ != nullptr) {
       screen_->WaitForVerticalSync();
@@ -1229,6 +1231,38 @@ void FrameBufferLayer::PresentLayerList(bool sync, FrameBufferLayer **layers,
              row_bytes);
     }
   }
+}
+
+bool FrameBufferLayer::CaptureDimensions(int *width, int *height) {
+  if (width == nullptr || height == nullptr || !initialized_) return false;
+  *width = g_effective_width;
+  *height = g_effective_height;
+  return *width > 0 && *height > 0;
+}
+
+bool FrameBufferLayer::CaptureRgb888(uint8_t *output, int width, int height,
+                                     unsigned pitch) {
+  if (output == nullptr || width <= 0 || height <= 0 ||
+      pitch < (unsigned)width * 3U || !initialized_ ||
+      g_effective_width <= 0 || g_effective_height <= 0 ||
+      g_compose_pixels == nullptr) return false;
+  g_force_software_present = true;
+  PresentLayerList(false, nullptr, 0U);
+  g_force_software_present = false;
+  for (int y = 0; y < height; ++y) {
+    const int source_y = (int)(((int64_t)y * g_effective_height) / height);
+    const uint8_t *source =
+        g_compose_pixels + source_y * g_compose_pitch_bytes;
+    uint8_t *destination = output + (size_t)y * pitch;
+    for (int x = 0; x < width; ++x) {
+      const int source_x = (int)(((int64_t)x * g_effective_width) / width);
+      const uint32_t argb = read_argb_pixel(source, source_x);
+      destination[x * 3] = (uint8_t)(argb >> 16);
+      destination[x * 3 + 1] = (uint8_t)(argb >> 8);
+      destination[x * 3 + 2] = (uint8_t)argb;
+    }
+  }
+  return true;
 }
 
 void FrameBufferLayer::SetPalette(uint8_t index, uint16_t rgb565) {

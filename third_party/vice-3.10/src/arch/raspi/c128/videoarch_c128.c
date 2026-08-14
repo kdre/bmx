@@ -56,12 +56,7 @@ void set_refresh_rate(struct video_canvas_s *canvas) {
 }
 
 void set_video_font(void) {
-  int i;
-  video_font = mem_chargen_rom + 0x800;
   raw_video_font = mem_chargen_rom;
-  for (i = 0; i < 256; ++i) {
-    video_font_translate[i] = 8 * ascii_to_petscii[i];
-  }
 }
 
 unsigned int *raspi_get_palette(int display, int index) {

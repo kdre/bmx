@@ -135,16 +135,20 @@ BMC64_OBJS = main.o kernel.o mouse_input.o usb_keyboard_state.o viceoptions.o vi
              crt_pi_idx.o crt_pi_rgb.o \
              vicesound.o new_io.o errno_stubs.o async_network.o \
              config/runtime_config.o machines/machine_descriptor.o \
-             network/network_manager.o \
+             network/network_service.o \
              platform/platform.o vice_api.o \
              remote/circle_discovery_responder.o \
-             remote/circle_http_transport.o remote/command_mailbox.o \
+	             remote/bounded_json_writer.o \
+	             remote/circle_http_transport.o remote/command_mailbox.o \
+	             remote/bmx_api_router.o \
+	             remote/remote_capture.o \
              remote/developer_discovery_codec.o \
              remote/developer_file_transaction.o \
              remote/developer_log_device.o remote/developer_log_ring.o \
              remote/circle_usb_diagnostic_adapter.o \
              remote/developer_usb_diagnostic.o \
              remote/developer_router.o remote/developer_ui_router.o \
+	             remote/file_response_stream.o \
              remote/http_parser.o \
              remote/http_response_writer.o remote/http_router.o \
              remote/http_server.o remote/http_types.o \
@@ -330,7 +334,7 @@ CFLAGS += -DBMC64_NET_LOG_LEVEL=$(BMC64_NET_LOG_LEVEL)
 CPPFLAGS += -DBMC64_NET_LOG_LEVEL=$(BMC64_NET_LOG_LEVEL)
 endif
 
-BMX_UPDATE_UPDATER_ABI ?= 1
+BMX_UPDATE_UPDATER_ABI ?= 2
 CFLAGS += -DBMX_UPDATE_UPDATER_ABI=$(BMX_UPDATE_UPDATER_ABI)
 CPPFLAGS += -DBMX_UPDATE_UPDATER_ABI=$(BMX_UPDATE_UPDATER_ABI)
 

@@ -1,5 +1,5 @@
 diff --git a/libs/circle/include/circle/usb/usbdevice.h b/libs/circle/include/circle/usb/usbdevice.h
-index d188be6..1eaf457 100644
+index d188be66..1eaf4574 100644
 --- a/libs/circle/include/circle/usb/usbdevice.h
 +++ b/libs/circle/include/circle/usb/usbdevice.h
 @@ -124,6 +124,8 @@ private:
@@ -12,7 +12,7 @@ index d188be6..1eaf457 100644
  #if RASPPI >= 4
  	unsigned m_nRootHubPortID;
 diff --git a/libs/circle/include/circle/usb/usbdevicefactory.h b/libs/circle/include/circle/usb/usbdevicefactory.h
-index b0ca55f..5663652 100644
+index b0ca55f4..5663652a 100644
 --- a/libs/circle/include/circle/usb/usbdevicefactory.h
 +++ b/libs/circle/include/circle/usb/usbdevicefactory.h
 @@ -36,6 +36,7 @@ class CUSBDeviceFactory
@@ -25,7 +25,7 @@ index b0ca55f..5663652 100644
  	// for "int3-0-0" devices
 diff --git a/libs/circle/include/circle/usb/usbdiagnosticobserver.h b/libs/circle/include/circle/usb/usbdiagnosticobserver.h
 new file mode 100644
-index 0000000..7ac0b3e
+index 00000000..7ac0b3ee
 --- /dev/null
 +++ b/libs/circle/include/circle/usb/usbdiagnosticobserver.h
 @@ -0,0 +1,87 @@
@@ -117,7 +117,7 @@ index 0000000..7ac0b3e
 +
 +#endif
 diff --git a/libs/circle/include/circle/usb/usbhiddevice.h b/libs/circle/include/circle/usb/usbhiddevice.h
-index 403c9e7..85a02c0 100644
+index 403c9e74..85a02c0d 100644
 --- a/libs/circle/include/circle/usb/usbhiddevice.h
 +++ b/libs/circle/include/circle/usb/usbhiddevice.h
 @@ -33,12 +33,15 @@ public:
@@ -139,7 +139,7 @@ index 403c9e7..85a02c0 100644
  				    unsigned nReportSize) = 0;		// pReport is 0 on failure
 diff --git a/libs/circle/include/circle/usb/usbhiddiagnostic.h b/libs/circle/include/circle/usb/usbhiddiagnostic.h
 new file mode 100644
-index 0000000..2613882
+index 00000000..2613882d
 --- /dev/null
 +++ b/libs/circle/include/circle/usb/usbhiddiagnostic.h
 @@ -0,0 +1,38 @@
@@ -182,7 +182,7 @@ index 0000000..2613882
 +
 +#endif
 diff --git a/libs/circle/include/circle/usb/usbhostcontroller.h b/libs/circle/include/circle/usb/usbhostcontroller.h
-index 71c5239..13d174b 100644
+index 71c52395..13d174b9 100644
 --- a/libs/circle/include/circle/usb/usbhostcontroller.h
 +++ b/libs/circle/include/circle/usb/usbhostcontroller.h
 @@ -24,6 +24,7 @@
@@ -246,7 +246,7 @@ index 71c5239..13d174b 100644
  	boolean m_bFirstUpdateCall;
  
 diff --git a/libs/circle/include/circle/usb/usbsubsystem.h b/libs/circle/include/circle/usb/usbsubsystem.h
-index 5923786..d4c9f7c 100644
+index 59237866..d4c9f7c7 100644
 --- a/libs/circle/include/circle/usb/usbsubsystem.h
 +++ b/libs/circle/include/circle/usb/usbsubsystem.h
 @@ -26,6 +26,7 @@
@@ -267,7 +267,7 @@ index 5923786..d4c9f7c 100644
  			   unsigned char ucType, unsigned char ucIndex,
  			   void *pBuffer, unsigned nBufSize,
 diff --git a/libs/circle/lib/usb/Makefile b/libs/circle/lib/usb/Makefile
-index 4ee44e8..c849c97 100644
+index 4ee44e80..c849c97c 100644
 --- a/libs/circle/lib/usb/Makefile
 +++ b/libs/circle/lib/usb/Makefile
 @@ -28,7 +28,7 @@ OBJS	= lan7800.o smsc951x.o usbbluetooth.o usbcdcethernet.o usbfloppydevice.o \
@@ -280,10 +280,10 @@ index 4ee44e8..c849c97 100644
  	  usbstandardhub.o usbstring.o usbserial.o usbserialhost.o usbserialch341.o usbserialcp210x.o \
  	  usbserialpl2303.o usbserialft231x.o usbserialcdc.o usbtouchscreen.o dwhciregister.o
 diff --git a/libs/circle/lib/usb/usbdevice.cpp b/libs/circle/lib/usb/usbdevice.cpp
-index dbc710c..b5c3329 100644
+index 8b4f207b..06922b0e 100644
 --- a/libs/circle/lib/usb/usbdevice.cpp
 +++ b/libs/circle/lib/usb/usbdevice.cpp
-@@ -51,7 +51,9 @@ CUSBDevice::CUSBDevice (CUSBHostController *pHost, TUSBSpeed Speed, CUSBHCIRootP
+@@ -52,7 +52,9 @@ CUSBDevice::CUSBDevice (CUSBHostController *pHost, TUSBSpeed Speed, CUSBHCIRootP
  	m_pTTHubDevice (0),
  	m_pDeviceDesc (0),
  	m_pConfigDesc (0),
@@ -294,7 +294,7 @@ index dbc710c..b5c3329 100644
  {
  	assert (m_pHost != 0);
  	assert (m_pRootPort != 0);
-@@ -69,6 +71,8 @@ CUSBDevice::CUSBDevice (CUSBHostController *pHost, TUSBSpeed Speed, CUSBHCIRootP
+@@ -70,6 +72,8 @@ CUSBDevice::CUSBDevice (CUSBHostController *pHost, TUSBSpeed Speed, CUSBHCIRootP
  	{
  		m_pFunction[nFunction] = 0;
  	}
@@ -303,7 +303,7 @@ index dbc710c..b5c3329 100644
  }
  
  CUSBDevice::CUSBDevice (CUSBHostController *pHost, TUSBSpeed Speed,
-@@ -82,7 +86,9 @@ CUSBDevice::CUSBDevice (CUSBHostController *pHost, TUSBSpeed Speed,
+@@ -83,7 +87,9 @@ CUSBDevice::CUSBDevice (CUSBHostController *pHost, TUSBSpeed Speed,
  	m_pEndpoint0 (0),
  	m_pDeviceDesc (0),
  	m_pConfigDesc (0),
@@ -314,7 +314,7 @@ index dbc710c..b5c3329 100644
  {
  	assert (m_pHost != 0);
  	assert (m_pHub != 0);
-@@ -120,6 +126,8 @@ CUSBDevice::CUSBDevice (CUSBHostController *pHost, TUSBSpeed Speed,
+@@ -121,6 +127,8 @@ CUSBDevice::CUSBDevice (CUSBHostController *pHost, TUSBSpeed Speed,
  	{
  		m_pFunction[nFunction] = 0;
  	}
@@ -323,7 +323,7 @@ index dbc710c..b5c3329 100644
  }
  
  CUSBDevice::~CUSBDevice (void)
-@@ -127,6 +135,16 @@ CUSBDevice::~CUSBDevice (void)
+@@ -128,6 +136,16 @@ CUSBDevice::~CUSBDevice (void)
  	assert (m_pHost != 0);
  	m_pHost->CancelDeviceTransactions (this);
  
@@ -340,15 +340,15 @@ index dbc710c..b5c3329 100644
  	for (unsigned nFunction = 0; nFunction < USBDEV_MAX_FUNCTIONS; nFunction++)
  	{
  		delete (m_pFunction[nFunction]);
-@@ -362,6 +380,7 @@ boolean CUSBDevice::Initialize (void)
+@@ -363,6 +381,7 @@ boolean CUSBDevice::Initialize (void)
  	{
  		Product = USBString.Get ();
  	}
 +	m_pHost->NotifyDiagnosticProduct (this, Product.c_str ());
  
  	CString SerialNumber;
- 	if (   m_pDeviceDesc->iSerialNumber != 0
-@@ -437,6 +456,12 @@ boolean CUSBDevice::Initialize (void)
+ 	const boolean bSkipSerialNumber =
+@@ -446,6 +465,12 @@ boolean CUSBDevice::Initialize (void)
  			}
  		}
  
@@ -361,7 +361,7 @@ index dbc710c..b5c3329 100644
  		delete m_pFunction[nFunction];
  		m_pFunction[nFunction] = 0;
  
-@@ -493,6 +518,9 @@ boolean CUSBDevice::Initialize (void)
+@@ -502,6 +527,9 @@ boolean CUSBDevice::Initialize (void)
  		return FALSE;
  	}
  
@@ -371,7 +371,7 @@ index dbc710c..b5c3329 100644
  	return TRUE;
  }
  
-@@ -526,6 +554,11 @@ boolean CUSBDevice::Configure (void)
+@@ -535,6 +563,11 @@ boolean CUSBDevice::Configure (void)
  		}
  	}
  	
@@ -384,7 +384,7 @@ index dbc710c..b5c3329 100644
  }
  
 diff --git a/libs/circle/lib/usb/usbdevicefactory.cpp b/libs/circle/lib/usb/usbdevicefactory.cpp
-index b91589e..43982f4 100644
+index b91589ed..43982f49 100644
 --- a/libs/circle/lib/usb/usbdevicefactory.cpp
 +++ b/libs/circle/lib/usb/usbdevicefactory.cpp
 @@ -55,6 +55,7 @@
@@ -424,7 +424,7 @@ index b91589e..43982f4 100644
  {
  	while (   pIDTable->usVendorID != 0
 diff --git a/libs/circle/lib/usb/usbhiddevice.cpp b/libs/circle/lib/usb/usbhiddevice.cpp
-index 7ca87b1..8665527 100644
+index 7ca87b11..8665527d 100644
 --- a/libs/circle/lib/usb/usbhiddevice.cpp
 +++ b/libs/circle/lib/usb/usbhiddevice.cpp
 @@ -51,7 +51,7 @@ CUSBHIDDevice::~CUSBHIDDevice (void)
@@ -495,7 +495,7 @@ index 7ca87b1..8665527 100644
  		CLogger::Get ()->Write (FromUSBHID, LogError, "Cannot restart request");
 diff --git a/libs/circle/lib/usb/usbhiddiagnostic.cpp b/libs/circle/lib/usb/usbhiddiagnostic.cpp
 new file mode 100644
-index 0000000..dd1db95
+index 00000000..dd1db958
 --- /dev/null
 +++ b/libs/circle/lib/usb/usbhiddiagnostic.cpp
 @@ -0,0 +1,93 @@
@@ -593,7 +593,7 @@ index 0000000..dd1db95
 +	// The generic observer tap in CUSBHIDDevice has already copied the report.
 +}
 diff --git a/libs/circle/lib/usb/usbhostcontroller.cpp b/libs/circle/lib/usb/usbhostcontroller.cpp
-index 5fa62c5..d967d12 100644
+index 5fa62c59..d967d126 100644
 --- a/libs/circle/lib/usb/usbhostcontroller.cpp
 +++ b/libs/circle/lib/usb/usbhostcontroller.cpp
 @@ -20,6 +20,7 @@
@@ -744,7 +744,7 @@ index 5fa62c5..d967d12 100644
  
  boolean CUSBHostController::SetAddress (CUSBEndpoint *pEndpoint, u8 ucDeviceAddress)
 diff --git a/libs/circle/lib/usb/usbsubsystem.cpp b/libs/circle/lib/usb/usbsubsystem.cpp
-index f1bf0f9..39881d3 100644
+index f1bf0f94..39881d37 100644
 --- a/libs/circle/lib/usb/usbsubsystem.cpp
 +++ b/libs/circle/lib/usb/usbsubsystem.cpp
 @@ -101,6 +101,15 @@ boolean CUSBSubSystem::UpdatePlugAndPlay (void)

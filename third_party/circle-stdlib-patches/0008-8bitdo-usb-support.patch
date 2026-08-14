@@ -1,5 +1,29 @@
+diff --git a/libs/circle/include/circle/usb/usb8bitdov1.h b/libs/circle/include/circle/usb/usb8bitdov1.h
+new file mode 100644
+index 00000000..6e44d6e7
+--- /dev/null
++++ b/libs/circle/include/circle/usb/usb8bitdov1.h
+@@ -0,0 +1,18 @@
++//
++// usb8bitdov1.h
++//
++// Exact identity helper for the original 8BitDo Wireless Adapter V1.
++//
++#ifndef _circle_usb_usb8bitdov1_h
++#define _circle_usb_usb8bitdov1_h
++
++#include <circle/types.h>
++
++inline boolean IsUSB8BitDoV1Receiver (u16 usVendor, u16 usProduct, u16 usRevision)
++{
++	return   usVendor == 0x045E
++	      && usProduct == 0x028E
++	      && usRevision == 0x0120;
++}
++
++#endif
 diff --git a/libs/circle/include/circle/usb/usbgamepad.h b/libs/circle/include/circle/usb/usbgamepad.h
-index 8d4b88e..0c66f72 100644
+index 8d4b88eb..0c66f725 100644
 --- a/libs/circle/include/circle/usb/usbgamepad.h
 +++ b/libs/circle/include/circle/usb/usbgamepad.h
 @@ -217,6 +217,11 @@ private:
@@ -16,7 +40,7 @@ index 8d4b88e..0c66f72 100644
  
 diff --git a/libs/circle/include/circle/usb/usbgamepad8bitdo.h b/libs/circle/include/circle/usb/usbgamepad8bitdo.h
 new file mode 100644
-index 0000000..eec10a3
+index 00000000..eec10a32
 --- /dev/null
 +++ b/libs/circle/include/circle/usb/usbgamepad8bitdo.h
 @@ -0,0 +1,53 @@
@@ -75,7 +99,7 @@ index 0000000..eec10a3
 +#endif
 diff --git a/libs/circle/include/circle/usb/usbgamepad8bitdoum2.h b/libs/circle/include/circle/usb/usbgamepad8bitdoum2.h
 new file mode 100644
-index 0000000..9138214
+index 00000000..91382143
 --- /dev/null
 +++ b/libs/circle/include/circle/usb/usbgamepad8bitdoum2.h
 @@ -0,0 +1,45 @@
@@ -126,7 +150,7 @@ index 0000000..9138214
 +#endif
 diff --git a/libs/circle/include/circle/usb/usbgamepad8bitdoxinput.h b/libs/circle/include/circle/usb/usbgamepad8bitdoxinput.h
 new file mode 100644
-index 0000000..2efd15e
+index 00000000..2efd15ea
 --- /dev/null
 +++ b/libs/circle/include/circle/usb/usbgamepad8bitdoxinput.h
 @@ -0,0 +1,48 @@
@@ -179,7 +203,7 @@ index 0000000..2efd15e
 +
 +#endif
 diff --git a/libs/circle/include/circle/usb/usbkeyboard.h b/libs/circle/include/circle/usb/usbkeyboard.h
-index 373b0d2..3c26d61 100644
+index 373b0d26..3c26d61d 100644
 --- a/libs/circle/include/circle/usb/usbkeyboard.h
 +++ b/libs/circle/include/circle/usb/usbkeyboard.h
 @@ -62,9 +62,13 @@ public:
@@ -199,7 +223,7 @@ index 373b0d2..3c26d61 100644
  private:
 diff --git a/libs/circle/include/circle/usb/usbkeyboard8bitdo.h b/libs/circle/include/circle/usb/usbkeyboard8bitdo.h
 new file mode 100644
-index 0000000..f20229e
+index 00000000..f20229ef
 --- /dev/null
 +++ b/libs/circle/include/circle/usb/usbkeyboard8bitdo.h
 @@ -0,0 +1,37 @@
@@ -242,7 +266,7 @@ index 0000000..f20229e
 +#endif
 \ No newline at end of file
 diff --git a/libs/circle/include/circle/usb/usbstandardhub.h b/libs/circle/include/circle/usb/usbstandardhub.h
-index 33a0733..5205c0b 100644
+index 33a07337..5205c0bd 100644
 --- a/libs/circle/include/circle/usb/usbstandardhub.h
 +++ b/libs/circle/include/circle/usb/usbstandardhub.h
 @@ -49,6 +49,8 @@ public:
@@ -255,7 +279,7 @@ index 33a0733..5205c0b 100644
  	boolean StartStatusChangeRequest (void);
  	void CompletionRoutine (CUSBRequest *pURB);
 diff --git a/libs/circle/include/circle/usb/xhci.h b/libs/circle/include/circle/usb/xhci.h
-index 400146e..0ee66b6 100644
+index 400146ef..0ee66b68 100644
 --- a/libs/circle/include/circle/usb/xhci.h
 +++ b/libs/circle/include/circle/usb/xhci.h
 @@ -325,6 +325,8 @@ PACKED;
@@ -268,7 +292,7 @@ index 400146e..0ee66b6 100644
  #define XHCI_TRB_COMPLETION_CODE_SHORT_PACKET			13
  #define XHCI_TRB_COMPLETION_CODE_RING_UNDERRUN			14
 diff --git a/libs/circle/lib/usb/Makefile b/libs/circle/lib/usb/Makefile
-index 1447175..6f41e49 100644
+index 14471753..6f41e495 100644
 --- a/libs/circle/lib/usb/Makefile
 +++ b/libs/circle/lib/usb/Makefile
 @@ -26,9 +26,10 @@ include $(CIRCLEHOME)/Rules.mk
@@ -285,8 +309,37 @@ index 1447175..6f41e49 100644
  	  usbstandardhub.o usbstring.o usbserial.o usbserialhost.o usbserialch341.o usbserialcp210x.o \
  	  usbserialpl2303.o usbserialft231x.o usbserialcdc.o usbtouchscreen.o dwhciregister.o
  
+diff --git a/libs/circle/lib/usb/usbdevice.cpp b/libs/circle/lib/usb/usbdevice.cpp
+index dbc710c3..8b4f207b 100644
+--- a/libs/circle/lib/usb/usbdevice.cpp
++++ b/libs/circle/lib/usb/usbdevice.cpp
+@@ -24,6 +24,7 @@
+ #include <circle/usb/usbendpoint.h>
+ #include <circle/usb/usbdevicefactory.h>
+ #include <circle/usb/usbstring.h>
++#include <circle/usb/usb8bitdov1.h>
+ #include <circle/usb/xhci.h>
+ #include <circle/util.h>
+ #include <circle/sysconfig.h>
+@@ -364,7 +365,15 @@ boolean CUSBDevice::Initialize (void)
+ 	}
+ 
+ 	CString SerialNumber;
+-	if (   m_pDeviceDesc->iSerialNumber != 0
++	const boolean bSkipSerialNumber =
++		IsUSB8BitDoV1Receiver (m_pDeviceDesc->idVendor,
++				      m_pDeviceDesc->idProduct,
++				      m_pDeviceDesc->bcdDevice);
++	if (bSkipSerialNumber)
++	{
++		LogWrite (LogNotice, "Skipping broken serial descriptor for 8BitDo V1 receiver");
++	}
++	else if (   m_pDeviceDesc->iSerialNumber != 0
+ 	    && m_pDeviceDesc->iSerialNumber != 0xFF
+ 	    && USBString.GetFromDescriptor (m_pDeviceDesc->iSerialNumber, USBString.GetLanguageID ()))
+ 	{
 diff --git a/libs/circle/lib/usb/usbdevicefactory.cpp b/libs/circle/lib/usb/usbdevicefactory.cpp
-index 7521058..d41e38d 100644
+index 75210581..d41e38db 100644
 --- a/libs/circle/lib/usb/usbdevicefactory.cpp
 +++ b/libs/circle/lib/usb/usbdevicefactory.cpp
 @@ -30,10 +30,13 @@
@@ -380,7 +433,7 @@ index 7521058..d41e38d 100644
  		 || pName->Compare ("ven45e-2dd") == 0		// XBox One Controller (FW 2015)
  		 || pName->Compare ("ven45e-2e3") == 0		// XBox One Elite Controller
 diff --git a/libs/circle/lib/usb/usbgamepad.cpp b/libs/circle/lib/usb/usbgamepad.cpp
-index f423357..911a5a1 100644
+index f423357f..911a5a1d 100644
 --- a/libs/circle/lib/usb/usbgamepad.cpp
 +++ b/libs/circle/lib/usb/usbgamepad.cpp
 @@ -45,11 +45,17 @@ CUSBGamePadDevice::~CUSBGamePadDevice (void)
@@ -403,7 +456,7 @@ index f423357..911a5a1 100644
  
 diff --git a/libs/circle/lib/usb/usbgamepad8bitdo.cpp b/libs/circle/lib/usb/usbgamepad8bitdo.cpp
 new file mode 100644
-index 0000000..09d8384
+index 00000000..09d8384f
 --- /dev/null
 +++ b/libs/circle/lib/usb/usbgamepad8bitdo.cpp
 @@ -0,0 +1,235 @@
@@ -644,7 +697,7 @@ index 0000000..09d8384
 +}
 diff --git a/libs/circle/lib/usb/usbgamepad8bitdoum2.cpp b/libs/circle/lib/usb/usbgamepad8bitdoum2.cpp
 new file mode 100644
-index 0000000..8ee7d59
+index 00000000..8ee7d59f
 --- /dev/null
 +++ b/libs/circle/lib/usb/usbgamepad8bitdoum2.cpp
 @@ -0,0 +1,107 @@
@@ -757,7 +810,7 @@ index 0000000..8ee7d59
 +}
 diff --git a/libs/circle/lib/usb/usbgamepad8bitdoxinput.cpp b/libs/circle/lib/usb/usbgamepad8bitdoxinput.cpp
 new file mode 100644
-index 0000000..99430c5
+index 00000000..99430c59
 --- /dev/null
 +++ b/libs/circle/lib/usb/usbgamepad8bitdoxinput.cpp
 @@ -0,0 +1,154 @@
@@ -915,8 +968,63 @@ index 0000000..99430c5
 +
 +	return TRUE;
 +}
+diff --git a/libs/circle/lib/usb/usbgamepadxbox360.cpp b/libs/circle/lib/usb/usbgamepadxbox360.cpp
+index 2064c369..794af4ab 100644
+--- a/libs/circle/lib/usb/usbgamepadxbox360.cpp
++++ b/libs/circle/lib/usb/usbgamepadxbox360.cpp
+@@ -23,6 +23,7 @@
+ // along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ //
+ #include <circle/usb/usbgamepadxbox360.h>
++#include <circle/usb/usb8bitdov1.h>
+ #include <circle/usb/usbhostcontroller.h>
+ #include <circle/synchronize.h>
+ #include <circle/logger.h>
+@@ -54,6 +55,12 @@ PACKED;
+ 
+ #define REPORT_SIZE	sizeof (TXbox360Report)
+ 
++// The original 8BitDo V1 receiver exposes the Xbox 360 VID/PID, but returns
++// input transfers longer than the 14-byte controller state. Request one full
++// endpoint packet for this exact receiver so xHCI does not reject the transfer
++// as babble. ReportHandler() still decodes only the common 14-byte prefix.
++#define REPORT_SIZE_8BITDO_V1	32
++
+ static const char FromUSBPadXbox360[] = "usbpadxbox360";
+ 
+ CUSBGamePadXbox360Device::CUSBGamePadXbox360Device (CUSBFunction *pFunction)
+@@ -67,7 +74,19 @@ CUSBGamePadXbox360Device::~CUSBGamePadXbox360Device (void)
+ 
+ boolean CUSBGamePadXbox360Device::Configure (void)
+ {
+-	m_usReportSize = REPORT_SIZE;
++	const TUSBDeviceDescriptor *pDeviceDesc = GetDevice ()->GetDeviceDescriptor ();
++	assert (pDeviceDesc != 0);
++	const boolean b8BitDoV1 =
++		IsUSB8BitDoV1Receiver (pDeviceDesc->idVendor,
++				      pDeviceDesc->idProduct,
++				      pDeviceDesc->bcdDevice);
++
++	m_usReportSize = b8BitDoV1 ? REPORT_SIZE_8BITDO_V1 : REPORT_SIZE;
++	if (b8BitDoV1)
++	{
++		CLogger::Get ()->Write (FromUSBPadXbox360, LogNotice,
++				      "Using 32-byte input buffer for 8BitDo V1 receiver");
++	}
+ 
+ 	if (!CUSBGamePadDevice::Configure ())
+ 	{
+@@ -101,7 +120,7 @@ boolean CUSBGamePadXbox360Device::Configure (void)
+ void CUSBGamePadXbox360Device::ReportHandler (const u8 *pReport, unsigned nReportSize)
+ {
+ 	if (   pReport != 0
+-	    && nReportSize == REPORT_SIZE
++	    && nReportSize >= REPORT_SIZE
+ 	    && pReport[0] == (REPORT_HEADER & 0xFF)
+ 	    && pReport[1] == (REPORT_HEADER >> 8)
+ 	    && m_pStatusHandler != 0)
 diff --git a/libs/circle/lib/usb/usbkeyboard.cpp b/libs/circle/lib/usb/usbkeyboard.cpp
-index 05fe2fa..b5adf19 100644
+index 05fe2fab..b5adf198 100644
 --- a/libs/circle/lib/usb/usbkeyboard.cpp
 +++ b/libs/circle/lib/usb/usbkeyboard.cpp
 @@ -67,7 +67,12 @@ boolean CUSBKeyboardDevice::Configure (void)
@@ -935,7 +1043,7 @@ index 05fe2fa..b5adf19 100644
  
 diff --git a/libs/circle/lib/usb/usbkeyboard8bitdo.cpp b/libs/circle/lib/usb/usbkeyboard8bitdo.cpp
 new file mode 100644
-index 0000000..f759118
+index 00000000..f759118e
 --- /dev/null
 +++ b/libs/circle/lib/usb/usbkeyboard8bitdo.cpp
 @@ -0,0 +1,85 @@
@@ -1026,7 +1134,7 @@ index 0000000..f759118
 +}
 \ No newline at end of file
 diff --git a/libs/circle/lib/usb/usbstandardhub.cpp b/libs/circle/lib/usb/usbstandardhub.cpp
-index c8a78d8..641bcdf 100644
+index c8a78d87..641bcdf3 100644
 --- a/libs/circle/lib/usb/usbstandardhub.cpp
 +++ b/libs/circle/lib/usb/usbstandardhub.cpp
 @@ -33,6 +33,10 @@ CNumberPool CUSBStandardHub::s_DeviceNumberPool (1);
@@ -1243,7 +1351,7 @@ index c8a78d8..641bcdf 100644
  			}
  		}
 diff --git a/libs/circle/lib/usb/xhciendpoint.cpp b/libs/circle/lib/usb/xhciendpoint.cpp
-index a845481..499cc66 100644
+index a845481e..499cc66b 100644
 --- a/libs/circle/lib/usb/xhciendpoint.cpp
 +++ b/libs/circle/lib/usb/xhciendpoint.cpp
 @@ -39,6 +39,10 @@ CXHCIEndpoint::CXHCIEndpoint (CXHCIUSBDevice *pDevice, CXHCIDevice *pXHCIDevice)

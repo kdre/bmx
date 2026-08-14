@@ -71,82 +71,9 @@ to = "UART-DEBUG.txt"
 mode = "metadata"
 profiles = ["debug"]
 
-# Runtime keymaps. Every original source and final SD target is explicit;
-# aliases that intentionally duplicate another map are separate entries.
-[[both.file]]
-from = "vice_data/C64/gtk3_pos.vkm"
-to = "c64/gtk3_pos.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/C64/gtk3_pos_de.vkm"
-to = "c64/gtk3_pos_de.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/SCPU64/gtk3_pos.vkm"
-to = "scpu64/gtk3_pos.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/SCPU64/gtk3_pos_de.vkm"
-to = "scpu64/gtk3_pos_de.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/C128/gtk3_pos.vkm"
-to = "c128/gtk3_pos.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/C128/gtk3_pos_de.vkm"
-to = "c128/gtk3_pos_de.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/VIC20/gtk3_pos.vkm"
-to = "vic20/gtk3_pos.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/VIC20/gtk3_pos_de.vkm"
-to = "vic20/gtk3_pos_de.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/PLUS4/gtk3_pos.vkm"
-to = "plus4/gtk3_pos.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/PLUS4/gtk3_pos_de.vkm"
-to = "plus4/gtk3_pos_de.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/PET/gtk3_bude_pos.vkm"
-to = "pet/gtk3_bude_pos.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/PET/gtk3_bude_pos_de.vkm"
-to = "pet/gtk3_bude_pos_de.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/PET/gtk3_buuk_pos.vkm"
-to = "pet/gtk3_buuk_pos.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/PET/gtk3_buuk_pos_de.vkm"
-to = "pet/gtk3_buuk_pos_de.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/PET/gtk3_pos.vkm"
-to = "pet/gtk3_pos.vkm"
-mode = "replace"
+# Runtime keymaps. Generated raspi_*.vkm files are checked in and staged as
+# static assets; generation is an explicit maintenance operation, not a build
+# step. Every source and final SD target remains explicit below.
 
 # End-user keyboard maps are seeded on first install and never overwritten by
 # updates. Stock rpi_*.vkm files below remain release-managed.
@@ -301,63 +228,223 @@ to = "pet/rpi_pos_de.vkm"
 mode = "replace"
 
 [[both.file]]
-from = "vice_data/C64/gtk3_pos.vkm"
+from = "raspi_keymaps/c64/raspi_sym.vkm"
+to = "c64/raspi_sym.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/c64/raspi_sym_de.vkm"
+to = "c64/raspi_sym_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/c64/raspi_pos.vkm"
 to = "c64/raspi_pos.vkm"
 mode = "replace"
 
 [[both.file]]
-from = "vice_data/SCPU64/gtk3_pos.vkm"
-to = "scpu64/raspi_pos.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/C128/gtk3_pos.vkm"
-to = "c128/raspi_pos.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/VIC20/gtk3_pos.vkm"
-to = "vic20/raspi_pos.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/PLUS4/gtk3_pos.vkm"
-to = "plus4/raspi_pos.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "vice_data/PET/gtk3_pos.vkm"
-to = "pet/raspi_pos.vkm"
-mode = "replace"
-
-[[both.file]]
-from = "raspi_keymaps/c64/rpi_pos_de.vkm"
+from = "raspi_keymaps/c64/raspi_pos_de.vkm"
 to = "c64/raspi_pos_de.vkm"
 mode = "replace"
 
 [[both.file]]
-from = "raspi_keymaps/c64/rpi_pos_de.vkm"
+from = "raspi_keymaps/scpu64/raspi_sym.vkm"
+to = "scpu64/raspi_sym.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/scpu64/raspi_sym_de.vkm"
+to = "scpu64/raspi_sym_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/scpu64/raspi_pos.vkm"
+to = "scpu64/raspi_pos.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/scpu64/raspi_pos_de.vkm"
 to = "scpu64/raspi_pos_de.vkm"
 mode = "replace"
 
 [[both.file]]
-from = "raspi_keymaps/c128/rpi_pos_de.vkm"
+from = "raspi_keymaps/c128/raspi_sym.vkm"
+to = "c128/raspi_sym.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/c128/raspi_sym_de.vkm"
+to = "c128/raspi_sym_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/c128/raspi_pos.vkm"
+to = "c128/raspi_pos.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/c128/raspi_pos_de.vkm"
 to = "c128/raspi_pos_de.vkm"
 mode = "replace"
 
 [[both.file]]
-from = "raspi_keymaps/vic20/rpi_pos_de.vkm"
+from = "raspi_keymaps/vic20/raspi_sym.vkm"
+to = "vic20/raspi_sym.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/vic20/raspi_sym_de.vkm"
+to = "vic20/raspi_sym_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/vic20/raspi_pos.vkm"
+to = "vic20/raspi_pos.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/vic20/raspi_pos_de.vkm"
 to = "vic20/raspi_pos_de.vkm"
 mode = "replace"
 
 [[both.file]]
-from = "raspi_keymaps/plus4/rpi_pos_de.vkm"
+from = "raspi_keymaps/plus4/raspi_sym.vkm"
+to = "plus4/raspi_sym.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/plus4/raspi_sym_de.vkm"
+to = "plus4/raspi_sym_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/plus4/raspi_pos.vkm"
+to = "plus4/raspi_pos.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/plus4/raspi_pos_de.vkm"
 to = "plus4/raspi_pos_de.vkm"
 mode = "replace"
 
 [[both.file]]
-from = "raspi_keymaps/pet/rpi_pos_de.vkm"
+from = "raspi_keymaps/pet/raspi_sym.vkm"
+to = "pet/raspi_sym.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_sym_de.vkm"
+to = "pet/raspi_sym_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_pos.vkm"
+to = "pet/raspi_pos.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_pos_de.vkm"
 to = "pet/raspi_pos_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_buuk_sym.vkm"
+to = "pet/raspi_buuk_sym.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_buuk_sym_de.vkm"
+to = "pet/raspi_buuk_sym_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_buuk_pos.vkm"
+to = "pet/raspi_buuk_pos.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_buuk_pos_de.vkm"
+to = "pet/raspi_buuk_pos_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_buus_sym.vkm"
+to = "pet/raspi_buus_sym.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_buus_sym_de.vkm"
+to = "pet/raspi_buus_sym_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_buus_pos.vkm"
+to = "pet/raspi_buus_pos.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_buus_pos_de.vkm"
+to = "pet/raspi_buus_pos_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_bude_sym.vkm"
+to = "pet/raspi_bude_sym.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_bude_sym_de.vkm"
+to = "pet/raspi_bude_sym_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_bude_pos.vkm"
+to = "pet/raspi_bude_pos.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_bude_pos_de.vkm"
+to = "pet/raspi_bude_pos_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_bujp_sym.vkm"
+to = "pet/raspi_bujp_sym.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_bujp_sym_de.vkm"
+to = "pet/raspi_bujp_sym_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_bujp_pos.vkm"
+to = "pet/raspi_bujp_pos.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_bujp_pos_de.vkm"
+to = "pet/raspi_bujp_pos_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_grus_sym.vkm"
+to = "pet/raspi_grus_sym.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_grus_sym_de.vkm"
+to = "pet/raspi_grus_sym_de.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_grus_pos.vkm"
+to = "pet/raspi_grus_pos.vkm"
+mode = "replace"
+
+[[both.file]]
+from = "raspi_keymaps/pet/raspi_grus_pos_de.vkm"
+to = "pet/raspi_grus_pos_de.vkm"
 mode = "replace"
 
 # Utility disks are generated independently.  Empty per-machine directories

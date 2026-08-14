@@ -1,10 +1,13 @@
 #include "remote/developer_router.h"
 
+#include "remote/bounded_json_writer.h"
 #include "remote/developer_file_transaction.h"
+#include "remote/file_response_stream.h"
 #include "update/fat_path_policy.h"
 
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 namespace bmx {
@@ -13,13 +16,21 @@ namespace {
 
 const char kDeveloperPrefix[] = "/bmx/dev/v1";
 const char kFilePrefix[] = "/bmx/dev/v1/fs/";
+const char kDirectoryPrefix[] = "/bmx/dev/v1/directory/";
+
+void CloseDeveloperFileVolume(
+    void *context, bmx::update::UpdateFileSystem *file_system)
+{
+    DeveloperBackend *backend = static_cast<DeveloperBackend *>(context);
+    if (backend != 0) backend->CloseVolume(file_system);
+}
 
 class OwnedResponse : public HttpCompletion {
 public:
     OwnedResponse() : body_(), extra_() {}
     void Complete(HttpCompletionReason) override { delete this; }
 
-    char body_[768U];
+    char body_[3072U];
     char extra_[160U];
 };
 
@@ -31,6 +42,26 @@ public:
     // Six KiB comfortably covers 16 maximum-size, JSON-escaped product
     // strings plus all fixed fields without reserving an excessive response.
     char body_[6U * 1024U];
+};
+
+class StatusResponse : public HttpCompletion {
+public:
+    StatusResponse() : body_() {}
+    void Complete(HttpCompletionReason) override { delete this; }
+
+    char body_[4096U];
+};
+
+class MemoryResponse : public HttpCompletion {
+public:
+    explicit MemoryResponse(uint8_t *data) : data_(data) {}
+    void Complete(HttpCompletionReason) override {
+        free(data_);
+        delete this;
+    }
+
+private:
+    uint8_t *data_;
 };
 
 class RebootCompletion : public OwnedResponse {
@@ -70,129 +101,48 @@ int HexValue(char value)
     return -1;
 }
 
-bool DecodePercent(HttpStringView source, char *destination, size_t capacity)
-{
-    if (destination == 0 || capacity == 0U) return false;
-    size_t output = 0U;
-    for (size_t input = 0U; input < source.size; ++input) {
-        unsigned char value = static_cast<unsigned char>(source.data[input]);
-        if (value == '%') {
-            if (input + 2U >= source.size) return false;
-            const int high = HexValue(source.data[input + 1U]);
-            const int low = HexValue(source.data[input + 2U]);
-            if (high < 0 || low < 0) return false;
-            value = static_cast<unsigned char>((high << 4) | low);
-            input += 2U;
-        }
-        if (value == 0U || output + 1U >= capacity) return false;
-        destination[output++] = static_cast<char>(value);
-    }
-    destination[output] = '\0';
-    return true;
-}
-
-bool ParseDecimal(HttpStringView value, uint64_t *result)
+bool ParseMemoryNumber(HttpStringView value, uint64_t *result)
 {
     if (result == 0 || value.data == 0 || value.size == 0U) return false;
+    unsigned base = 10U;
+    size_t index = 0U;
+    if (value.size > 2U && value.data[0] == '0' &&
+        (value.data[1] == 'x' || value.data[1] == 'X')) {
+        base = 16U;
+        index = 2U;
+    }
     uint64_t number = 0U;
-    for (size_t index = 0U; index < value.size; ++index) {
-        const char digit = value.data[index];
-        if (digit < '0' || digit > '9') return false;
-        const uint64_t add = static_cast<uint64_t>(digit - '0');
-        if (number > (UINT64_MAX - add) / 10U) return false;
-        number = number * 10U + add;
+    for (; index < value.size; ++index) {
+        const int digit = HexValue(value.data[index]);
+        if (digit < 0 || static_cast<unsigned>(digit) >= base) return false;
+        if (number > (UINT64_MAX - static_cast<unsigned>(digit)) / base) {
+            return false;
+        }
+        number = number * base + static_cast<unsigned>(digit);
     }
     *result = number;
     return true;
 }
 
-bool QueryValue(HttpStringView query, const char *name,
-                HttpStringView *value, unsigned *count)
-{
-    if (value == 0 || count == 0) return false;
-    *value = HttpStringView();
-    *count = 0U;
-    const size_t name_size = strlen(name);
-    size_t begin = 0U;
-    while (begin <= query.size) {
-        size_t end = begin;
-        while (end < query.size && query.data[end] != '&') ++end;
-        size_t equal = begin;
-        while (equal < end && query.data[equal] != '=') ++equal;
-        if (equal - begin == name_size && equal < end &&
-            memcmp(query.data + begin, name, name_size) == 0) {
-            ++*count;
-            *value = HttpStringView(query.data + equal + 1U,
-                                    end - equal - 1U);
-        }
-        if (end == query.size) break;
-        begin = end + 1U;
-    }
-    return true;
-}
-
-bool OnlyQueryNames(HttpStringView query, const char *first,
-                    const char *second, const char *third = 0,
-                    const char *fourth = 0)
-{
-    if (query.data == 0 || query.size == 0U ||
-        query.data[query.size - 1U] == '&') {
-        return false;
-    }
-    size_t begin = 0U;
-    while (begin < query.size) {
-        size_t end = begin;
-        while (end < query.size && query.data[end] != '&') ++end;
-        size_t equal = begin;
-        while (equal < end && query.data[equal] != '=') ++equal;
-        if (equal == begin || equal == end) return false;
-        const HttpStringView name(query.data + begin, equal - begin);
-        if (!HttpStringEquals(name, first) &&
-            (second == 0 || !HttpStringEquals(name, second)) &&
-            (third == 0 || !HttpStringEquals(name, third)) &&
-            (fourth == 0 || !HttpStringEquals(name, fourth))) {
-            return false;
-        }
-        begin = end + 1U;
-    }
-    return true;
-}
-
-void StaticJsonError(unsigned status, const char *message,
-                     HttpResponse *response)
-{
-    response->Reset(status);
-    response->AddHeader("Content-Type", "application/json");
-    response->SetFixedText(message);
-}
-
 void MethodError(HttpRouteResult *result)
 {
-    HttpResponse response;
-    StaticJsonError(405U, "{\"error\":\"method not allowed\"}\n", &response);
-    result->Respond(response);
+    RespondJsonError(405U, "{\"error\":\"method not allowed\"}\n", result);
 }
 
 void BadRequest(const char *message, HttpRouteResult *result)
 {
-    HttpResponse response;
-    StaticJsonError(400U, message, &response);
-    result->Respond(response);
+    RespondJsonError(400U, message, result);
 }
 
 void InternalError(HttpRouteResult *result)
 {
-    HttpResponse response;
-    StaticJsonError(500U, "{\"error\":\"internal error\"}\n", &response);
-    result->Respond(response);
+    RespondJsonError(500U, "{\"error\":\"internal error\"}\n", result);
 }
 
 void ServiceUnavailable(HttpRouteResult *result)
 {
-    HttpResponse response;
-    StaticJsonError(503U, "{\"error\":\"USB diagnostic unavailable\"}\n",
-                    &response);
-    result->Respond(response);
+    RespondJsonError(503U, "{\"error\":\"USB diagnostic unavailable\"}\n",
+                     result);
 }
 
 unsigned FileHttpStatus(DeveloperFileStatus status)
@@ -220,102 +170,33 @@ unsigned FileHttpStatus(DeveloperFileStatus status)
     return 500U;
 }
 
-bool AppendUnsignedDecimal(char *output, size_t capacity, size_t *offset,
-                           uint64_t value)
+bool RespondRenameError(UpdateRenameStatus status, const char *wrong_type,
+                        const char *source_error, const char *target_error,
+                        const char *rename_error, HttpRouteResult *result)
 {
-    if (output == 0 || offset == 0 || *offset >= capacity) return false;
-    char reversed[20U];
-    size_t count = 0U;
-    do {
-        reversed[count++] = static_cast<char>('0' + value % 10U);
-        value /= 10U;
-    } while (value != 0U);
-    if (count >= capacity - *offset) return false;
-    while (count != 0U) output[(*offset)++] = reversed[--count];
-    output[*offset] = '\0';
-    return true;
-}
-
-bool AppendJsonString(char *output, size_t capacity, size_t *offset,
-                      const char *value)
-{
-    if (output == 0 || offset == 0 || value == 0) return false;
-    for (const unsigned char *cursor =
-             reinterpret_cast<const unsigned char *>(value);
-         *cursor != 0U; ++cursor) {
-        char escaped[7U];
-        const char *bytes = escaped;
-        size_t size = 0U;
-        if (*cursor == '"' || *cursor == '\\') {
-            escaped[0] = '\\';
-            escaped[1] = static_cast<char>(*cursor);
-            size = 2U;
-        } else if (*cursor < 0x20U) {
-            snprintf(escaped, sizeof(escaped), "\\u%04x", *cursor);
-            size = 6U;
-        } else {
-            escaped[0] = static_cast<char>(*cursor);
-            size = 1U;
-        }
-        if (size >= capacity - *offset) return false;
-        memcpy(output + *offset, bytes, size);
-        *offset += size;
+    switch (status) {
+        case UpdateRenameStatus::Ok:
+            return false;
+        case UpdateRenameStatus::Missing:
+            RespondJsonError(404U, "{\"error\":\"not found\"}\n", result);
+            break;
+        case UpdateRenameStatus::WrongType:
+            RespondJsonError(409U, wrong_type, result);
+            break;
+        case UpdateRenameStatus::AlreadyExists:
+            RespondJsonError(409U, "{\"error\":\"target already exists\"}\n",
+                            result);
+            break;
+        case UpdateRenameStatus::SourceError:
+            RespondJsonError(500U, source_error, result);
+            break;
+        case UpdateRenameStatus::TargetError:
+            RespondJsonError(500U, target_error, result);
+            break;
+        case UpdateRenameStatus::RenameError:
+            RespondJsonError(500U, rename_error, result);
+            break;
     }
-    output[*offset] = '\0';
-    return true;
-}
-
-// FatFs is configured for OEM code page 850. HTTP file targets therefore use
-// percent-encoded CP850 bytes, while JSON remains valid Unicode/UTF-8 by
-// representing non-ASCII path bytes as \uXXXX escapes.
-static const uint16_t kCp850Unicode[128U] = {
-    0x00c7U, 0x00fcU, 0x00e9U, 0x00e2U, 0x00e4U, 0x00e0U, 0x00e5U, 0x00e7U,
-    0x00eaU, 0x00ebU, 0x00e8U, 0x00efU, 0x00eeU, 0x00ecU, 0x00c4U, 0x00c5U,
-    0x00c9U, 0x00e6U, 0x00c6U, 0x00f4U, 0x00f6U, 0x00f2U, 0x00fbU, 0x00f9U,
-    0x00ffU, 0x00d6U, 0x00dcU, 0x00f8U, 0x00a3U, 0x00d8U, 0x00d7U, 0x0192U,
-    0x00e1U, 0x00edU, 0x00f3U, 0x00faU, 0x00f1U, 0x00d1U, 0x00aaU, 0x00baU,
-    0x00bfU, 0x00aeU, 0x00acU, 0x00bdU, 0x00bcU, 0x00a1U, 0x00abU, 0x00bbU,
-    0x2591U, 0x2592U, 0x2593U, 0x2502U, 0x2524U, 0x00c1U, 0x00c2U, 0x00c0U,
-    0x00a9U, 0x2563U, 0x2551U, 0x2557U, 0x255dU, 0x00a2U, 0x00a5U, 0x2510U,
-    0x2514U, 0x2534U, 0x252cU, 0x251cU, 0x2500U, 0x253cU, 0x00e3U, 0x00c3U,
-    0x255aU, 0x2554U, 0x2569U, 0x2566U, 0x2560U, 0x2550U, 0x256cU, 0x00a4U,
-    0x00f0U, 0x00d0U, 0x00caU, 0x00cbU, 0x00c8U, 0x0131U, 0x00cdU, 0x00ceU,
-    0x00cfU, 0x2518U, 0x250cU, 0x2588U, 0x2584U, 0x00a6U, 0x00ccU, 0x2580U,
-    0x00d3U, 0x00dfU, 0x00d4U, 0x00d2U, 0x00f5U, 0x00d5U, 0x00b5U, 0x00feU,
-    0x00deU, 0x00daU, 0x00dbU, 0x00d9U, 0x00fdU, 0x00ddU, 0x00afU, 0x00b4U,
-    0x00adU, 0x00b1U, 0x2017U, 0x00beU, 0x00b6U, 0x00a7U, 0x00f7U, 0x00b8U,
-    0x00b0U, 0x00a8U, 0x00b7U, 0x00b9U, 0x00b3U, 0x00b2U, 0x25a0U, 0x00a0U,
-};
-
-bool AppendFatPathJsonString(char *output, size_t capacity, size_t *offset,
-                             const char *value)
-{
-    if (output == 0 || offset == 0 || value == 0 || *offset >= capacity) {
-        return false;
-    }
-    for (const unsigned char *cursor =
-             reinterpret_cast<const unsigned char *>(value);
-         *cursor != 0U; ++cursor) {
-        char escaped[7U];
-        size_t size = 1U;
-        escaped[0] = static_cast<char>(*cursor);
-        if (*cursor == '"' || *cursor == '\\') {
-            escaped[0] = '\\';
-            escaped[1] = static_cast<char>(*cursor);
-            size = 2U;
-        } else if (*cursor < 0x20U) {
-            snprintf(escaped, sizeof(escaped), "\\u%04x", *cursor);
-            size = 6U;
-        } else if (*cursor >= 0x80U) {
-            snprintf(escaped, sizeof(escaped), "\\u%04x",
-                     kCp850Unicode[*cursor - 0x80U]);
-            size = 6U;
-        }
-        if (size >= capacity - *offset) return false;
-        memcpy(output + *offset, escaped, size);
-        *offset += size;
-    }
-    output[*offset] = '\0';
     return true;
 }
 
@@ -329,7 +210,8 @@ public:
                const char *volume, const char *path, bool reboot)
         : owner_(owner), backend_(backend), file_system_(file_system),
           transaction_(), reboot_(reboot), released_(false), body_(),
-          volume_(), write_status_(DeveloperFileStatus::Ok)
+          volume_(), write_buffer_(), write_buffer_size_(0U),
+          write_status_(DeveloperFileStatus::Ok)
     {
         strncpy(volume_, volume, sizeof(volume_) - 1U);
         volume_[sizeof(volume_) - 1U] = '\0';
@@ -346,7 +228,27 @@ public:
 
     bool Write(const uint8_t *data, size_t size) override
     {
-        write_status_ = transaction_.Write(data, size);
+        if (write_status_ != DeveloperFileStatus::Ok) return false;
+        if (data == 0 && size != 0U) {
+            const uint64_t started_us = backend_->MonotonicMicroseconds();
+            write_status_ = transaction_.Write(data, size);
+            backend_->RecordUploadWrite(
+                size, backend_->MonotonicMicroseconds() - started_us);
+            return false;
+        }
+        while (size != 0U) {
+            const size_t available =
+                sizeof(write_buffer_) - write_buffer_size_;
+            const size_t count = size < available ? size : available;
+            memcpy(write_buffer_ + write_buffer_size_, data, count);
+            write_buffer_size_ += count;
+            data += count;
+            size -= count;
+            if (write_buffer_size_ == sizeof(write_buffer_) &&
+                !FlushBufferedWrite()) {
+                return false;
+            }
+        }
         return write_status_ == DeveloperFileStatus::Ok;
     }
 
@@ -358,7 +260,14 @@ public:
 
     bool Finish(HttpResponse *response) override
     {
+        if (write_status_ != DeveloperFileStatus::Ok ||
+            !FlushBufferedWrite()) {
+            return BuildResponse(write_status_, response);
+        }
+        const uint64_t started_us = backend_->MonotonicMicroseconds();
         const DeveloperFileStatus status = transaction_.Finish();
+        backend_->RecordUploadFinish(
+            backend_->MonotonicMicroseconds() - started_us);
         return BuildResponse(status, response);
     }
 
@@ -383,6 +292,19 @@ public:
     }
 
 private:
+    bool FlushBufferedWrite()
+    {
+        if (write_buffer_size_ == 0U) return true;
+        const size_t size = write_buffer_size_;
+        const uint64_t started_us = backend_->MonotonicMicroseconds();
+        write_status_ = transaction_.Write(write_buffer_, size);
+        backend_->RecordUploadWrite(
+            size, backend_->MonotonicMicroseconds() - started_us);
+        if (write_status_ != DeveloperFileStatus::Ok) return false;
+        write_buffer_size_ = 0U;
+        return true;
+    }
+
     bool BuildResponse(DeveloperFileStatus status, HttpResponse *response)
     {
         if (response == 0) return false;
@@ -390,36 +312,22 @@ private:
         if (success) {
             char digest[65U];
             EncodeSha256Hex(transaction_.sha256(), digest);
-            size_t offset = 0U;
-            int written = snprintf(body_, sizeof(body_), "{\"path\":\"");
-            if (written < 0) return false;
-            offset = static_cast<size_t>(written);
             char absolute[kDeveloperFilePathBytes + 20U];
             snprintf(absolute, sizeof(absolute), "%s:/%s", volume_,
                      transaction_.path());
-            if (!AppendFatPathJsonString(body_, sizeof(body_), &offset,
-                                         absolute)) {
-                return false;
-            }
-            written = snprintf(
-                body_ + offset, sizeof(body_) - offset,
-                "\",\"size\":");
-            if (written < 0 || static_cast<size_t>(written) >=
-                                   sizeof(body_) - offset) return false;
-            offset += static_cast<size_t>(written);
-            if (!AppendUnsignedDecimal(body_, sizeof(body_), &offset,
-                                       transaction_.size())) {
-                return false;
-            }
-            written = snprintf(
-                body_ + offset, sizeof(body_) - offset,
-                ",\"sha256\":\"%s\",\"changed\":%s,"
-                "\"reboot_scheduled\":%s}\n",
-                digest,
-                transaction_.changed() ? "true" : "false",
-                reboot_ ? "true" : "false");
-            if (written < 0 || static_cast<size_t>(written) >=
-                                   sizeof(body_) - offset) return false;
+            BoundedJsonWriter writer(body_, sizeof(body_));
+            writer.Text("{\"path\":");
+            writer.FatString(absolute);
+            writer.Text(",\"size\":");
+            writer.Unsigned(transaction_.size());
+            writer.Text(",\"sha256\":");
+            writer.String(digest);
+            writer.Text(",\"changed\":");
+            writer.Boolean(transaction_.changed());
+            writer.Text(",\"reboot_scheduled\":");
+            writer.Boolean(reboot_);
+            writer.Text("}\n");
+            if (!writer.valid()) return false;
             response->Reset(200U);
         } else {
             snprintf(body_, sizeof(body_), "{\"error\":\"%s\"}\n",
@@ -458,6 +366,8 @@ private:
     bool released_;
     char body_[4096U];
     char volume_[17U];
+    uint8_t write_buffer_[kDeveloperUploadWriteBufferBytes];
+    size_t write_buffer_size_;
     DeveloperFileStatus write_status_;
 };
 
@@ -471,18 +381,10 @@ public:
           snapshot_end_(initial_end), follow_(follow), start_text_(),
           oldest_text_(), epoch_text_(), end_text_()
     {
-        size_t offset = 0U;
-        (void)AppendUnsignedDecimal(start_text_, sizeof(start_text_), &offset,
-                                    sequence);
-        offset = 0U;
-        (void)AppendUnsignedDecimal(oldest_text_, sizeof(oldest_text_),
-                                    &offset, oldest);
-        offset = 0U;
-        (void)AppendUnsignedDecimal(epoch_text_, sizeof(epoch_text_), &offset,
-                                    epoch);
-        offset = 0U;
-        (void)AppendUnsignedDecimal(end_text_, sizeof(end_text_), &offset,
-                                    initial_end);
+        BoundedJsonWriter(start_text_, sizeof(start_text_)).Unsigned(sequence);
+        BoundedJsonWriter(oldest_text_, sizeof(oldest_text_)).Unsigned(oldest);
+        BoundedJsonWriter(epoch_text_, sizeof(epoch_text_)).Unsigned(epoch);
+        BoundedJsonWriter(end_text_, sizeof(end_text_)).Unsigned(initial_end);
     }
 
     const char *start_text() const { return start_text_; }
@@ -556,33 +458,16 @@ DeveloperRouter::DeveloperRouter(DeveloperBackend *backend,
 
 bool DeveloperRouter::Authenticated(const HttpRequestHead &request) const
 {
-    const size_t expected_size = strlen(password_);
-    if (expected_size == 0U) return true;
-    if (request.HeaderCount("X-Password") != 1U) return false;
-    HttpStringView supplied;
-    if (!request.Header("X-Password", &supplied)) return false;
-    size_t difference = supplied.size ^ expected_size;
-    const size_t maximum = supplied.size > expected_size
-                               ? supplied.size
-                               : expected_size;
-    for (size_t index = 0U; index < maximum; ++index) {
-        const unsigned char left = index < supplied.size
-                                       ? static_cast<unsigned char>(supplied.data[index])
-                                       : 0U;
-        const unsigned char right = index < expected_size
-                                        ? static_cast<unsigned char>(password_[index])
-                                        : 0U;
-        difference |= static_cast<size_t>(left ^ right);
-    }
-    return difference == 0U;
+    return ConstantTimePasswordMatches(request, password_);
 }
 
-bool DeveloperRouter::ParseFileTarget(HttpStringView raw_path,
-                                      char *volume,
-                                      size_t volume_capacity, char *path,
-                                      size_t path_capacity) const
+bool DeveloperRouter::ParseTarget(HttpStringView raw_path,
+                                  const char *prefix_text, char *volume,
+                                  size_t volume_capacity, char *path,
+                                  size_t path_capacity) const
 {
-    const HttpStringView prefix = HttpString(kFilePrefix);
+    if (prefix_text == 0) return false;
+    const HttpStringView prefix = HttpString(prefix_text);
     if (!HttpStringStartsWith(raw_path, prefix)) return false;
     const HttpStringView encoded(raw_path.data + prefix.size,
                                  raw_path.size - prefix.size);
@@ -613,16 +498,19 @@ void DeveloperRouter::Route(const HttpRequestHead &request,
         return;
     }
     if (!Authenticated(request)) {
-        HttpResponse response;
-        StaticJsonError(403U, "{\"error\":\"forbidden\"}\n", &response);
-        result->Respond(response);
+        RespondJsonError(403U, "{\"error\":\"forbidden\"}\n", result);
         return;
     }
     if (ExactPath(request.raw_path, "/bmx/dev/v1/status")) {
         RouteStatus(request, result);
+    } else if (ExactPath(request.raw_path, "/bmx/dev/v1/memory")) {
+        RouteMemory(request, result);
     } else if (HttpStringStartsWith(request.raw_path,
                                     HttpString(kFilePrefix))) {
         RouteFile(request, result);
+    } else if (HttpStringStartsWith(request.raw_path,
+                                    HttpString(kDirectoryPrefix))) {
+        RouteDirectory(request, result);
     } else if (ExactPath(request.raw_path, "/bmx/dev/v1/reboot")) {
         RouteReboot(request, result);
     } else if (ExactPath(request.raw_path, "/bmx/dev/v1/logs")) {
@@ -640,10 +528,81 @@ void DeveloperRouter::Route(const HttpRequestHead &request,
                          "/bmx/dev/v1/diagnostics/usb/stop")) {
         RouteUsbStop(request, result);
     } else {
-        HttpResponse response;
-        StaticJsonError(404U, "{\"error\":\"not found\"}\n", &response);
-        result->Respond(response);
+        RespondJsonError(404U, "{\"error\":\"not found\"}\n", result);
     }
+}
+
+void DeveloperRouter::RouteMemory(const HttpRequestHead &request,
+                                  HttpRouteResult *result)
+{
+    if (request.method != HttpMethod::Get) {
+        MethodError(result);
+        return;
+    }
+    if (!request.has_query ||
+        (request.has_content_length && request.content_length != 0U) ||
+        !OnlyQueryNames(request.raw_query, "bank", "address", "length")) {
+        BadRequest("{\"error\":\"invalid memory request\"}\n", result);
+        return;
+    }
+    HttpStringView bank;
+    HttpStringView address_text;
+    HttpStringView length_text;
+    unsigned bank_count = 0U;
+    unsigned address_count = 0U;
+    unsigned length_count = 0U;
+    QueryValue(request.raw_query, "bank", &bank, &bank_count);
+    QueryValue(request.raw_query, "address", &address_text, &address_count);
+    QueryValue(request.raw_query, "length", &length_text, &length_count);
+    uint64_t address = 0U;
+    uint64_t length = 0U;
+    if (bank_count != 1U || !HttpStringEquals(bank, "cpu") ||
+        address_count != 1U || length_count != 1U ||
+        !ParseMemoryNumber(address_text, &address) ||
+        !ParseMemoryNumber(length_text, &length) ||
+        address > UINT32_MAX || length == 0U ||
+        length > kBmxDeveloperMemoryMaximumTransferBytes ||
+        address + length > UINT64_C(1) + UINT32_MAX) {
+        BadRequest("{\"error\":\"invalid memory range\"}\n", result);
+        return;
+    }
+
+    uint8_t *data = 0;
+    const DeveloperMemoryStatus status = backend_->ReadMemory(
+        static_cast<uint32_t>(address), static_cast<size_t>(length), &data);
+    if (status == DeveloperMemoryStatus::InvalidRange) {
+        RespondJsonError(400U, "{\"error\":\"invalid memory range\"}\n",
+                        result);
+        return;
+    }
+    if (status == DeveloperMemoryStatus::Busy) {
+        RespondJsonError(409U, "{\"error\":\"busy\"}\n", result);
+        return;
+    }
+    if (status == DeveloperMemoryStatus::Timeout) {
+        RespondJsonError(503U, "{\"error\":\"safe point timeout\"}\n",
+                        result);
+        return;
+    }
+    if (status != DeveloperMemoryStatus::Ok || data == 0) {
+        free(data);
+        RespondJsonError(503U, "{\"error\":\"memory unavailable\"}\n",
+                        result);
+        return;
+    }
+    MemoryResponse *owned = new MemoryResponse(data);
+    if (owned == 0) {
+        free(data);
+        InternalError(result);
+        return;
+    }
+    HttpResponse response;
+    response.Reset(200U);
+    response.AddHeader("Content-Type", "application/octet-stream");
+    response.AddHeader("Cache-Control", "no-store");
+    response.SetFixedBody(data, static_cast<size_t>(length));
+    response.completion = owned;
+    result->Respond(response);
 }
 
 void DeveloperRouter::RouteStatus(const HttpRequestHead &request,
@@ -664,76 +623,206 @@ void DeveloperRouter::RouteStatus(const HttpRequestHead &request,
         InternalError(result);
         return;
     }
-    OwnedResponse *owned = new OwnedResponse();
+    StatusResponse *owned = new StatusResponse();
     if (owned == 0) {
         InternalError(result);
         return;
     }
-    size_t offset = 0U;
-    int written = snprintf(owned->body_, sizeof(owned->body_),
-                           "{\"developer_mode\":true,\"board\":\"");
-    if (written < 0) {
-        delete owned;
-        InternalError(result);
-        return;
-    }
-    offset = static_cast<size_t>(written);
-    if (!AppendJsonString(owned->body_, sizeof(owned->body_), &offset,
-                          status.board != 0 ? status.board : "unknown")) {
-        delete owned;
-        InternalError(result);
-        return;
-    }
-    written = snprintf(owned->body_ + offset, sizeof(owned->body_) - offset,
-                       "\",\"machine\":\"");
-    if (written < 0 || static_cast<size_t>(written) >=
-                           sizeof(owned->body_) - offset) {
-        delete owned;
-        InternalError(result);
-        return;
-    }
-    offset += static_cast<size_t>(written);
-    if (!AppendJsonString(owned->body_, sizeof(owned->body_), &offset,
-                          status.machine != 0 ? status.machine : "unknown")) {
-        delete owned;
-        InternalError(result);
-        return;
-    }
-    written = snprintf(
-        owned->body_ + offset, sizeof(owned->body_) - offset,
-        "\",\"uptime_ms\":");
-    if (written < 0 || static_cast<size_t>(written) >=
-                           sizeof(owned->body_) - offset) {
-        delete owned;
-        InternalError(result);
-        return;
-    }
-    offset += static_cast<size_t>(written);
-    if (!AppendUnsignedDecimal(owned->body_, sizeof(owned->body_), &offset,
-                               status.uptime_ms)) {
-        delete owned;
-        InternalError(result);
-        return;
-    }
-    written = snprintf(
-        owned->body_ + offset, sizeof(owned->body_) - offset,
-        ",\"network_ready\":%s,\"ram_total_kb\":%lu,"
-        "\"heap_free_kb\":%lu,\"heap_low_free_kb\":%lu,"
-        "\"heap_high_free_kb\":%lu,\"arm_clock_hz\":%lu,"
-        "\"emu_cycles_per_sec\":%lu,\"temperature_c\":%d,"
-        "\"throttle_clock_hz\":%lu,\"log_buffer_kb\":%lu}\n",
-        status.network_ready ? "true" : "false",
-        static_cast<unsigned long>(status.ram_total_kb),
-        static_cast<unsigned long>(status.heap_free_kb),
-        static_cast<unsigned long>(status.heap_low_free_kb),
-        static_cast<unsigned long>(status.heap_high_free_kb),
-        static_cast<unsigned long>(status.arm_clock_hz),
-        static_cast<unsigned long>(status.emu_cycles_per_sec),
-        status.temperature_c,
-        static_cast<unsigned long>(status.throttle_clock_hz),
-        static_cast<unsigned long>(status.log_buffer_kb));
-    if (written < 0 || static_cast<size_t>(written) >=
-                           sizeof(owned->body_) - offset) {
+    BoundedJsonWriter writer(owned->body_, sizeof(owned->body_));
+    writer.Text("{\"developer_mode\":true,\"board\":");
+    writer.String(status.board != 0 ? status.board : "unknown");
+    writer.Text(",\"machine\":");
+    writer.String(status.machine != 0 ? status.machine : "unknown");
+    writer.Text(",\"uptime_ms\":");
+    writer.Unsigned(status.uptime_ms);
+    writer.Text(",\"network_ready\":");
+    writer.Boolean(status.network_ready);
+    writer.Text(",\"ram_total_kb\":");
+    writer.Unsigned(status.ram_total_kb);
+    writer.Text(",\"heap_free_kb\":");
+    writer.Unsigned(status.heap_free_kb);
+    writer.Text(",\"heap_low_free_kb\":");
+    writer.Unsigned(status.heap_low_free_kb);
+    writer.Text(",\"heap_high_free_kb\":");
+    writer.Unsigned(status.heap_high_free_kb);
+    writer.Text(",\"arm_clock_hz\":");
+    writer.Unsigned(status.arm_clock_hz);
+    writer.Text(",\"emu_cycles_per_sec\":");
+    writer.Unsigned(status.emu_cycles_per_sec);
+    writer.Text(",\"temperature_c\":");
+    writer.Signed(status.temperature_c);
+    writer.Text(",\"throttle_clock_hz\":");
+    writer.Unsigned(status.throttle_clock_hz);
+    writer.Text(",\"log_buffer_kb\":");
+    writer.Unsigned(status.log_buffer_kb);
+    writer.Text(",\"scheduler_safe_points\":");
+    writer.Unsigned(status.scheduler_safe_points);
+    writer.Text(",\"scheduler_rounds\":");
+    writer.Unsigned(status.scheduler_rounds);
+    writer.Text(",\"scheduler_extra_rounds\":");
+    writer.Unsigned(status.scheduler_extra_rounds);
+    writer.Text(",\"scheduler_pump_us\":");
+    writer.Unsigned(status.scheduler_pump_us);
+    writer.Text(",\"scheduler_pump_max_us\":");
+    writer.Unsigned(status.scheduler_pump_max_us);
+    writer.Text(",\"scheduler_pump_budget_stops\":");
+    writer.Unsigned(status.scheduler_pump_budget_stops);
+    writer.Text(",\"wlan_flow_available\":");
+    writer.Boolean(status.wlan_flow_available);
+    writer.Text(",\"wlan_tx_sequence\":");
+    writer.Unsigned(status.wlan_tx_sequence);
+    writer.Text(",\"wlan_tx_window\":");
+    writer.Unsigned(status.wlan_tx_window);
+    writer.Text(",\"wlan_flow_control_mask\":");
+    writer.Unsigned(status.wlan_flow_control_mask);
+    writer.Text(",\"wlan_tx_queue_frames\":");
+    writer.Unsigned(status.wlan_tx_queue_frames);
+    writer.Text(",\"wlan_tx_frames\":");
+    writer.Unsigned(status.wlan_tx_frames);
+    writer.Text(",\"wlan_rx_data_frames\":");
+    writer.Unsigned(status.wlan_rx_data_frames);
+    writer.Text(",\"wlan_tx_window_updates\":");
+    writer.Unsigned(status.wlan_tx_window_updates);
+    writer.Text(",\"wlan_tx_flow_updates\":");
+    writer.Unsigned(status.wlan_tx_flow_updates);
+    writer.Text(",\"wlan_tx_window_stalls\":");
+    writer.Unsigned(status.wlan_tx_window_stalls);
+    writer.Text(",\"wlan_tx_window_stall_ms\":");
+    writer.Unsigned(status.wlan_tx_window_stall_ms);
+    writer.Text(",\"wlan_tx_window_stall_max_ms\":");
+    writer.Unsigned(status.wlan_tx_window_stall_max_ms);
+    writer.Text(",\"wlan_tx_window_stall_current_ms\":");
+    writer.Unsigned(status.wlan_tx_window_stall_current_ms);
+    writer.Text(",\"wlan_tx_flow_stalls\":");
+    writer.Unsigned(status.wlan_tx_flow_stalls);
+    writer.Text(",\"wlan_tx_flow_stall_ms\":");
+    writer.Unsigned(status.wlan_tx_flow_stall_ms);
+    writer.Text(",\"wlan_tx_flow_stall_max_ms\":");
+    writer.Unsigned(status.wlan_tx_flow_stall_max_ms);
+    writer.Text(",\"wlan_tx_flow_stall_current_ms\":");
+    writer.Unsigned(status.wlan_tx_flow_stall_current_ms);
+    writer.Text(",\"wlan_tx_timing_samples\":");
+    writer.Unsigned(status.wlan_tx_timing_samples);
+    writer.Text(",\"wlan_tx_queue_us\":");
+    writer.Unsigned(status.wlan_tx_queue_us);
+    writer.Text(",\"wlan_tx_queue_max_us\":");
+    writer.Unsigned(status.wlan_tx_queue_max_us);
+    writer.Text(",\"wlan_tx_pktlock_wait_us\":");
+    writer.Unsigned(status.wlan_tx_pktlock_wait_us);
+    writer.Text(",\"wlan_tx_pktlock_wait_max_us\":");
+    writer.Unsigned(status.wlan_tx_pktlock_wait_max_us);
+    writer.Text(",\"wlan_tx_sdio_us\":");
+    writer.Unsigned(status.wlan_tx_sdio_us);
+    writer.Text(",\"wlan_tx_sdio_max_us\":");
+    writer.Unsigned(status.wlan_tx_sdio_max_us);
+    writer.Text(",\"wlan_tx_pktlock_yield_calls\":");
+    writer.Unsigned(status.wlan_tx_pktlock_yield_calls);
+    writer.Text(",\"wlan_tx_pktlock_yield_us\":");
+    writer.Unsigned(status.wlan_tx_pktlock_yield_us);
+    writer.Text(",\"wlan_tx_pktlock_yield_max_us\":");
+    writer.Unsigned(status.wlan_tx_pktlock_yield_max_us);
+    writer.Text(",\"wlan_rx_timing_samples\":");
+    writer.Unsigned(status.wlan_rx_timing_samples);
+    writer.Text(",\"wlan_rx_pktlock_wait_us\":");
+    writer.Unsigned(status.wlan_rx_pktlock_wait_us);
+    writer.Text(",\"wlan_rx_pktlock_wait_max_us\":");
+    writer.Unsigned(status.wlan_rx_pktlock_wait_max_us);
+    writer.Text(",\"wlan_rx_sdio_us\":");
+    writer.Unsigned(status.wlan_rx_sdio_us);
+    writer.Text(",\"wlan_rx_sdio_max_us\":");
+    writer.Unsigned(status.wlan_rx_sdio_max_us);
+    writer.Text(",\"wlan_rx_pktlock_yield_calls\":");
+    writer.Unsigned(status.wlan_rx_pktlock_yield_calls);
+    writer.Text(",\"wlan_rx_pktlock_yield_us\":");
+    writer.Unsigned(status.wlan_rx_pktlock_yield_us);
+    writer.Text(",\"wlan_rx_pktlock_yield_max_us\":");
+    writer.Unsigned(status.wlan_rx_pktlock_yield_max_us);
+    writer.Text(",\"wlan_rx_to_netdev_samples\":");
+    writer.Unsigned(status.wlan_rx_to_netdev_samples);
+    writer.Text(",\"wlan_rx_to_netdev_us\":");
+    writer.Unsigned(status.wlan_rx_to_netdev_us);
+    writer.Text(",\"wlan_rx_to_netdev_max_us\":");
+    writer.Unsigned(status.wlan_rx_to_netdev_max_us);
+    writer.Text(",\"wlan_emmc_dataready_precheck_hits\":");
+    writer.Unsigned(status.wlan_emmc_dataready_precheck_hits);
+    writer.Text(",\"wlan_emmc_dataready_poll_hits\":");
+    writer.Unsigned(status.wlan_emmc_dataready_poll_hits);
+    writer.Text(",\"wlan_emmc_dataready_sleep_calls\":");
+    writer.Unsigned(status.wlan_emmc_dataready_sleep_calls);
+    writer.Text(",\"wlan_emmc_dataready_poll_us\":");
+    writer.Unsigned(status.wlan_emmc_dataready_poll_us);
+    writer.Text(",\"wlan_emmc_dataready_poll_max_us\":");
+    writer.Unsigned(status.wlan_emmc_dataready_poll_max_us);
+    writer.Text(",\"wlan_emmc_datadone_precheck_hits\":");
+    writer.Unsigned(status.wlan_emmc_datadone_precheck_hits);
+    writer.Text(",\"wlan_emmc_datadone_poll_hits\":");
+    writer.Unsigned(status.wlan_emmc_datadone_poll_hits);
+    writer.Text(",\"wlan_emmc_datadone_sleep_calls\":");
+    writer.Unsigned(status.wlan_emmc_datadone_sleep_calls);
+    writer.Text(",\"wlan_emmc_datadone_poll_us\":");
+    writer.Unsigned(status.wlan_emmc_datadone_poll_us);
+    writer.Text(",\"wlan_emmc_datadone_poll_max_us\":");
+    writer.Unsigned(status.wlan_emmc_datadone_poll_max_us);
+    writer.Text(",\"remote_http_poll_calls\":");
+    writer.Unsigned(status.remote_http_poll_calls);
+    writer.Text(",\"remote_http_poll_us\":");
+    writer.Unsigned(status.remote_http_poll_us);
+    writer.Text(",\"remote_http_poll_max_us\":");
+    writer.Unsigned(status.remote_http_poll_max_us);
+    writer.Text(",\"remote_http_active_sleep_calls\":");
+    writer.Unsigned(status.remote_http_active_sleep_calls);
+    writer.Text(",\"remote_http_active_sleep_us\":");
+    writer.Unsigned(status.remote_http_active_sleep_us);
+    writer.Text(",\"remote_http_active_sleep_max_us\":");
+    writer.Unsigned(status.remote_http_active_sleep_max_us);
+    writer.Text(",\"remote_http_progress_yields\":");
+    writer.Unsigned(status.remote_http_progress_yields);
+    writer.Text(",\"remote_socket_read_calls\":");
+    writer.Unsigned(status.remote_socket_read_calls);
+    writer.Text(",\"remote_socket_rx_not_ready\":");
+    writer.Unsigned(status.remote_socket_rx_not_ready);
+    writer.Text(",\"remote_socket_receive_calls\":");
+    writer.Unsigned(status.remote_socket_receive_calls);
+    writer.Text(",\"remote_socket_read_bytes\":");
+    writer.Unsigned(status.remote_socket_read_bytes);
+    writer.Text(",\"remote_socket_receive_us\":");
+    writer.Unsigned(status.remote_socket_receive_us);
+    writer.Text(",\"remote_socket_receive_max_us\":");
+    writer.Unsigned(status.remote_socket_receive_max_us);
+    writer.Text(",\"remote_socket_write_calls\":");
+    writer.Unsigned(status.remote_socket_write_calls);
+    writer.Text(",\"remote_socket_tx_not_ready\":");
+    writer.Unsigned(status.remote_socket_tx_not_ready);
+    writer.Text(",\"remote_socket_send_calls\":");
+    writer.Unsigned(status.remote_socket_send_calls);
+    writer.Text(",\"remote_socket_write_bytes\":");
+    writer.Unsigned(status.remote_socket_write_bytes);
+    writer.Text(",\"remote_socket_send_zero\":");
+    writer.Unsigned(status.remote_socket_send_zero);
+    writer.Text(",\"remote_socket_send_closed\":");
+    writer.Unsigned(status.remote_socket_send_closed);
+    writer.Text(",\"remote_socket_send_errors\":");
+    writer.Unsigned(status.remote_socket_send_errors);
+    writer.Text(",\"remote_socket_last_send_error\":");
+    writer.Signed(status.remote_socket_last_send_error);
+    writer.Text(",\"remote_file_stream_read_errors\":");
+    writer.Unsigned(status.remote_file_stream_read_errors);
+    writer.Text(",\"remote_upload_write_calls\":");
+    writer.Unsigned(status.remote_upload_write_calls);
+    writer.Text(",\"remote_upload_write_bytes\":");
+    writer.Unsigned(status.remote_upload_write_bytes);
+    writer.Text(",\"remote_upload_write_us\":");
+    writer.Unsigned(status.remote_upload_write_us);
+    writer.Text(",\"remote_upload_write_max_us\":");
+    writer.Unsigned(status.remote_upload_write_max_us);
+    writer.Text(",\"remote_upload_finish_calls\":");
+    writer.Unsigned(status.remote_upload_finish_calls);
+    writer.Text(",\"remote_upload_finish_us\":");
+    writer.Unsigned(status.remote_upload_finish_us);
+    writer.Text(",\"remote_upload_finish_max_us\":");
+    writer.Unsigned(status.remote_upload_finish_max_us);
+    writer.Text("}\n");
+    if (!writer.valid()) {
         delete owned;
         InternalError(result);
         return;
@@ -746,32 +835,234 @@ void DeveloperRouter::RouteStatus(const HttpRequestHead &request,
     result->Respond(response);
 }
 
-void DeveloperRouter::RouteFile(const HttpRequestHead &request,
-                                HttpRouteResult *result)
+void DeveloperRouter::RouteDirectory(const HttpRequestHead &request,
+                                     HttpRouteResult *result)
 {
-    if (request.method != HttpMethod::Head && request.method != HttpMethod::Put) {
+    if (request.method != HttpMethod::Put &&
+        request.method != HttpMethod::Delete &&
+        request.method != HttpMethod::Post) {
         MethodError(result);
         return;
     }
     char volume[16U];
     char path[kDeveloperFilePathBytes];
-    if (!ParseFileTarget(request.raw_path, volume, sizeof(volume), path,
-                         sizeof(path))) {
+    if (!ParseTarget(request.raw_path, kDirectoryPrefix, volume,
+                     sizeof(volume), path, sizeof(path))) {
+        BadRequest("{\"error\":\"invalid directory path\"}\n", result);
+        return;
+    }
+    if (request.has_content_length && request.content_length != 0U) {
+        BadRequest("{\"error\":\"directory body must be empty\"}\n",
+                   result);
+        return;
+    }
+    if (active_upload_ != 0) {
+        RespondJsonError(409U, "{\"error\":\"upload already active\"}\n",
+                        result);
+        return;
+    }
+
+    char target[kDeveloperFilePathBytes];
+    target[0] = '\0';
+    bool recursive = false;
+    if (request.method == HttpMethod::Put) {
+        if (request.has_query) {
+            BadRequest("{\"error\":\"invalid directory create request\"}\n",
+                       result);
+            return;
+        }
+    } else if (request.method == HttpMethod::Delete) {
+        if (request.has_query) {
+            HttpStringView value;
+            unsigned count = 0U;
+            QueryValue(request.raw_query, "recursive", &value, &count);
+            if (!OnlyQueryNames(request.raw_query, "recursive", 0) ||
+                count != 1U || !HttpStringEquals(value, "1")) {
+                BadRequest("{\"error\":\"invalid recursive option\"}\n",
+                           result);
+                return;
+            }
+            recursive = true;
+        }
+    } else {
+        if (!request.has_query ||
+            !OnlyQueryNames(request.raw_query, "to", 0)) {
+            BadRequest("{\"error\":\"invalid directory rename request\"}\n",
+                       result);
+            return;
+        }
+        HttpStringView encoded_target;
+        unsigned target_count = 0U;
+        QueryValue(request.raw_query, "to", &encoded_target, &target_count);
+        if (target_count != 1U ||
+            !DecodePercent(encoded_target, target, sizeof(target)) ||
+            bmx::update::ValidateDeveloperFatRelativePath(
+                target, sizeof(target)) !=
+                bmx::update::FatPathValidationStatus::Ok) {
+            BadRequest("{\"error\":\"invalid directory rename target\"}\n",
+                       result);
+            return;
+        }
+    }
+
+    bmx::update::UpdateFileSystem *file_system =
+        backend_->OpenVolume(volume);
+    if (file_system == 0) {
+        RespondJsonError(404U, "{\"error\":\"volume unavailable\"}\n",
+                        result);
+        return;
+    }
+
+    bmx::update::UpdateFileStat source_stat;
+    if (request.method != HttpMethod::Post &&
+        !file_system->Stat(path, &source_stat)) {
+        backend_->CloseVolume(file_system);
+        RespondJsonError(500U, "{\"error\":\"cannot inspect directory\"}\n",
+                        result);
+        return;
+    }
+    if (request.method == HttpMethod::Put) {
+        if (source_stat.type == bmx::update::UpdateNodeType::RegularFile ||
+            source_stat.type == bmx::update::UpdateNodeType::Other) {
+            backend_->CloseVolume(file_system);
+            RespondJsonError(409U, "{\"error\":\"path is not a directory\"}\n",
+                            result);
+            return;
+        }
+        if (source_stat.type == bmx::update::UpdateNodeType::Missing &&
+            (!CreateDirectoryTree(file_system, path) ||
+             !file_system->SyncContainingDirectory(path))) {
+            backend_->CloseVolume(file_system);
+            RespondJsonError(500U, "{\"error\":\"cannot create directory\"}\n",
+                            result);
+            return;
+        }
+    } else if (request.method == HttpMethod::Delete) {
+        if (source_stat.type == bmx::update::UpdateNodeType::RegularFile ||
+            source_stat.type == bmx::update::UpdateNodeType::Other) {
+            backend_->CloseVolume(file_system);
+            RespondJsonError(409U, "{\"error\":\"path is not a directory\"}\n",
+                            result);
+            return;
+        }
+        if (source_stat.type == bmx::update::UpdateNodeType::Directory &&
+            (!file_system->RemoveDirectory(
+                 path, recursive, &DeveloperRouter::CooperativeYield,
+                 backend_) ||
+             !file_system->SyncContainingDirectory(path))) {
+            backend_->CloseVolume(file_system);
+            RespondJsonError(recursive ? 500U : 409U,
+                            recursive
+                                ? "{\"error\":\"cannot delete directory tree\"}\n"
+                                : "{\"error\":\"directory not empty\"}\n",
+                            result);
+            return;
+        }
+    } else {
+        const UpdateRenameStatus status = RenameUpdateNode(
+            file_system, path, target, bmx::update::UpdateNodeType::Directory);
+        backend_->CloseVolume(file_system);
+        if (RespondRenameError(
+                status, "{\"error\":\"path is not a directory\"}\n",
+                "{\"error\":\"cannot inspect directory\"}\n",
+                "{\"error\":\"cannot inspect rename target\"}\n",
+                "{\"error\":\"cannot rename directory\"}\n", result)) {
+            return;
+        }
+        HttpResponse response;
+        response.Reset(204U);
+        response.SetEmptyBody();
+        result->Respond(response);
+        return;
+    }
+
+    backend_->CloseVolume(file_system);
+    HttpResponse response;
+    response.Reset(204U);
+    response.SetEmptyBody();
+    result->Respond(response);
+}
+
+void DeveloperRouter::RouteFile(const HttpRequestHead &request,
+                                HttpRouteResult *result)
+{
+    if (request.method != HttpMethod::Get &&
+        request.method != HttpMethod::Head &&
+        request.method != HttpMethod::Put &&
+        request.method != HttpMethod::Delete &&
+        request.method != HttpMethod::Post) {
+        MethodError(result);
+        return;
+    }
+    char volume[16U];
+    char path[kDeveloperFilePathBytes];
+    if (!ParseTarget(request.raw_path, kFilePrefix, volume, sizeof(volume),
+                     path, sizeof(path))) {
         BadRequest("{\"error\":\"invalid file path\"}\n", result);
         return;
     }
-    if (request.method == HttpMethod::Head) {
+    if (request.method == HttpMethod::Get ||
+        request.method == HttpMethod::Head) {
         if (request.has_query ||
             (request.has_content_length && request.content_length != 0U)) {
-            BadRequest("{\"error\":\"invalid HEAD request\"}\n", result);
+            BadRequest("{\"error\":\"invalid file read request\"}\n",
+                       result);
             return;
         }
         bmx::update::UpdateFileSystem *file_system =
             backend_->OpenVolume(volume);
         if (file_system == 0) {
+            RespondJsonError(404U, "{\"error\":\"volume unavailable\"}\n",
+                            result);
+            return;
+        }
+        if (request.method == HttpMethod::Get) {
+            bmx::update::UpdateFileStat stat;
+            if (!file_system->Stat(path, &stat)) {
+                backend_->CloseVolume(file_system);
+                RespondJsonError(500U, "{\"error\":\"cannot read file\"}\n",
+                                result);
+                return;
+            }
+            if (stat.type == bmx::update::UpdateNodeType::Missing) {
+                backend_->CloseVolume(file_system);
+                RespondJsonError(404U, "{\"error\":\"not found\"}\n",
+                                result);
+                return;
+            }
+            if (stat.type != bmx::update::UpdateNodeType::RegularFile) {
+                backend_->CloseVolume(file_system);
+                RespondJsonError(409U,
+                                "{\"error\":\"not a regular file\"}\n",
+                                result);
+                return;
+            }
+            bmx::update::UpdateReadFile *file = 0;
+            uint64_t size = 0U;
+            if (!file_system->OpenRead(path, &file) || file == 0 ||
+                !file->GetSize(&size) || size != stat.size) {
+                if (file != 0) (void)file->Close();
+                backend_->CloseVolume(file_system);
+                RespondJsonError(500U, "{\"error\":\"cannot read file\"}\n",
+                                result);
+                return;
+            }
+            UpdateFileResponseStream *stream = new UpdateFileResponseStream(
+                backend_, file_system, file, size,
+                &CloseDeveloperFileVolume,
+                &DeveloperRouter::CooperativeYield);
+            if (stream == 0) {
+                (void)file->Close();
+                backend_->CloseVolume(file_system);
+                InternalError(result);
+                return;
+            }
             HttpResponse response;
-            StaticJsonError(404U, "{\"error\":\"volume unavailable\"}\n",
-                            &response);
+            response.Reset(200U);
+            response.AddHeader("Content-Type", "application/octet-stream");
+            response.AddHeader("Cache-Control", "no-store");
+            response.SetStream(stream);
+            response.completion = stream;
             result->Respond(response);
             return;
         }
@@ -781,12 +1072,10 @@ void DeveloperRouter::RouteFile(const HttpRequestHead &request,
             backend_);
         backend_->CloseVolume(file_system);
         if (status != DeveloperFileStatus::Ok) {
-            HttpResponse response;
             char const *body = status == DeveloperFileStatus::Missing
                                    ? "{\"error\":\"not found\"}\n"
                                    : "{\"error\":\"cannot read file\"}\n";
-            StaticJsonError(FileHttpStatus(status), body, &response);
-            result->Respond(response);
+            RespondJsonError(FileHttpStatus(status), body, result);
             return;
         }
         OwnedResponse *owned = new OwnedResponse();
@@ -806,17 +1095,109 @@ void DeveloperRouter::RouteFile(const HttpRequestHead &request,
         return;
     }
 
-    if (!request.has_content_length) {
+    if (request.method == HttpMethod::Delete) {
+        if (request.has_query ||
+            (request.has_content_length && request.content_length != 0U)) {
+            BadRequest("{\"error\":\"invalid DELETE request\"}\n", result);
+            return;
+        }
+        if (active_upload_ != 0) {
+            RespondJsonError(409U, "{\"error\":\"upload already active\"}\n",
+                            result);
+            return;
+        }
+        bmx::update::UpdateFileSystem *file_system =
+            backend_->OpenVolume(volume);
+        if (file_system == 0) {
+            RespondJsonError(404U, "{\"error\":\"volume unavailable\"}\n",
+                            result);
+            return;
+        }
+        bmx::update::UpdateFileStat stat;
+        if (!file_system->Stat(path, &stat)) {
+            backend_->CloseVolume(file_system);
+            RespondJsonError(500U, "{\"error\":\"cannot delete file\"}\n",
+                            result);
+            return;
+        }
+        if (stat.type == bmx::update::UpdateNodeType::Directory ||
+            stat.type == bmx::update::UpdateNodeType::Other) {
+            backend_->CloseVolume(file_system);
+            RespondJsonError(409U,
+                            "{\"error\":\"not a regular file\"}\n",
+                            result);
+            return;
+        }
+        if (stat.type == bmx::update::UpdateNodeType::RegularFile &&
+            (!file_system->RemoveFile(path) ||
+             !file_system->SyncContainingDirectory(path))) {
+            backend_->CloseVolume(file_system);
+            RespondJsonError(500U, "{\"error\":\"cannot delete file\"}\n",
+                            result);
+            return;
+        }
+        backend_->CloseVolume(file_system);
         HttpResponse response;
-        StaticJsonError(411U, "{\"error\":\"Content-Length required\"}\n",
-                        &response);
+        response.Reset(204U);
+        response.SetEmptyBody();
         result->Respond(response);
         return;
     }
-    if (request.content_length > UINT32_MAX) {
+
+    if (request.method == HttpMethod::Post) {
+        if (!request.has_query ||
+            (request.has_content_length && request.content_length != 0U) ||
+            !OnlyQueryNames(request.raw_query, "to", 0)) {
+            BadRequest("{\"error\":\"invalid rename request\"}\n", result);
+            return;
+        }
+        HttpStringView encoded_target;
+        unsigned target_count = 0U;
+        QueryValue(request.raw_query, "to", &encoded_target, &target_count);
+        char target[kDeveloperFilePathBytes];
+        if (target_count != 1U ||
+            !DecodePercent(encoded_target, target, sizeof(target)) ||
+            bmx::update::ValidateDeveloperFatRelativePath(
+                target, sizeof(target)) !=
+                bmx::update::FatPathValidationStatus::Ok) {
+            BadRequest("{\"error\":\"invalid rename target\"}\n", result);
+            return;
+        }
+        if (active_upload_ != 0) {
+            RespondJsonError(409U, "{\"error\":\"upload already active\"}\n",
+                            result);
+            return;
+        }
+        bmx::update::UpdateFileSystem *file_system =
+            backend_->OpenVolume(volume);
+        if (file_system == 0) {
+            RespondJsonError(404U, "{\"error\":\"volume unavailable\"}\n",
+                            result);
+            return;
+        }
+        const UpdateRenameStatus status = RenameUpdateNode(
+            file_system, path, target,
+            bmx::update::UpdateNodeType::RegularFile);
+        backend_->CloseVolume(file_system);
+        if (RespondRenameError(
+                status, "{\"error\":\"not a regular file\"}\n",
+                "{\"error\":\"cannot rename file\"}\n",
+                "{\"error\":\"cannot rename file\"}\n",
+                "{\"error\":\"cannot rename file\"}\n", result)) return;
         HttpResponse response;
-        StaticJsonError(413U, "{\"error\":\"file too large\"}\n", &response);
+        response.Reset(204U);
+        response.SetEmptyBody();
         result->Respond(response);
+        return;
+    }
+
+    if (!request.has_content_length) {
+        RespondJsonError(411U, "{\"error\":\"Content-Length required\"}\n",
+                        result);
+        return;
+    }
+    if (request.content_length > UINT32_MAX) {
+        RespondJsonError(413U, "{\"error\":\"file too large\"}\n", result);
         return;
     }
     HttpStringView hash_header;
@@ -847,18 +1228,14 @@ void DeveloperRouter::RouteFile(const HttpRequestHead &request,
         reboot = true;
     }
     if (active_upload_ != 0) {
-        HttpResponse response;
-        StaticJsonError(409U, "{\"error\":\"upload already active\"}\n",
-                        &response);
-        result->Respond(response);
+        RespondJsonError(409U, "{\"error\":\"upload already active\"}\n",
+                        result);
         return;
     }
     bmx::update::UpdateFileSystem *file_system = backend_->OpenVolume(volume);
     if (file_system == 0) {
-        HttpResponse response;
-        StaticJsonError(404U, "{\"error\":\"volume unavailable\"}\n",
-                        &response);
-        result->Respond(response);
+        RespondJsonError(404U, "{\"error\":\"volume unavailable\"}\n",
+                        result);
         return;
     }
     UploadSink *sink = new UploadSink(this, backend_, file_system, volume,
@@ -877,12 +1254,10 @@ void DeveloperRouter::RouteFile(const HttpRequestHead &request,
         path, request.content_length, digest, request_token_);
     if (begin != DeveloperFileStatus::Ok) {
         sink->Abort(HttpBodyAbortReason::SinkRejected);
-        HttpResponse response;
         char const *body = begin == DeveloperFileStatus::InsufficientSpace
                                ? "{\"error\":\"insufficient space\"}\n"
                                : "{\"error\":\"cannot prepare upload\"}\n";
-        StaticJsonError(FileHttpStatus(begin), body, &response);
-        result->Respond(response);
+        RespondJsonError(FileHttpStatus(begin), body, result);
         return;
     }
     result->ReceiveBody(sink, request.content_length);
@@ -953,10 +1328,8 @@ void DeveloperRouter::RouteLogs(const HttpRequestHead &request,
         }
     }
     if (slot == 2U) {
-        HttpResponse response;
-        StaticJsonError(429U, "{\"error\":\"too many log followers\"}\n",
-                        &response);
-        result->Respond(response);
+        RespondJsonError(429U, "{\"error\":\"too many log followers\"}\n",
+                        result);
         return;
     }
     const DeveloperLogWindow window = ring->Window();
@@ -966,7 +1339,7 @@ void DeveloperRouter::RouteLogs(const HttpRequestHead &request,
     unsigned since_count = 0U;
     QueryValue(request.raw_query, "since", &since, &since_count);
     if (since_count > 1U ||
-        (since_count == 1U && !ParseDecimal(since, &requested))) {
+        (since_count == 1U && !ParseUnsignedDecimal(since, &requested))) {
         BadRequest("{\"error\":\"invalid log sequence\"}\n", result);
         return;
     }
@@ -975,7 +1348,7 @@ void DeveloperRouter::RouteLogs(const HttpRequestHead &request,
     unsigned epoch_count = 0U;
     QueryValue(request.raw_query, "epoch", &epoch, &epoch_count);
     if (epoch_count > 1U ||
-        (epoch_count == 1U && !ParseDecimal(epoch, &requested_epoch))) {
+        (epoch_count == 1U && !ParseUnsignedDecimal(epoch, &requested_epoch))) {
         BadRequest("{\"error\":\"invalid log epoch\"}\n", result);
         return;
     }
@@ -1045,58 +1418,37 @@ void DeveloperRouter::RouteUsbDevices(const HttpRequestHead &request,
         InternalError(result);
         return;
     }
-    size_t offset = 0U;
-    int written = snprintf(owned->body_, sizeof(owned->body_),
-                           "{\"devices\":[");
-    if (written < 0 || static_cast<size_t>(written) >= sizeof(owned->body_)) {
-        delete owned;
-        InternalError(result);
-        return;
-    }
-    offset = static_cast<size_t>(written);
-    bool valid = true;
-    for (size_t index = 0U; index < count && valid; ++index) {
+    BoundedJsonWriter writer(owned->body_, sizeof(owned->body_));
+    writer.Text("{\"devices\":[");
+    for (size_t index = 0U; index < count; ++index) {
         const UsbDiagnosticDeviceSnapshot &device = devices[index];
-        written = snprintf(
-            owned->body_ + offset, sizeof(owned->body_) - offset,
-            "%s{\"host\":%lu,\"port\":%lu,\"route\":%lu,"
-            "\"connected\":%s,\"state\":\"%s\","
-            "\"vid\":\"%04x\",\"pid\":\"%04x\",\"product\":\"",
-            index == 0U ? "" : ",",
-            static_cast<unsigned long>(device.host),
-            static_cast<unsigned long>(device.root_port),
-            static_cast<unsigned long>(device.route),
-            device.connected ? "true" : "false",
-            UsbDiagnosticDeviceStateText(device.state),
-            static_cast<unsigned>(device.vendor_id),
-            static_cast<unsigned>(device.product_id));
-        if (written < 0 || static_cast<size_t>(written) >=
-                               sizeof(owned->body_) - offset) {
-            valid = false;
-            break;
-        }
-        offset += static_cast<size_t>(written);
-        if (!AppendJsonString(owned->body_, sizeof(owned->body_), &offset,
-                              device.product)) {
-            valid = false;
-            break;
-        }
-        written = snprintf(owned->body_ + offset,
-                           sizeof(owned->body_) - offset, "\"}");
-        if (written < 0 || static_cast<size_t>(written) >=
-                               sizeof(owned->body_) - offset) {
-            valid = false;
-            break;
-        }
-        offset += static_cast<size_t>(written);
+        char vendor[5U];
+        char product[5U];
+        snprintf(vendor, sizeof(vendor), "%04x",
+                 static_cast<unsigned>(device.vendor_id));
+        snprintf(product, sizeof(product), "%04x",
+                 static_cast<unsigned>(device.product_id));
+        if (index != 0U) writer.Text(",");
+        writer.Text("{\"host\":");
+        writer.Unsigned(device.host);
+        writer.Text(",\"port\":");
+        writer.Unsigned(device.root_port);
+        writer.Text(",\"route\":");
+        writer.Unsigned(device.route);
+        writer.Text(",\"connected\":");
+        writer.Boolean(device.connected);
+        writer.Text(",\"state\":");
+        writer.String(UsbDiagnosticDeviceStateText(device.state));
+        writer.Text(",\"vid\":");
+        writer.String(vendor);
+        writer.Text(",\"pid\":");
+        writer.String(product);
+        writer.Text(",\"product\":");
+        writer.String(device.product);
+        writer.Text("}");
     }
-    if (valid) {
-        written = snprintf(owned->body_ + offset,
-                           sizeof(owned->body_) - offset, "]}\n");
-        valid = written >= 0 && static_cast<size_t>(written) <
-                                     sizeof(owned->body_) - offset;
-    }
-    if (!valid) {
+    writer.Text("]}\n");
+    if (!writer.valid()) {
         delete owned;
         InternalError(result);
         return;
@@ -1213,9 +1565,9 @@ void DeveloperRouter::RouteUsbStart(const HttpRequestHead &request,
         QueryValue(request.raw_query, "port", &port_value, &port_count);
         QueryValue(request.raw_query, "route", &route_value, &route_count);
         valid = host_count == 1U && port_count == 1U && route_count == 1U &&
-                ParseDecimal(host_value, &host) &&
-                ParseDecimal(port_value, &port) &&
-                ParseDecimal(route_value, &route) && host <= UINT32_MAX &&
+                ParseUnsignedDecimal(host_value, &host) &&
+                ParseUnsignedDecimal(port_value, &port) &&
+                ParseUnsignedDecimal(route_value, &route) && host <= UINT32_MAX &&
                 port <= UINT32_MAX && route <= UINT32_MAX;
         if (valid) {
             target.host = static_cast<uint32_t>(host);
@@ -1234,10 +1586,8 @@ void DeveloperRouter::RouteUsbStart(const HttpRequestHead &request,
     const UsbDiagnosticRequestStatus status =
         backend_->StartUsbDiagnostic(mode, target);
     if (status == UsbDiagnosticRequestStatus::Busy) {
-        HttpResponse response;
-        StaticJsonError(409U, "{\"error\":\"USB diagnostic already active\"}\n",
-                        &response);
-        result->Respond(response);
+        RespondJsonError(409U, "{\"error\":\"USB diagnostic already active\"}\n",
+                        result);
         return;
     }
     if (status == UsbDiagnosticRequestStatus::InvalidTarget) {
@@ -1335,7 +1685,7 @@ void DeveloperRouter::ErrorResponse(HttpServerError error,
         status = 500U;
         body = "{\"error\":\"internal error\"}\n";
     }
-    StaticJsonError(status, body, response);
+    SetJsonErrorResponse(status, body, response);
 }
 
 }  // namespace remote

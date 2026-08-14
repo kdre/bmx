@@ -34,6 +34,7 @@
 
 // VICE includes
 #include "bmc64_log.h"
+#include "archdep.h"
 #include "raspi_machine.h"
 #include "autostart.h"
 #include "diskimage.h"
@@ -60,6 +61,7 @@
 #include "tape.h"
 #include "sid.h"
 #include "sid-resources.h"
+#include "sysfile.h"
 #include "rs232drv/rs232net.h"
 #include "userport/userport.h"
 #include "userport/userport_joystick.h"
@@ -69,6 +71,7 @@
 // RASPI includes
 #include "circle.h"
 #include "keycodes.h"
+#include "keymap_editor.h"
 #include "keyboard_matrix.h"
 #include "mousedrv.h"
 
@@ -294,9 +297,15 @@ static int user_pos_keymap_is(const char *expected) {
 
 static int keyboard_host_layout_value(void) {
    if (keyboard_host_layout < 0) {
+      int index = KBD_INDEX_USERPOS;
+      int mapping = KBD_MAPPING_US;
+      resources_get_int("KeymapIndex", &index);
+      resources_get_int("KeyboardMapping", &mapping);
       keyboard_host_layout =
           user_pos_keymap_is("rpi_pos_de.vkm") ||
-          user_pos_keymap_is("user_pos_de.vkm")
+              user_pos_keymap_is("user_pos_de.vkm") ||
+              ((index == KBD_INDEX_SYM || index == KBD_INDEX_POS) &&
+               mapping == KBD_MAPPING_DE)
               ? KEYBOARD_HOST_LAYOUT_DE
               : KEYBOARD_HOST_LAYOUT_US;
    }
@@ -313,6 +322,24 @@ static const char *positional_keyboard_mapping_file(void) {
    return keyboard_host_layout_value() == KEYBOARD_HOST_LAYOUT_DE
               ? "rpi_pos_de.vkm"
               : "rpi_pos.vkm";
+}
+
+static int set_vice_keyboard_mapping(int index) {
+   int active_index;
+   int active_mapping;
+   int mapping = keyboard_host_layout_value() == KEYBOARD_HOST_LAYOUT_DE
+                    ? KBD_MAPPING_DE
+                    : KBD_MAPPING_US;
+
+   if ((index != KBD_INDEX_SYM && index != KBD_INDEX_POS) ||
+       resources_set_int("KeyboardMapping", mapping) < 0 ||
+       resources_set_int("KeymapIndex", index) < 0 ||
+       resources_get_int("KeymapIndex", &active_index) < 0 ||
+       resources_get_int("KeyboardMapping", &active_mapping) < 0 ||
+       active_index != index || active_mapping != mapping) {
+      return -1;
+   }
+   return 0;
 }
 
 static int set_pos_keyboard_mapping_file(const char *filename) {
@@ -341,7 +368,7 @@ static int fallback_to_positional_keyboard_mapping(void) {
    int result =
        set_pos_keyboard_mapping_file(positional_keyboard_mapping_file());
    if (keyboard_mapping_item != NULL) {
-      keyboard_mapping_item->value = KEYBOARD_MAPPING_POS;
+      keyboard_mapping_item->value = KEYBOARD_MAPPING_BMX;
    }
    return result;
 }
@@ -349,8 +376,9 @@ static int fallback_to_positional_keyboard_mapping(void) {
 static int vice_keymap_index_to_bmc(int value) {
    switch (value) {
       case KBD_INDEX_SYM:
+         return KEYBOARD_MAPPING_VICE_SYMBOLIC;
       case KBD_INDEX_POS:
-         return KEYBOARD_MAPPING_POS;
+         return KEYBOARD_MAPPING_VICE_POSITIONAL;
       case KBD_INDEX_USERPOS:
          if (user_pos_keymap_is("user_pos.vkm") ||
              user_pos_keymap_is("user_pos_de.vkm")) {
@@ -358,13 +386,13 @@ static int vice_keymap_index_to_bmc(int value) {
          }
          if (user_pos_keymap_is("rpi_pos.vkm") ||
              user_pos_keymap_is("rpi_pos_de.vkm")) {
-            return KEYBOARD_MAPPING_POS;
+            return KEYBOARD_MAPPING_BMX;
          }
          return KEYBOARD_MAPPING_MAXI;
       case KBD_INDEX_USERSYM:
          return KEYBOARD_MAPPING_PETSCIIBOARD;
       default:
-         return KEYBOARD_MAPPING_POS;
+         return KEYBOARD_MAPPING_BMX;
    }
 }
 
@@ -385,47 +413,57 @@ int emux_keyboard_mapping_lookup(long keycode, unsigned char usb_modifiers,
                                  row, column, flags);
 }
 
-int emux_keyboard_mapping_target_name(int row, int column, int flags,
-                                      char *buffer, size_t buffer_size) {
-   BmxKeyboardMatrix matrix;
-
+static int emux_active_keyboard_matrix(BmxKeyboardMatrix *matrix) {
+   if (matrix == NULL) {
+      return 0;
+   }
    switch (machine_class) {
       case VICE_MACHINE_C64:
       case VICE_MACHINE_C64SC:
       case VICE_MACHINE_SCPU64:
-         matrix = BMX_KEYBOARD_MATRIX_C64;
+         *matrix = BMX_KEYBOARD_MATRIX_C64;
          break;
       case VICE_MACHINE_C128:
-         matrix = BMX_KEYBOARD_MATRIX_C128;
+         *matrix = BMX_KEYBOARD_MATRIX_C128;
          break;
       case VICE_MACHINE_VIC20:
-         matrix = BMX_KEYBOARD_MATRIX_VIC20;
+         *matrix = BMX_KEYBOARD_MATRIX_VIC20;
          break;
       case VICE_MACHINE_PLUS4:
-         matrix = BMX_KEYBOARD_MATRIX_PLUS4;
+         *matrix = BMX_KEYBOARD_MATRIX_PLUS4;
          break;
       case VICE_MACHINE_PET:
          switch (machine_get_keyboard_type()) {
             case 1:
-               matrix = BMX_KEYBOARD_MATRIX_PET_BUSINESS_US;
+               *matrix = BMX_KEYBOARD_MATRIX_PET_BUSINESS_US;
                break;
             case 2:
-               matrix = BMX_KEYBOARD_MATRIX_PET_BUSINESS_DE;
+               *matrix = BMX_KEYBOARD_MATRIX_PET_BUSINESS_DE;
                break;
             case 4:
-               matrix = BMX_KEYBOARD_MATRIX_PET_GRAPHICS;
+               *matrix = BMX_KEYBOARD_MATRIX_PET_GRAPHICS;
                break;
             default:
                /* The Japanese PET matrix is not documented separately. */
-               matrix = BMX_KEYBOARD_MATRIX_PET_BUSINESS_UK;
+               *matrix = BMX_KEYBOARD_MATRIX_PET_BUSINESS_UK;
                break;
          }
          break;
       default:
-         if (buffer != NULL && buffer_size > 0) {
-            buffer[0] = '\0';
-         }
          return 0;
+   }
+   return 1;
+}
+
+int emux_keyboard_mapping_target_name(int row, int column, int flags,
+                                      char *buffer, size_t buffer_size) {
+   BmxKeyboardMatrix matrix;
+
+   if (!emux_active_keyboard_matrix(&matrix)) {
+      if (buffer != NULL && buffer_size > 0) {
+         buffer[0] = '\0';
+      }
+      return 0;
    }
 
    return keyboard_matrix_format_emulated_key(matrix, row, column, flags,
@@ -433,18 +471,336 @@ int emux_keyboard_mapping_target_name(int row, int column, int flags,
 }
 
 const char *emux_keyboard_mapping_file(void) {
+   static const char *resource_names[] = {
+      "KeymapSymFile",
+      "KeymapPosFile",
+      "KeymapUserSymFile",
+      "KeymapUserPosFile"
+   };
    const char *name = NULL;
    int index;
-   if (resources_get_int("KeymapIndex", &index) < 0) {
+   if (resources_get_int("KeymapIndex", &index) < 0 ||
+       index < KBD_INDEX_SYM || index > KBD_INDEX_USERPOS) {
       return "(unknown)";
    }
-   if (resources_get_string(index == KBD_INDEX_USERSYM
-                                ? "KeymapUserSymFile"
-                                : "KeymapUserPosFile",
-                            &name) < 0 || name == NULL || *name == '\0') {
+   if (resources_get_string(resource_names[index], &name) < 0 ||
+       name == NULL || *name == '\0') {
       return "(default)";
    }
    return name;
+}
+
+#define KEYMAP_EDITOR_FILE_LIMIT (64U * 1024U)
+
+static void keymap_editor_error(char *error, size_t error_size,
+                                const char *message) {
+   if (error != NULL && error_size > 0) {
+      snprintf(error, error_size, "%s", message);
+   }
+}
+
+static int keymap_editor_add_snapshot_binding(
+    struct keymap_editor_binding *bindings, size_t *count,
+    long keycode, int row, int column, int flags) {
+   if (keycode < 0) {
+      return 1;
+   }
+   if (*count >= KEYMAP_EDITOR_MAX_BINDINGS) {
+      return 0;
+   }
+   bindings[*count].keycode = keycode;
+   bindings[*count].row = row;
+   bindings[*count].column = column;
+   bindings[*count].flags = flags;
+   ++*count;
+   return 1;
+}
+
+static int keymap_editor_read_custom(char **contents, size_t *contents_size,
+                                     char **complete_path,
+                                     char *error, size_t error_size);
+
+static int keymap_editor_custom_selected(void) {
+   int keymap_index;
+   return resources_get_int("KeymapIndex", &keymap_index) >= 0 &&
+          vice_keymap_index_to_bmc(keymap_index) == KEYBOARD_MAPPING_CUSTOM;
+}
+
+int emux_keymap_editor_begin(struct keymap_editor_model *model,
+                             int *editable,
+                             char *error, size_t error_size) {
+   struct keymap_editor_binding bindings[KEYMAP_EDITOR_MAX_BINDINGS];
+   struct keymap_editor_target catalog[KEYMAP_EDITOR_MAX_TARGETS];
+   BmxKeyboardMatrix matrix;
+   char *contents = NULL;
+   char *complete_path = NULL;
+   size_t contents_size = 0;
+   size_t count = 0;
+   size_t catalog_count;
+   size_t target;
+   int i;
+
+   if (model == NULL || editable == NULL) {
+      keymap_editor_error(error, error_size, "Internal editor error");
+      return 0;
+   }
+   /* Opening the editor snapshots the active map and must never select a
+      different mapping as a side effect. */
+   *editable = keymap_editor_custom_selected();
+
+   for (i = 0; i < keyconvmap_num_keys; ++i) {
+      if (!keymap_editor_add_snapshot_binding(
+              bindings, &count, keyconvmap[i].sym, keyconvmap[i].row,
+              keyconvmap[i].column, keyconvmap[i].shift)) {
+         keymap_editor_error(error, error_size, "Keymap is too large to edit");
+         return 0;
+      }
+   }
+   if (!keymap_editor_add_snapshot_binding(
+           bindings, &count, key_ctrl_restore1,
+           KBD_ROW_RESTORE_1, KBD_COL_RESTORE_1, key_flags_restore1) ||
+       !keymap_editor_add_snapshot_binding(
+           bindings, &count, key_ctrl_restore2,
+           KBD_ROW_RESTORE_2, KBD_COL_RESTORE_2, key_flags_restore2) ||
+       !keymap_editor_add_snapshot_binding(
+           bindings, &count, key_ctrl_column4080,
+           KBD_ROW_4080COLUMN, KBD_COL_4080COLUMN, key_flags_column4080) ||
+       !keymap_editor_add_snapshot_binding(
+           bindings, &count, key_ctrl_caps,
+           KBD_ROW_CAPSLOCK, KBD_COL_CAPSLOCK, key_flags_caps) ||
+       !keymap_editor_model_init(model, bindings, count)) {
+      keymap_editor_error(error, error_size, "Keymap is too large to edit");
+      return 0;
+   }
+   if (*editable) {
+      if (!keymap_editor_read_custom(&contents, &contents_size, &complete_path,
+                                     error, error_size)) {
+         return 0;
+      }
+      if (!keymap_editor_merge_target_catalog(model, contents,
+                                              contents_size)) {
+         free(contents);
+         lib_free(complete_path);
+         keymap_editor_error(error, error_size,
+                             "Saved keymap editor data is invalid");
+         return 0;
+      }
+   }
+   free(contents);
+   lib_free(complete_path);
+
+   if (!emux_active_keyboard_matrix(&matrix)) {
+      keymap_editor_error(error, error_size, "Unsupported keyboard matrix");
+      return 0;
+   }
+   catalog_count = keyboard_matrix_editor_target_count(matrix);
+   if (catalog_count > KEYMAP_EDITOR_MAX_TARGETS) {
+      keymap_editor_error(error, error_size,
+                          "Keyboard has too many keys to edit");
+      return 0;
+   }
+   for (target = 0; target < catalog_count; ++target) {
+      int row;
+      int column;
+      int flags;
+      if (!keyboard_matrix_editor_target_at(
+              matrix, target, &row, &column, &flags)) {
+         keymap_editor_error(error, error_size,
+                             "Keyboard has too many keys to edit");
+         return 0;
+      }
+      catalog[target].row = row;
+      catalog[target].column = column;
+      catalog[target].flags = flags &
+          (KEYMAP_EDITOR_VIRTUAL_SHIFT | KEYMAP_EDITOR_VIRTUAL_CBM |
+           KEYMAP_EDITOR_VIRTUAL_CTRL);
+      catalog[target].mapping_flags = flags;
+   }
+   if (!keymap_editor_model_order_targets(model, catalog, catalog_count)) {
+      keymap_editor_error(error, error_size,
+                          "Keyboard has too many keys to edit");
+      return 0;
+   }
+   return 1;
+}
+
+static int keymap_editor_read_custom(char **contents, size_t *contents_size,
+                                     char **complete_path,
+                                     char *error, size_t error_size) {
+   FILE *fp;
+   size_t size;
+   int extra;
+
+   *contents = NULL;
+   *complete_path = NULL;
+   fp = sysfile_open(custom_keyboard_mapping_file(), machine_name,
+                     complete_path, "rb");
+   if (fp == NULL || *complete_path == NULL) {
+      if (fp != NULL) fclose(fp);
+      keymap_editor_error(error, error_size, "Custom keymap file not found");
+      return 0;
+   }
+   *contents = (char *)malloc(KEYMAP_EDITOR_FILE_LIMIT + 1U);
+   if (*contents == NULL) {
+      fclose(fp);
+      keymap_editor_error(error, error_size, "Not enough memory");
+      return 0;
+   }
+   size = fread(*contents, 1, KEYMAP_EDITOR_FILE_LIMIT, fp);
+   extra = fgetc(fp);
+   if (ferror(fp) || extra != EOF) {
+      fclose(fp);
+      free(*contents);
+      *contents = NULL;
+      keymap_editor_error(error, error_size,
+                          "Custom keymap is too large or unreadable");
+      return 0;
+   }
+   fclose(fp);
+   (*contents)[size] = '\0';
+   *contents_size = size;
+   return 1;
+}
+
+static int keymap_editor_write_and_reload(const char *block,
+                                          size_t block_size,
+                                          char *error, size_t error_size) {
+   char *input = NULL;
+   char *output = NULL;
+   char *complete_path = NULL;
+   char *temp_path = NULL;
+   char *backup_path = NULL;
+   size_t input_size = 0;
+   size_t output_size = 0;
+   size_t path_size;
+   FILE *fp = NULL;
+   int result = 0;
+
+   if (!keymap_editor_read_custom(&input, &input_size, &complete_path,
+                                  error, error_size)) {
+      goto done;
+   }
+   output = (char *)malloc(KEYMAP_EDITOR_FILE_LIMIT * 2U + 1U);
+   if (output == NULL ||
+       !keymap_editor_replace_block(
+           input, input_size, block, block_size, output,
+           KEYMAP_EDITOR_FILE_LIMIT * 2U + 1U, &output_size)) {
+      keymap_editor_error(error, error_size,
+                          "Could not create the edited keymap");
+      goto done;
+   }
+
+   path_size = strlen(complete_path) + 16U;
+   temp_path = (char *)malloc(path_size);
+   backup_path = (char *)malloc(path_size);
+   if (temp_path == NULL || backup_path == NULL) {
+      keymap_editor_error(error, error_size, "Not enough memory");
+      goto done;
+   }
+   snprintf(temp_path, path_size, "%s.bmx.tmp", complete_path);
+   snprintf(backup_path, path_size, "%s.bmx.bak", complete_path);
+   archdep_remove(temp_path);
+   archdep_remove(backup_path);
+
+   fp = fopen(temp_path, "wb");
+   if (fp == NULL || fwrite(output, 1, output_size, fp) != output_size ||
+       fflush(fp) != 0) {
+      if (fp != NULL) fclose(fp);
+      fp = NULL;
+      archdep_remove(temp_path);
+      keymap_editor_error(error, error_size, "Could not write custom keymap");
+      goto done;
+   }
+   if (fclose(fp) != 0) {
+      fp = NULL;
+      archdep_remove(temp_path);
+      keymap_editor_error(error, error_size, "Could not close custom keymap");
+      goto done;
+   }
+   fp = NULL;
+   if (archdep_rename(complete_path, backup_path) != 0) {
+      archdep_remove(temp_path);
+      keymap_editor_error(error, error_size,
+                          "Could not back up custom keymap");
+      goto done;
+   }
+   if (archdep_rename(temp_path, complete_path) != 0) {
+      archdep_remove(temp_path);
+      if (archdep_rename(backup_path, complete_path) == 0) {
+         keymap_editor_error(error, error_size,
+                             "Could not replace custom keymap");
+      } else {
+         keymap_editor_error(
+             error, error_size,
+             "Could not replace keymap; original remains in .bmx.bak");
+      }
+      goto done;
+   }
+   if (keyboard_set_keymap_index(KBD_INDEX_USERPOS, NULL) < 0) {
+      if (archdep_remove(complete_path) == 0 &&
+          archdep_rename(backup_path, complete_path) == 0) {
+         keyboard_set_keymap_index(KBD_INDEX_USERPOS, NULL);
+         keymap_editor_error(error, error_size,
+                             "Edited keymap is invalid; original restored");
+      } else {
+         keymap_editor_error(
+             error, error_size,
+             "Edited keymap is invalid; original remains in .bmx.bak");
+      }
+      goto done;
+   }
+   archdep_remove(backup_path);
+   result = 1;
+
+done:
+   if (fp != NULL) fclose(fp);
+   free(backup_path);
+   free(temp_path);
+   free(output);
+   free(input);
+   lib_free(complete_path);
+   return result;
+}
+
+int emux_keymap_editor_save(const struct keymap_editor_model *model,
+                            char *error, size_t error_size) {
+   char *block;
+   size_t block_size;
+   int result;
+   if (model == NULL) {
+      keymap_editor_error(error, error_size, "Internal editor error");
+      return 0;
+   }
+   if (!keymap_editor_custom_selected()) {
+      keymap_editor_error(error, error_size,
+                          "Select Mapping: Custom to edit");
+      return 0;
+   }
+   block = (char *)malloc(KEYMAP_EDITOR_FILE_LIMIT + 1U);
+   if (block == NULL) {
+      keymap_editor_error(error, error_size, "Not enough memory");
+      return 0;
+   }
+   if (!keymap_editor_serialize_block(model, block,
+                                      KEYMAP_EDITOR_FILE_LIMIT + 1U,
+                                      &block_size)) {
+      free(block);
+      keymap_editor_error(error, error_size, "Edited keymap is too large");
+      return 0;
+   }
+   result = keymap_editor_write_and_reload(block, block_size,
+                                           error, error_size);
+   free(block);
+   return result;
+}
+
+int emux_keymap_editor_restore_defaults(char *error, size_t error_size) {
+   if (!keymap_editor_custom_selected()) {
+      keymap_editor_error(error, error_size,
+                          "Select Mapping: Custom to edit");
+      return 0;
+   }
+   return keymap_editor_write_and_reload("", 0, error, error_size);
 }
 
 void emux_trap_main_loop_ui(void) {
@@ -1416,13 +1772,22 @@ void emux_add_tape_options(struct menu_item* parent) {
 void emux_add_keyboard_options(struct menu_item* parent) {
   keyboard_mapping_item = ui_menu_add_multiple_choice(
       MENU_KEYBOARD_MAPPING, parent, "Mapping");
-  keyboard_mapping_item->num_choices = 4;
+  keyboard_mapping_item->num_choices = 6;
 
   int tmp_value;
+  int staged_deshift;
   resources_get_int("KeymapIndex", &tmp_value);
   keyboard_mapping_item->value = vice_keymap_index_to_bmc(tmp_value);
-  strcpy(keyboard_mapping_item->choices[KEYBOARD_MAPPING_POS], "Positional");
-  keyboard_mapping_item->choice_ints[KEYBOARD_MAPPING_POS] = KBD_INDEX_USERPOS;
+  strcpy(keyboard_mapping_item->choices[KEYBOARD_MAPPING_BMX], "Pi/PC (BMX)");
+  keyboard_mapping_item->choice_ints[KEYBOARD_MAPPING_BMX] = KBD_INDEX_USERPOS;
+  strcpy(keyboard_mapping_item->choices[KEYBOARD_MAPPING_VICE_SYMBOLIC],
+         "Symbolic (VICE)");
+  keyboard_mapping_item->choice_ints[KEYBOARD_MAPPING_VICE_SYMBOLIC] =
+      KBD_INDEX_SYM;
+  strcpy(keyboard_mapping_item->choices[KEYBOARD_MAPPING_VICE_POSITIONAL],
+         "Positional (VICE)");
+  keyboard_mapping_item->choice_ints[KEYBOARD_MAPPING_VICE_POSITIONAL] =
+      KBD_INDEX_POS;
   strcpy(keyboard_mapping_item->choices[KEYBOARD_MAPPING_MAXI], "Maxi Positional");
   keyboard_mapping_item->choice_ints[KEYBOARD_MAPPING_MAXI] = KBD_INDEX_USERPOS;
   strcpy(keyboard_mapping_item->choices[KEYBOARD_MAPPING_PETSCIIBOARD], "PETSCIIBOARD");
@@ -1434,20 +1799,20 @@ void emux_add_keyboard_options(struct menu_item* parent) {
       MENU_KEYBOARD_HOST_LAYOUT, parent, "USB Keyboard Layout");
   keyboard_host_layout_item->num_choices = 2;
   keyboard_host_layout_item->value = keyboard_host_layout_value();
-  strcpy(keyboard_host_layout_item->choices[KEYBOARD_HOST_LAYOUT_US], "US");
+  strcpy(keyboard_host_layout_item->choices[KEYBOARD_HOST_LAYOUT_US],
+         "US (ANSI)");
   keyboard_host_layout_item->choice_ints[KEYBOARD_HOST_LAYOUT_US] =
       KEYBOARD_HOST_LAYOUT_US;
-  strcpy(keyboard_host_layout_item->choices[KEYBOARD_HOST_LAYOUT_DE], "DE");
+  strcpy(keyboard_host_layout_item->choices[KEYBOARD_HOST_LAYOUT_DE],
+         "DE (ISO)");
   keyboard_host_layout_item->choice_ints[KEYBOARD_HOST_LAYOUT_DE] =
       KEYBOARD_HOST_LAYOUT_DE;
 
-  ui_menu_add_button(MENU_KEYBOARD_RELOAD, parent, "Reload Custom Mapping");
+  resources_get_int("KeyboardStagedDeshift", &staged_deshift);
+  ui_menu_add_toggle(MENU_KEYBOARD_STAGED_DESHIFT, parent,
+                     "Safe Shifted Symbols", staged_deshift);
 
-  if (tmp_value == KBD_INDEX_SYM) {
-     resources_set_string("KeymapUserSymFile", "");
-     resources_set_string("KeymapUserPosFile", "rpi_pos.vkm");
-     resources_set_int("KeymapIndex", KBD_INDEX_USERPOS);
-  }
+  ui_menu_add_button(MENU_KEYBOARD_RELOAD, parent, "Reload Custom Mapping");
 }
 
 // NOTE: 0xd400 is normally not an option in VICE for the 2nd SID, but
@@ -2088,28 +2453,40 @@ int emux_handle_menu_change(struct menu_item* item) {
       resources_set_int_sprintf("Drive%iRAMA000", item->value, item->sub_id);
       return 1;
     case MENU_KEYBOARD_MAPPING:
-      if (item->value == KEYBOARD_MAPPING_POS) {
+      if (item->value == KEYBOARD_MAPPING_BMX) {
          if (set_pos_keyboard_mapping_file(
                  positional_keyboard_mapping_file()) < 0) {
-            ui_error("Positional keymap unavailable");
+            ui_error("Pi/PC keymap unavailable");
+         }
+      }
+      else if (item->value == KEYBOARD_MAPPING_VICE_SYMBOLIC) {
+         if (set_vice_keyboard_mapping(KBD_INDEX_SYM) < 0) {
+            fallback_to_positional_keyboard_mapping();
+            ui_error("VICE symbolic keymap unavailable; using Pi/PC fallback");
+         }
+      }
+      else if (item->value == KEYBOARD_MAPPING_VICE_POSITIONAL) {
+         if (set_vice_keyboard_mapping(KBD_INDEX_POS) < 0) {
+            fallback_to_positional_keyboard_mapping();
+            ui_error("VICE positional keymap unavailable; using Pi/PC fallback");
          }
       }
       else if (item->value == KEYBOARD_MAPPING_MAXI) {
          if (set_pos_keyboard_mapping_file("rpi_maxi_pos.vkm") < 0) {
             fallback_to_positional_keyboard_mapping();
-            ui_error("Maxi keymap unavailable; using positional fallback");
+            ui_error("Maxi keymap unavailable; using Pi/PC fallback");
          }
       }
       else if (item->value == KEYBOARD_MAPPING_PETSCIIBOARD) {
          if (set_sym_keyboard_mapping_file("rpi_petsciiboard_sym.vkm") < 0) {
             fallback_to_positional_keyboard_mapping();
-            ui_error("PETSCIIBOARD keymap unavailable; using positional fallback");
+            ui_error("PETSCIIBOARD keymap unavailable; using Pi/PC fallback");
          }
       }
       else if (item->value == KEYBOARD_MAPPING_CUSTOM) {
          if (set_pos_keyboard_mapping_file(custom_keyboard_mapping_file()) < 0) {
             fallback_to_positional_keyboard_mapping();
-            ui_error("Custom keymap unavailable; using positional fallback");
+            ui_error("Custom keymap unavailable; using Pi/PC fallback");
          }
          return 1;
       }
@@ -2119,18 +2496,31 @@ int emux_handle_menu_change(struct menu_item* item) {
                                  ? KEYBOARD_HOST_LAYOUT_DE
                                  : KEYBOARD_HOST_LAYOUT_US;
       if (keyboard_mapping_item != NULL) {
-         if (keyboard_mapping_item->value == KEYBOARD_MAPPING_POS) {
+         if (keyboard_mapping_item->value == KEYBOARD_MAPPING_BMX) {
             if (set_pos_keyboard_mapping_file(
                     positional_keyboard_mapping_file()) < 0) {
-               ui_error("Positional keymap unavailable");
+               ui_error("Pi/PC keymap unavailable");
             }
+         } else if (keyboard_mapping_item->value ==
+                        KEYBOARD_MAPPING_VICE_SYMBOLIC &&
+                    set_vice_keyboard_mapping(KBD_INDEX_SYM) < 0) {
+            fallback_to_positional_keyboard_mapping();
+            ui_error("VICE symbolic keymap unavailable; using Pi/PC fallback");
+         } else if (keyboard_mapping_item->value ==
+                        KEYBOARD_MAPPING_VICE_POSITIONAL &&
+                    set_vice_keyboard_mapping(KBD_INDEX_POS) < 0) {
+            fallback_to_positional_keyboard_mapping();
+            ui_error("VICE positional keymap unavailable; using Pi/PC fallback");
          } else if (keyboard_mapping_item->value == KEYBOARD_MAPPING_CUSTOM &&
                     set_pos_keyboard_mapping_file(
                         custom_keyboard_mapping_file()) < 0) {
             fallback_to_positional_keyboard_mapping();
-            ui_error("Custom keymap unavailable; using positional fallback");
+            ui_error("Custom keymap unavailable; using Pi/PC fallback");
          }
       }
+      return 1;
+    case MENU_KEYBOARD_STAGED_DESHIFT:
+      resources_set_int("KeyboardStagedDeshift", item->value);
       return 1;
     case MENU_KEYBOARD_RELOAD:
       if (keyboard_mapping_item == NULL ||
@@ -2446,8 +2836,16 @@ int emux_handle_loaded_setting(char *name, char* value_str, int value) {
     }
     if (resources_get_int("KeymapIndex", &keymap_index) == 0) {
       mapping = vice_keymap_index_to_bmc(keymap_index);
-      if (mapping == KEYBOARD_MAPPING_POS) {
+      if (mapping == KEYBOARD_MAPPING_BMX) {
         set_pos_keyboard_mapping_file(positional_keyboard_mapping_file());
+      } else if (mapping == KEYBOARD_MAPPING_VICE_SYMBOLIC) {
+        if (set_vice_keyboard_mapping(KBD_INDEX_SYM) < 0) {
+          fallback_to_positional_keyboard_mapping();
+        }
+      } else if (mapping == KEYBOARD_MAPPING_VICE_POSITIONAL) {
+        if (set_vice_keyboard_mapping(KBD_INDEX_POS) < 0) {
+          fallback_to_positional_keyboard_mapping();
+        }
       } else if (mapping == KEYBOARD_MAPPING_CUSTOM &&
                  set_pos_keyboard_mapping_file(
                      custom_keyboard_mapping_file()) < 0) {

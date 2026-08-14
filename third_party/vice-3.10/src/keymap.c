@@ -326,14 +326,31 @@ static void keyboard_keysym_undef(signed long sym)
     int i;
 
     if (sym >= 0) {
-        for (i = 0; i < keyconvmap_num_keys; i++) {
+        for (i = 0; i < keyconvmap_num_keys;) {
             if (keyconvmap[i].sym == sym) {
                 if (keyconvmap_num_keys) {
                     keyconvmap[i] = keyconvmap[--keyconvmap_num_keys];
                 }
                 keyconvmap[keyconvmap_num_keys].sym = ARCHDEP_KEYBOARD_SYM_NONE;
-                break;
+            } else {
+                i++;
             }
+        }
+        if (key_ctrl_restore1 == sym) {
+            key_ctrl_restore1 = -1;
+            key_flags_restore1 = KEYFLG_NO_LOCK;
+        }
+        if (key_ctrl_restore2 == sym) {
+            key_ctrl_restore2 = -1;
+            key_flags_restore2 = KEYFLG_NO_LOCK;
+        }
+        if (key_ctrl_column4080 == sym) {
+            key_ctrl_column4080 = -1;
+            key_flags_column4080 = 0;
+        }
+        if (key_ctrl_caps == sym) {
+            key_ctrl_caps = -1;
+            key_flags_caps = 0;
         }
     }
 }
@@ -343,10 +360,7 @@ static void keyboard_keyword_undef(void)
     char *key;
     signed long sym;
 
-    /* TODO: this only unsets from the main table, not for joysticks
-     *       inventing another keyword to reset joysticks only is perhaps a
-     *       good idea.
-     */
+    /* Joystick keysets intentionally remain independent from keyboard maps. */
     key = strtok(NULL, " \t");
     if (key == NULL || (sym = kbd_arch_keyname_to_keynum(key)) < 0) {
         keyboard_keymap_parse_errors++;
@@ -1606,10 +1620,6 @@ int keymap_resources_init(void)
         util_string_set(&resources_string_d3, name);
 
         log_verbose(keyboard_log, "Default positional map is: %s", name);
-#ifdef RASPI_COMPILE
-        util_string_set(&resources_string_d0, name);
-        util_string_set(&resources_string_d2, name);
-#else
         keyboard_set_default_keymap_file(KBD_INDEX_SYM);
         if (resources_get_string("KeymapSymFile", &name) < 0) {
             DBG(("<<keyboard_resources_init(error)"));
@@ -1619,7 +1629,6 @@ int keymap_resources_init(void)
 
         util_string_set(&resources_string_d0, name);
         util_string_set(&resources_string_d2, name);
-#endif
 
 #ifdef RASPI_COMPILE
         if (resources_set_int("KeymapIndex", KBD_INDEX_POS) < 0) {

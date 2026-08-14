@@ -36,6 +36,23 @@ struct HttpRouteResult {
     void ReceiveBody(HttpBodySink *sink, uint64_t maximum_bytes);
 };
 
+void SetJsonErrorResponse(unsigned status, const char *message,
+                          HttpResponse *response);
+void RespondJsonError(unsigned status, const char *message,
+                      HttpRouteResult *result);
+
+bool ConstantTimePasswordMatches(const HttpRequestHead &request,
+                                 const char *password);
+bool DecodePercent(HttpStringView source, char *destination, size_t capacity);
+bool ParseUnsignedDecimal(HttpStringView value, uint64_t *result);
+bool ParseUnsignedDecimal(HttpStringView value, uint32_t minimum,
+                          uint32_t maximum, uint32_t *result);
+bool QueryValue(HttpStringView query, const char *name,
+                HttpStringView *value, unsigned *count);
+bool OnlyQueryNames(HttpStringView query, const char *first,
+                    const char *second = 0, const char *third = 0,
+                    const char *fourth = 0);
+
 class HttpRouter {
  public:
     virtual ~HttpRouter() {}

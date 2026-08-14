@@ -24,7 +24,8 @@ static const size_t kFatFsUpdateFileSystemVerifyBufferBytes = 4096U;
 
 enum class FatFsUpdatePathPolicy : uint8_t {
     PortableRelease = 0,
-    Developer
+    Developer,
+    Media
 };
 
 // This adapter is intentionally synchronous and single-caller.  It allocates
@@ -48,6 +49,9 @@ public:
     bool CreateFileFresh(const char *path, UpdateWriteFile **file);
     bool CreateDirectory(const char *path);
     bool RemoveFile(const char *path);
+    bool RemoveDirectory(const char *path, bool recursive,
+                         UpdateCooperativeYield yield = 0,
+                         void *yield_context = 0);
     bool Rename(const char *source, const char *destination,
                 bool replace_existing);
     bool SyncContainingDirectory(const char *path);

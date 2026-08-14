@@ -9,9 +9,7 @@ extern "C" {
 #include "vicesocket.h"
 }
 
-#include <circle/sched/mutex.h>
-#include <circle/sched/scheduler.h>
-#include <circle/sched/task.h>
+#include <circle/spinlock.h>
 
 #include <errno.h>
 #include <string.h>
@@ -23,24 +21,21 @@ constexpr unsigned kMaxConnections = 8;
 constexpr unsigned kQueueSize = 16384;
 constexpr unsigned kTxChunkSize = 256;
 constexpr unsigned kRxChunkSize = 1600;
-constexpr unsigned kStopWaitMs = 250;
-constexpr unsigned kPostCloseDrainMs = 20;
-
-class MutexGuard {
+class SpinGuard {
 public:
-  explicit MutexGuard(CMutex &mutex) : m_mutex(mutex) { m_mutex.Acquire(); }
-  ~MutexGuard() { m_mutex.Release(); }
+  explicit SpinGuard(CSpinLock &lock) : m_lock(lock) { m_lock.Acquire(); }
+  ~SpinGuard() { m_lock.Release(); }
 
 private:
-  CMutex &m_mutex;
+  CSpinLock &m_lock;
 
-  MutexGuard(const MutexGuard &);
-  MutexGuard &operator=(const MutexGuard &);
+  SpinGuard(const SpinGuard &);
+  SpinGuard &operator=(const SpinGuard &);
 };
 
 class ByteQueue {
 public:
-  ByteQueue() : m_head(0), m_tail(0), m_count(0) {}
+  ByteQueue() : m_mutex(TASK_LEVEL), m_head(0), m_tail(0), m_count(0) {}
 
   unsigned Push(const uint8_t *data, unsigned len) {
     if (data == 0 || len == 0) {
@@ -140,7 +135,7 @@ public:
   }
 
 private:
-  CMutex m_mutex;
+  CSpinLock m_mutex;
   uint8_t m_data[kQueueSize];
   unsigned m_head;
   unsigned m_tail;
@@ -149,13 +144,14 @@ private:
 
 struct ConnectionSlot {
   ConnectionSlot()
-      : inUse(0), releaseRequested(0), stopRequested(0), connectStarted(0),
+      : mutex(TASK_LEVEL), inUse(0), releaseRequested(0),
+        stopRequested(0), connectStarted(0),
         generation(0), state(BMC64_ASYNC_NET_CLOSED), error(0), socket(0),
         txDroppedBytes(0), rxDroppedBytes(0), rxFullSkips(0) {
     target[0] = '\0';
   }
 
-  CMutex mutex;
+  CSpinLock mutex;
   int inUse;
   int releaseRequested;
   int stopRequested;
@@ -174,10 +170,10 @@ struct ConnectionSlot {
 
 ConnectionSlot g_slots[kMaxConnections];
 unsigned g_nextGeneration = 1;
-CMutex g_generationMutex;
+CSpinLock g_generationLock(TASK_LEVEL);
 
 unsigned NextGeneration() {
-  MutexGuard guard(g_generationMutex);
+  SpinGuard guard(g_generationLock);
   unsigned generation = g_nextGeneration++;
   if (g_nextGeneration == 0) {
     g_nextGeneration = 1;
@@ -248,7 +244,7 @@ void SnapshotSlot(ConnectionSlot &slot, AsyncSlotSnapshot *snapshot,
                   int includeQueues) {
   memset(snapshot, 0, sizeof(*snapshot));
   {
-    MutexGuard guard(slot.mutex);
+    SpinGuard guard(slot.mutex);
     snapshot->valid = 1;
     snapshot->inUse = slot.inUse;
     snapshot->releaseRequested = slot.releaseRequested;
@@ -274,7 +270,7 @@ int SnapshotHandle(const bmc64_async_net_handle_t *handle,
 
 void AddTxDropped(ConnectionSlot &slot, unsigned long bytes,
                   unsigned long *total) {
-  MutexGuard guard(slot.mutex);
+  SpinGuard guard(slot.mutex);
   slot.txDroppedBytes += bytes;
   if (total != 0) {
     *total = slot.txDroppedBytes;
@@ -283,7 +279,7 @@ void AddTxDropped(ConnectionSlot &slot, unsigned long bytes,
 
 void AddRxDropped(ConnectionSlot &slot, unsigned long bytes,
                   unsigned long *total) {
-  MutexGuard guard(slot.mutex);
+  SpinGuard guard(slot.mutex);
   slot.rxDroppedBytes += bytes;
   if (total != 0) {
     *total = slot.rxDroppedBytes;
@@ -291,7 +287,7 @@ void AddRxDropped(ConnectionSlot &slot, unsigned long bytes,
 }
 
 void AddRxFullSkip(ConnectionSlot &slot, unsigned long *total) {
-  MutexGuard guard(slot.mutex);
+  SpinGuard guard(slot.mutex);
   ++slot.rxFullSkips;
   if (total != 0) {
     *total = slot.rxFullSkips;
@@ -311,16 +307,11 @@ int AsyncDebugShouldLog(unsigned count) {
 }
 #endif
 
-class AsyncNetWorkerTask : public CTask {
+class AsyncNetWorker {
 public:
-  AsyncNetWorkerTask() : CTask(16 * 1024) { SetName("rs232net"); }
-
-  void Run(void) override {
-    for (;;) {
-      for (unsigned i = 0; i < kMaxConnections; ++i) {
-        ProcessSlot(g_slots[i]);
-      }
-      CScheduler::Get()->MsSleep(1);
+  void Process(void) {
+    for (unsigned i = 0; i < kMaxConnections; ++i) {
+      ProcessSlot(g_slots[i]);
     }
   }
 
@@ -364,7 +355,7 @@ private:
     int closeAbandoned = 0;
 
     {
-      MutexGuard guard(slot.mutex);
+      SpinGuard guard(slot.mutex);
       slot.connectStarted = 1;
       strncpy(target, slot.target, sizeof(target) - 1);
       target[sizeof(target) - 1] = '\0';
@@ -375,7 +366,7 @@ private:
       int err = vice_network_get_errorcode();
       BMC64_RS232_EVENT("async resolve failed target %s err %d %s",
                         target, err, AsyncErrnoName(err));
-      MutexGuard guard(slot.mutex);
+      SpinGuard guard(slot.mutex);
       slot.error = err;
       slot.state = BMC64_ASYNC_NET_ERROR;
       return;
@@ -390,7 +381,7 @@ private:
     }
 
     {
-      MutexGuard guard(slot.mutex);
+      SpinGuard guard(slot.mutex);
       if (slot.stopRequested || socket == 0) {
         if (socket != 0) {
           closeAbandoned = 1;
@@ -414,7 +405,7 @@ private:
                         target, closeResult);
       (void)closeResult;
 
-      MutexGuard guard(slot.mutex);
+      SpinGuard guard(slot.mutex);
       slot.state = BMC64_ASYNC_NET_CLOSED;
       slot.error = 0;
       return;
@@ -427,7 +418,7 @@ private:
 
   vice_network_socket_t *SocketForConnected(ConnectionSlot &slot,
                                             int *stopRequested) {
-    MutexGuard guard(slot.mutex);
+    SpinGuard guard(slot.mutex);
     if (stopRequested != 0) {
       *stopRequested = slot.stopRequested;
     }
@@ -553,7 +544,7 @@ private:
     unsigned generation;
 
     {
-      MutexGuard guard(slot.mutex);
+      SpinGuard guard(slot.mutex);
       socket = slot.socket;
       slot.socket = 0;
       generation = slot.generation;
@@ -575,7 +566,7 @@ private:
     (void)generation;
 
     {
-      MutexGuard guard(slot.mutex);
+      SpinGuard guard(slot.mutex);
       slot.error = error;
       slot.state = state;
     }
@@ -587,7 +578,7 @@ private:
     unsigned generation;
 
     {
-      MutexGuard guard(slot.mutex);
+      SpinGuard guard(slot.mutex);
       socket = slot.socket;
       slot.socket = 0;
       generation = slot.generation;
@@ -616,14 +607,13 @@ private:
   }
 };
 
-AsyncNetWorkerTask *g_worker = 0;
-CMutex g_workerMutex;
+AsyncNetWorker g_worker;
+bool g_workerInitialized = false;
+CSpinLock g_workerLock(TASK_LEVEL);
 
-void EnsureWorker() {
-  MutexGuard guard(g_workerMutex);
-  if (g_worker == 0) {
-    g_worker = new AsyncNetWorkerTask();
-  }
+bool WorkerAvailable() {
+  SpinGuard guard(g_workerLock);
+  return g_workerInitialized;
 }
 
 ConnectionSlot *HandleSlotIfValid(const bmc64_async_net_handle_t *handle);
@@ -648,7 +638,7 @@ int SnapshotHandle(const bmc64_async_net_handle_t *handle,
 
   ConnectionSlot *slot = handle->slot;
   {
-    MutexGuard guard(slot->mutex);
+    SpinGuard guard(slot->mutex);
     if (!slot->inUse || slot->generation != handle->generation) {
       return 0;
     }
@@ -689,11 +679,13 @@ bmc64_async_net_start(const char *target) {
     return 0;
   }
 
-  EnsureWorker();
+  if (!WorkerAvailable()) {
+    return 0;
+  }
 
   for (unsigned i = 0; i < kMaxConnections; ++i) {
     ConnectionSlot &slot = g_slots[i];
-    MutexGuard guard(slot.mutex);
+    SpinGuard guard(slot.mutex);
     if (!slot.inUse) {
       bmc64_async_net_handle_t *handle = new bmc64_async_net_handle_t;
       if (handle == 0) {
@@ -726,59 +718,35 @@ bmc64_async_net_start(const char *target) {
 }
 
 extern "C" void bmc64_async_net_stop(bmc64_async_net_handle_t *handle) {
-  AsyncSlotSnapshot snapshot;
-  unsigned waitMs = 0;
-  int stopQueued = 0;
-  int stopObserved = 0;
-
   if (handle == 0) {
     return;
   }
 
   if (handle->slot != 0) {
     ConnectionSlot *slot = handle->slot;
-    MutexGuard guard(slot->mutex);
+    SpinGuard guard(slot->mutex);
     if (slot->inUse && slot->generation == handle->generation) {
       slot->stopRequested = 1;
       slot->releaseRequested = 1;
-      stopQueued = 1;
       BMC64_RS232_EVENT("async stop request gen %u state %s socket %d target %s",
                         slot->generation, AsyncStateName(slot->state),
                         slot->socket ? 1 : 0, slot->target);
     }
   }
 
-  while (stopQueued && waitMs < kStopWaitMs) {
-    if (!SnapshotHandle(handle, &snapshot, 0)) {
-      stopObserved = 1;
-      break;
-    }
-    if (snapshot.socket == 0 &&
-        snapshot.state != BMC64_ASYNC_NET_CONNECTING &&
-        snapshot.state != BMC64_ASYNC_NET_CONNECTED) {
-      stopObserved = 1;
-      break;
-    }
-    CScheduler::Get()->MsSleep(1);
-    ++waitMs;
-  }
-
-  if (stopQueued) {
-    if (stopObserved) {
-      BMC64_RS232_EVENT("async stop complete after %u ms", waitMs);
-      if (kPostCloseDrainMs > 0) {
-        CScheduler::Get()->MsSleep(kPostCloseDrainMs);
-      }
-    } else if (SnapshotHandle(handle, &snapshot, 0)) {
-      BMC64_RS232_EVENT("async stop wait timeout after %u ms state %s socket %d",
-                        waitMs, AsyncStateName(snapshot.state),
-                        snapshot.socket ? 1 : 0);
-    } else {
-      BMC64_RS232_EVENT("async stop complete after timeout race");
-    }
-  }
-
   delete handle;
+}
+
+extern "C" int bmc64_async_net_initialize(void) {
+  SpinGuard guard(g_workerLock);
+  g_workerInitialized = true;
+  return 1;
+}
+
+extern "C" void bmc64_async_net_process(void) {
+  if (WorkerAvailable()) {
+    g_worker.Process();
+  }
 }
 
 extern "C" int bmc64_async_net_status(bmc64_async_net_handle_t *handle) {

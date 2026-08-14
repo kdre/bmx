@@ -58,6 +58,19 @@ public:
     virtual bool CreateDirectory(const char *path) = 0;
     // Removing a missing file succeeds.
     virtual bool RemoveFile(const char *path) = 0;
+    // Removing a missing directory succeeds. A non-empty directory requires
+    // recursive=true. The optional callback keeps long developer operations
+    // cooperative without imposing a scheduler dependency on this adapter.
+    virtual bool RemoveDirectory(const char *path, bool recursive,
+                                 UpdateCooperativeYield yield = 0,
+                                 void *yield_context = 0)
+    {
+        (void)path;
+        (void)recursive;
+        (void)yield;
+        (void)yield_context;
+        return false;
+    }
     // If replace_existing is false, an existing target must fail.
     virtual bool Rename(const char *source,
                         const char *destination,

@@ -24,6 +24,8 @@
 #include <circle/sound/soundbasedevice.h>
 #include <circle/types.h>
 
+#include <stdint.h>
+
 // This is the fragment size we give to vice.
 #define FRAG_SIZE 256
 
@@ -58,6 +60,10 @@ public:
                   TVCHIQSoundDestination Destination = VCHIQSoundDestinationUnknown);
   unsigned AddChunk(s16 *pBuffer, unsigned nChunkSize);
   unsigned BufferSpaceSamples();
+  unsigned QueueSizeFrames(void) const { return mQueueSizeFrames; }
+  unsigned QueueFillFrames(void) const { return mQueueFillFrames; }
+  unsigned QueueMinimumFillFrames(void) const { return mQueueMinimumFillFrames; }
+  uint64_t WriteWaitCount(void) const { return mWriteWaitCount; }
 
 private:
   enum OutputDevice {
@@ -75,6 +81,9 @@ private:
   unsigned mSampleRate;
   unsigned mQueueSizeFrames;
   unsigned mNumChannels;
+  unsigned mQueueFillFrames;
+  unsigned mQueueMinimumFillFrames;
+  uint64_t mWriteWaitCount;
   int mVolumePercent;
   CSpinLock mControlLock;
 };

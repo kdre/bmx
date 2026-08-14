@@ -62,6 +62,7 @@ void overlay_statusbar_enable(void);
 void overlay_statusbar_disable(void);
 void overlay_diagnostics_set_mode(int mode);
 int overlay_diagnostics_get_mode(void);
+unsigned overlay_diagnostics_get_fps_milli(void);
 void overlay_diagnostics_set_frame_stats(unsigned fps_milli,
                                          unsigned core_busy_milli);
 void overlay_change_padding(int padding);

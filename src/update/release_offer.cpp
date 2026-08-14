@@ -32,7 +32,11 @@ bool StorageIsValid(const ReleaseOfferStorage &storage) {
            storage.manifest_files != 0 &&
            storage.manifest_file_capacity != 0U &&
            storage.manifest_directories != 0 &&
-           storage.manifest_directory_capacity != 0U;
+           storage.manifest_directory_capacity != 0U &&
+           storage.manifest_deletions != 0 &&
+           storage.manifest_deletion_capacity != 0U &&
+           storage.manifest_replacements != 0 &&
+           storage.manifest_replacement_capacity != 0U;
 }
 
 }  // namespace
@@ -116,7 +120,9 @@ ReleaseOfferResult BuildReleaseOfferForMode(
     const ManifestParseStorage manifest_storage = {
         storage.manifest_tokens, storage.manifest_token_capacity,
         storage.manifest_files, storage.manifest_file_capacity,
-        storage.manifest_directories, storage.manifest_directory_capacity};
+        storage.manifest_directories, storage.manifest_directory_capacity,
+        storage.manifest_deletions, storage.manifest_deletion_capacity,
+        storage.manifest_replacements, storage.manifest_replacement_capacity};
     result.manifest_status = ParseReleaseManifest(
         manifest_bytes, running_board, manifest_storage, &offer->manifest,
         &json_result);
