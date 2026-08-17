@@ -56,12 +56,18 @@ struct pi_kernel_spec {
   const char *kernel_name;
 };
 
+#if defined(RASPPI) && RASPPI == 4 && defined(AARCH) && AARCH == 64
+#define BMX_PI4_KERNEL_BASE "kernel8.img"
+#else
+#define BMX_PI4_KERNEL_BASE "kernel7l.img"
+#endif
+
 static const struct pi_kernel_spec pi_kernel_specs[] = {
     {0, "kernel.img"},
     {1, "kernel.img"},
     {2, "kernel7.img"},
     {3, "kernel8-32.img"},
-    {4, "kernel7l.img"},
+    {4, BMX_PI4_KERNEL_BASE},
     {5, "kernel_2712.img"},
 };
 
