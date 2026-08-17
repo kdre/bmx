@@ -42,10 +42,17 @@ extern "C" {
 #define MAX_STR_VAL_LEN 256 // should match max fn from ffconf.h
 #define MAX_DSP_VAL_LEN 32  // should be below display width
 
-// Scrollable dialogs use a 30-column box with one column of left inset.
-// The maximum text matches the bounded Update menu result buffer without
-// requiring a second large stack copy in the UI.
-#define UI_WRAPPED_DIALOG_LINE_COLUMNS 29U
+// Message dialogs retain the familiar 30-column minimum, but may grow far
+// enough to keep ordinary status messages on one line.  menu_item::name
+// bounds the maximum content width. Scrollable dialogs reserve their final
+// text column for Unscii up/down arrows, like a conventional scrollbar.
+#define UI_MESSAGE_DIALOG_MIN_WIDTH_COLUMNS 30U
+#define UI_MESSAGE_DIALOG_MAX_WIDTH_COLUMNS 36U
+#define UI_MESSAGE_DIALOG_MAX_LINE_COLUMNS 35U
+#define UI_MESSAGE_DIALOG_SCROLL_GUTTER_COLUMNS 1U
+#define UI_WRAPPED_DIALOG_LINE_COLUMNS 34U
+#define UI_MESSAGE_DIALOG_MIN_ROWS 4U
+#define UI_MESSAGE_DIALOG_MAX_ROWS 10U
 #define UI_WRAPPED_DIALOG_MAX_TEXT 2047U
 // Covers the maximum signed configuration warning while bounding the heap
 // even if a future caller supplies a newline-heavy message.
@@ -76,6 +83,11 @@ typedef enum ui_text_encoding {
   UI_TEXT_ENCODING_PETSCII_NATIVE,
   UI_TEXT_ENCODING_PETSCII_UNSCII,
 } ui_text_encoding_t;
+
+typedef enum ui_canvas_preview_mode {
+  UI_CANVAS_PREVIEW_CONTENT = 0,
+  UI_CANVAS_PREVIEW_GEOMETRY,
+} ui_canvas_preview_mode_t;
 
 struct menu_item {
   // Client defined id.
@@ -155,6 +167,10 @@ struct menu_item {
   int menu_height;
   // Requested row count for menu roots; negative values mean full height.
   int menu_rows;
+  // Scrollable message roots identify their text rows explicitly so the
+  // indicators never appear beside a title or confirmation buttons.
+  int scroll_text_first_row;
+  int scroll_text_end_row;
   int menu_left;
   int menu_top;
 
@@ -313,6 +329,7 @@ void ui_to_top(void);
 void ui_to_bottom(void);
 void ui_find_first(char letter);
 void ui_set_cur_pos(int pos);
+void ui_focus_item(struct menu_item *item);
 
 void ui_enable_osd(void);
 void ui_disable_osd(void);
@@ -358,12 +375,12 @@ extern int ui_toggle_pending;
 
 extern uint8_t *raw_video_font;
 
-// If layer is visible right now, make the ui transparent and tell the
-// ui only to render the current item. This is used to assist the user
-// in making video adjustments in real time (color, hstretch,
-// etc). Only takes effect while the user remains on the current menu
-// item.
-extern void ui_canvas_reveal_temp(int layer);
+// If layer is visible right now, reveal it and render only the current item.
+// Content previews omit geometry diagnostics; geometry previews keep them
+// and place them away from the active row. Only takes effect while the user
+// remains on the current menu item.
+extern void ui_canvas_preview_temp(int layer,
+                                   ui_canvas_preview_mode_t mode);
 extern void ui_mouse_preview_begin(void);
 extern void ui_mouse_preview_end(void);
 

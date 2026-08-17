@@ -1,7 +1,34 @@
+Version 2026.08.17
+------------------
+* New feature
+  * Pi4/Pi400 now uses the full multicore path by default: Circle,
+    NetworkService and USB run on Core 0, VICE on Core 1, and the SID worker
+    on Core 2 for supported dual-SID configurations.
+  * Pi4 HDMI modesetting with RGB565 framebuffer and hardware scaling, 
+    providing HDMI resolution switching. This is basically now the same as on
+    the Pi5.
+  * Pi4 builds are now 64-bit.
+  * CRT Effects for both, Pi4 and Pi5.
+  * BMX Menu improvements: Dialog scroll indicators, 'DisplayInfo' will not
+    overlap with the menu setting anymore.
+  * Added five 'Quick Access' slots at the top of the BMX menu for fast access
+    to your most used options. Go to the option you would like to add there and
+    press SPACE, choose the slot and press ENTER.
+  * Pending system changes are now collected and displayed when you press ESC
+    or "Apply & Reboot". The latter is only enabled when there are pending
+    system changes.
+
+* Bugfixes
+  * WiFi stability fixes.
+  * Dialog text sometimes extented beyond the dialog box.
+  * Shift/Deshift handling was not taken into account.
+  * Rendering of PETSCII directories didn't take quote mode into account which
+    led to wrongly displayed symbols.
+
 Version 2026.08.14
 ------------------
 * New features
-  * Redesigned Circle's network as a Core-0 servie.
+  * Redesigned Circle's network as a Core-0 service.
   * Improved menu navigation: Arrow right: open menu, arrow left: close menu.
     Enter: displays text files. If you return from a folder the cursor is not
     placed on top, but on the position of the folder where you came from.
@@ -26,7 +53,7 @@ Version 2026.08.14
     combos).
   * 8BitDo V1 dongles were not working.
   * Pressing two keys on the host to emulate one key in the emulated maschine
-    can occassionally result in wrong characters (e.g. pressing left shift + + 
+    can occassionally result in wrong characters (e.g. pressing left shift + +
     many time will result in screen code 64 instead of the expected asterix).
     The fix can be turned on/off in the Keyboard menu.
   * The online updater could not replace files when the filename is different.
@@ -219,9 +246,10 @@ Initial release
   * Ported tcpser-based Hayes-Modem connected to the RS232 interface within a 
     terminal you can call a BBS like this: "ATDTbmxbbs.de:6510"
   * Added authentic sound options for the Hayes modem
-  * Added support for a user selectable phonebook for BBS connections which can 
-    be dialed using the "ATDT" command within a terminal (e.g ATDT0, ATDTMYBBS 
-    or ATDT515123456). The format of the .pb file is: `shortcut=addr`, 
+  * Added support for a user selectable phonebook for BBS connections
+    which can be dialed using the "ATDT" command within a terminal (e.g.
+    `ATDT0`, `ATDTMYBBS`, or `ATDT515123456`). The format of the .pb file is:
+    `shortcut=addr`,
     e.g. `0=bmxbbs.de:6510`
   * Improvements and bug fixes in the networking stack
   * Support for two partitions on the SD card (a mandatory system/boot

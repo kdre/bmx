@@ -31,6 +31,15 @@
 #include "crt_pi_rgb.h"
 #include "third_party/common/circle.h"
 
+#if RASPPI == 4
+#include <circle/new.h>
+#include <circle/synchronize.h>
+#include "machines/machine_descriptor.h"
+#include "pi4kms/pi4_kms.h"
+#include "v3dcrt/v3d_crt.h"
+#include "viceoptions.h"
+#endif
+
 #ifndef ALIGN_UP
 #define ALIGN_UP(x,y)  ((x + (y)-1) & ~((y)-1))
 #endif
@@ -122,6 +131,291 @@ static char* vshader_txt_;
 #define DISPMANX_ID_HDMI 2
 #endif
 #define BMC64_DISPMANX_DISPLAY_ID DISPMANX_ID_HDMI
+
+namespace {
+
+const uint32_t kPi4V3dBootScanoutMaxBytes = 4096U;
+const unsigned kPi4V3dBootScanoutHoldMs = 250U;
+
+uint8_t g_pi4_v3d_boot_scanout[kPi4V3dBootScanoutMaxBytes]
+    __attribute__((aligned(32)));
+uint8_t g_pi4_v3d_boot_scanout_readback[kPi4V3dBootScanoutMaxBytes]
+    __attribute__((aligned(32)));
+bool g_pi4_v3d_crt_enabled = true;
+bool g_pi4_v3d_crt_enabled_initialized = false;
+bool g_pi4_v3d_scanline_weight_override_enabled = false;
+bool g_pi4_v3d_scanline_gap_override_enabled = false;
+bool g_pi4_v3d_output_resolution = false;
+bool g_pi4_kms_interpolation_enabled = false;
+float g_pi4_v3d_scanline_weight_override = 0.0f;
+float g_pi4_v3d_scanline_gap_override = 1.0f;
+FrameBufferLayer *g_pi4_layers[FB_NUM_LAYERS] = {};
+
+struct Pi4V3dPipelineTiming {
+  bool valid;
+  bool effect_change;
+  bool sample_after_effect_change;
+  FrameBufferLayer *layer;
+  u32 sequence;
+  u64 frame_start_us;
+  u64 render_done_us;
+  u64 write_done_us;
+};
+
+Pi4V3dPipelineTiming g_pi4_v3d_pipeline_timing = {};
+u32 g_pi4_v3d_pipeline_samples_remaining = 0U;
+const u32 kPi4V3dPipelineEffectSampleCount = 32U;
+
+struct Pi4V3dPipelineAggregate {
+  u32 samples;
+  u64 render_call_us;
+  u64 dispmanx_write_us;
+  u64 handoff_us;
+  u64 present_sync_us;
+  u64 total_us;
+  u32 total_min_us;
+  u32 total_max_us;
+};
+
+Pi4V3dPipelineAggregate g_pi4_v3d_pipeline_aggregate = {};
+
+uint32_t Pi4CaptureRgb565ToArgb(uint16_t rgb) {
+  uint32_t red = (rgb >> 11U) & 0x1fU;
+  uint32_t green = (rgb >> 5U) & 0x3fU;
+  uint32_t blue = rgb & 0x1fU;
+  red = (red << 3U) | (red >> 2U);
+  green = (green << 2U) | (green >> 4U);
+  blue = (blue << 3U) | (blue >> 2U);
+  return 0xff000000U | (red << 16U) | (green << 8U) | blue;
+}
+
+uint32_t Pi4CaptureBlendArgb(uint32_t destination, uint32_t source) {
+  const uint32_t alpha = source >> 24U;
+  if (alpha == 0U) {
+    return destination;
+  }
+  if (alpha >= 255U) {
+    return source;
+  }
+  const uint32_t inverse = 255U - alpha;
+  const uint32_t red =
+      ((((source >> 16U) & 0xffU) * alpha) +
+       (((destination >> 16U) & 0xffU) * inverse) + 127U) / 255U;
+  const uint32_t green =
+      ((((source >> 8U) & 0xffU) * alpha) +
+       (((destination >> 8U) & 0xffU) * inverse) + 127U) / 255U;
+  const uint32_t blue =
+      (((source & 0xffU) * alpha) +
+       ((destination & 0xffU) * inverse) + 127U) / 255U;
+  return 0xff000000U | (red << 16U) | (green << 8U) | blue;
+}
+
+void RecordPi4V3dPipelinePresent(u64 present_start_us,
+                                 u64 present_done_us,
+                                 unsigned layer_count,
+                                 const char *backend) {
+  if (!g_pi4_v3d_pipeline_timing.valid) {
+    return;
+  }
+  const u32 sequence = g_pi4_v3d_pipeline_timing.sequence;
+  const bool effect_change = g_pi4_v3d_pipeline_timing.effect_change;
+  const bool sample_after_effect_change =
+      g_pi4_v3d_pipeline_timing.sample_after_effect_change;
+  const bool stable_after_effect_change =
+      sample_after_effect_change && sequence >= 3U;
+  const bool startup_sample = sequence == 3U;
+  const u32 render_call_us = static_cast<u32>(
+      g_pi4_v3d_pipeline_timing.render_done_us -
+      g_pi4_v3d_pipeline_timing.frame_start_us);
+  const u32 dispmanx_write_us = static_cast<u32>(
+      g_pi4_v3d_pipeline_timing.write_done_us -
+      g_pi4_v3d_pipeline_timing.render_done_us);
+  const u32 handoff_us = static_cast<u32>(
+      present_start_us - g_pi4_v3d_pipeline_timing.write_done_us);
+  const u32 present_sync_us =
+      static_cast<u32>(present_done_us - present_start_us);
+  const u32 total_us = static_cast<u32>(
+      present_done_us - g_pi4_v3d_pipeline_timing.frame_start_us);
+  if (startup_sample) {
+    printf("boot: pi4v3d frame pipeline sequence=%u "
+           "render_call_us=%u dispmanx_write_us=%u handoff_us=%u "
+           "present_sync_us=%u total_us=%u effect_change=%u "
+           "layers=%u backend=%s\r\n",
+           static_cast<unsigned>(sequence),
+           static_cast<unsigned>(render_call_us),
+           static_cast<unsigned>(dispmanx_write_us),
+           static_cast<unsigned>(handoff_us),
+           static_cast<unsigned>(present_sync_us),
+           static_cast<unsigned>(total_us),
+           effect_change ? 1U : 0U, layer_count, backend);
+  }
+  if (stable_after_effect_change) {
+    Pi4V3dPipelineAggregate &aggregate = g_pi4_v3d_pipeline_aggregate;
+    ++aggregate.samples;
+    aggregate.render_call_us += render_call_us;
+    aggregate.dispmanx_write_us += dispmanx_write_us;
+    aggregate.handoff_us += handoff_us;
+    aggregate.present_sync_us += present_sync_us;
+    aggregate.total_us += total_us;
+    if (aggregate.samples == 1U || total_us < aggregate.total_min_us) {
+      aggregate.total_min_us = total_us;
+    }
+    if (aggregate.samples == 1U || total_us > aggregate.total_max_us) {
+      aggregate.total_max_us = total_us;
+    }
+    --g_pi4_v3d_pipeline_samples_remaining;
+    if (g_pi4_v3d_pipeline_samples_remaining == 0U) {
+      printf("boot: pi4v3d frame pipeline aggregate "
+             "end_sequence=%u samples=%u render_avg_us=%u "
+             "dispmanx_write_avg_us=%u handoff_avg_us=%u "
+             "present_sync_avg_us=%u total_avg_us=%u "
+             "total_min_us=%u total_max_us=%u layers=%u backend=%s\r\n",
+             static_cast<unsigned>(sequence),
+             static_cast<unsigned>(aggregate.samples),
+             static_cast<unsigned>(aggregate.render_call_us /
+                                   aggregate.samples),
+             static_cast<unsigned>(aggregate.dispmanx_write_us /
+                                   aggregate.samples),
+             static_cast<unsigned>(aggregate.handoff_us /
+                                   aggregate.samples),
+             static_cast<unsigned>(aggregate.present_sync_us /
+                                   aggregate.samples),
+             static_cast<unsigned>(aggregate.total_us /
+                                   aggregate.samples),
+             static_cast<unsigned>(aggregate.total_min_us),
+             static_cast<unsigned>(aggregate.total_max_us),
+             layer_count, backend);
+    }
+  }
+  g_pi4_v3d_pipeline_timing = {};
+}
+
+struct Pi4V3dDispmanxResult {
+  bool upload;
+  bool resource_readback;
+  bool element_added;
+  bool present_sync;
+  bool cleanup;
+};
+
+bool PresentPi4V3dBootScanout(
+    DISPMANX_DISPLAY_HANDLE_T display,
+    const v3dcrt::BootTestOutputLayout &layout,
+    const uint8_t *pixels,
+    Pi4V3dDispmanxResult *result) {
+  if (result == nullptr) {
+    return false;
+  }
+  memset(result, 0, sizeof *result);
+  if (display == 0 || pixels == nullptr || layout.width == 0U ||
+      layout.height == 0U || layout.pitch == 0U ||
+      layout.width > kPi4V3dBootScanoutMaxBytes / 2U ||
+      layout.pitch < layout.width * 2U ||
+      layout.depth != 16U || layout.format != v3dcrt::kPixelFormatRgb565 ||
+      layout.height > kPi4V3dBootScanoutMaxBytes / layout.pitch) {
+    return false;
+  }
+  const uint32_t buffer_bytes = layout.pitch * layout.height;
+
+  DISPMANX_MODEINFO_T info = {};
+  if (vc_dispmanx_display_get_info(display, &info) != 0 ||
+      info.width == 0U || info.height == 0U) {
+    return false;
+  }
+
+  uint32_t native_image = 0U;
+  const DISPMANX_RESOURCE_HANDLE_T resource =
+      vc_dispmanx_resource_create(VC_IMAGE_RGB565, layout.width,
+                                  layout.height, &native_image);
+  if (resource == 0) {
+    return false;
+  }
+
+  VC_RECT_T resource_rect = {};
+  vc_dispmanx_rect_set(&resource_rect, 0U, 0U,
+                       layout.width, layout.height);
+  result->upload =
+      vc_dispmanx_resource_write_data(resource, VC_IMAGE_RGB565,
+                                      static_cast<int>(layout.pitch),
+                                      const_cast<uint8_t *>(pixels),
+                                      &resource_rect) == 0;
+  memset(g_pi4_v3d_boot_scanout_readback, 0,
+         sizeof g_pi4_v3d_boot_scanout_readback);
+  result->resource_readback =
+      result->upload &&
+      vc_dispmanx_resource_read_data(
+          resource, &resource_rect, g_pi4_v3d_boot_scanout_readback,
+          layout.pitch) == 0 &&
+      memcmp(pixels, g_pi4_v3d_boot_scanout_readback,
+             buffer_bytes) == 0;
+
+  DISPMANX_ELEMENT_HANDLE_T element = 0;
+  if (result->resource_readback) {
+    const uint32_t side = info.width < info.height ? info.width : info.height;
+    VC_RECT_T source_rect = {};
+    VC_RECT_T destination_rect = {};
+    vc_dispmanx_rect_set(&source_rect, 0U, 0U,
+                         layout.width << 16U, layout.height << 16U);
+    vc_dispmanx_rect_set(&destination_rect,
+                         (info.width - side) / 2U,
+                         (info.height - side) / 2U,
+                         side, side);
+    VC_DISPMANX_ALPHA_T alpha = {
+      static_cast<DISPMANX_FLAGS_ALPHA_T>(
+          DISPMANX_FLAGS_ALPHA_FROM_SOURCE |
+          DISPMANX_FLAGS_ALPHA_FIXED_ALL_PIXELS),
+      255,
+      0
+    };
+    const DISPMANX_UPDATE_HANDLE_T update = vc_dispmanx_update_start(10);
+    if (update != 0) {
+      element = vc_dispmanx_element_add(
+          update, display, 2000, &destination_rect, resource, &source_rect,
+          DISPMANX_PROTECTION_NONE, &alpha, nullptr, DISPMANX_NO_ROTATE);
+      result->element_added = element != 0;
+      result->present_sync =
+          vc_dispmanx_update_submit_sync(update) == 0 &&
+          result->element_added;
+    }
+  }
+
+  bool removed = element == 0;
+  if (element != 0) {
+    if (result->present_sync) {
+      CTimer::SimpleMsDelay(kPi4V3dBootScanoutHoldMs);
+    }
+    const DISPMANX_UPDATE_HANDLE_T update = vc_dispmanx_update_start(10);
+    if (update != 0) {
+      const bool remove_queued =
+          vc_dispmanx_element_remove(update, element) == 0;
+      const bool remove_sync = vc_dispmanx_update_submit_sync(update) == 0;
+      removed = remove_queued && remove_sync;
+    } else {
+      removed = false;
+    }
+  }
+  const bool resource_deleted =
+      removed && vc_dispmanx_resource_delete(resource) == 0;
+  result->cleanup = removed && resource_deleted;
+
+  printf("boot: pi4v3d dispmanx handoff resource=%u native=%u "
+         "upload=%u resource_readback=%u element=%u present_sync=%u "
+         "hold_ms=%u cleanup=%u display=%ux%u\r\n",
+         static_cast<unsigned>(resource),
+         static_cast<unsigned>(native_image),
+         result->upload ? 1U : 0U,
+         result->resource_readback ? 1U : 0U,
+         result->element_added ? 1U : 0U,
+         result->present_sync ? 1U : 0U,
+         kPi4V3dBootScanoutHoldMs,
+         result->cleanup ? 1U : 0U,
+         static_cast<unsigned>(info.width),
+         static_cast<unsigned>(info.height));
+  return result->upload && result->resource_readback &&
+         result->element_added && result->present_sync && result->cleanup;
+}
+
+}  // namespace
 #else
 #define BMC64_DISPMANX_DISPLAY_ID 0
 #endif
@@ -147,7 +441,8 @@ static void check(const char* msg) {
 
 FrameBufferLayer::FrameBufferLayer() :
 		pixels_(nullptr), dispman_element_(0),egl_config_(nullptr),egl_surface_(nullptr),
-        fb_width_(0), fb_height_(0), fb_pitch_(0), layer_(0), transparency_(false),
+        fb_width_(0), fb_height_(0), fb_pitch_(0), logical_layer_(-1),
+        layer_(0), transparency_(false),
         hstretch_(1.6), vstretch_(1.0), hintstr_(0), vintstr_(0),
         use_hintstr_(0), use_vintstr_(0),
         valign_(0), vpadding_(0), halign_(0), hpadding_(0),
@@ -167,13 +462,66 @@ FrameBufferLayer::FrameBufferLayer() :
         tex_(-1), pal_(-1), mvp_(0),
         input_size_(0), output_size_(0), texture_size_(0), texel_size_(0),
         need_cpu_crop_(true), cropped_pixels_(0),
-        curvature_(false) {
+        curvature_(false), curvature_x_(0.0f), curvature_y_(0.0f),
+        skew_x_(0.0f), skew_y_(0.0f), trapezoid_(0.0f),
+        rotation_degrees_(0.0f), overscan_scale_(1.0f),
+        convergence_(false), red_offset_x_(0.0f), red_offset_y_(0.0f),
+        blue_offset_x_(0.0f), blue_offset_y_(0.0f),
+        convergence_radial_strength_(0.0f), horizontal_filtering_(false),
+        horizontal_sigma_x_(0.0f), mask_(0),
+        mask_brightness_(1.0f), gamma_(false), fake_gamma_(false),
+        output_level_mapping_(1U), output_saturation_(1.0f),
+        black_level_(0.0f), white_clip_(1.0f),
+        scanlines_(false), multisample_(false), scanline_weight_(0.0f),
+        scanline_gap_brightness_(1.0f), edge_blur_(false),
+        edge_blur_strength_(0.0f), edge_blur_radius_(0.2f),
+        vignette_(false), vignette_strength_(0.0f), vignette_scale_(1.0f),
+        vignette_softness_(0.02f),
+        uneven_illumination_(false), uneven_illumination_strength_(0.0f),
+        uneven_illumination_scale_(0.02f),
+        glass_reflection_(false), glass_reflection_angle_(0.0f),
+        glass_reflection_width_(0.02f), glass_reflection_position_(0.0f),
+        rounded_screen_mask_(false), rounded_corner_radius_(0.0f),
+        rounded_border_softness_(0.0f),
+        edge_glow_(false), edge_glow_strength_(0.0f),
+        edge_glow_width_(0.01f),
+        bloom_(false), bloom_factor_(1.0f),
+        horizontal_jitter_(false), horizontal_jitter_strength_(0.0f),
+        horizontal_jitter_frequency_(0.01f),
+        horizontal_jitter_speed_(0.0f),
+        composite_artifacts_(false), composite_chroma_blur_(0.0f),
+        composite_luma_sharpen_(0.0f), composite_color_bleed_(0.0f),
+        noise_(false), luminance_noise_(0.0f), chroma_noise_(0.0f),
+        noise_speed_(0.0f),
+        input_gamma_(1.0f), output_gamma_(1.0f), sharper_(true),
+        bilinear_interpolation_(false) {
   alpha_.flags = DISPMANX_FLAGS_ALPHA_FROM_SOURCE;
   alpha_.opacity = 255;
   alpha_.mask = 0;
 
   memcpy (pal_565_, pal_565, sizeof(pal_565));
   memcpy (pal_argb_, pal_argb, sizeof(pal_argb));
+  memset(dispman_resource_, 0, sizeof dispman_resource_);
+#if RASPPI == 4
+  memset(pi4_v3d_resource_, 0, sizeof pi4_v3d_resource_);
+  memset(pi4_v3d_allocation_, 0, sizeof pi4_v3d_allocation_);
+  memset(pi4_v3d_pixels_, 0, sizeof pi4_v3d_pixels_);
+  memset(pi4_v3d_ready_, 0, sizeof pi4_v3d_ready_);
+  memset(pi4_v3d_scanout_, 0, sizeof pi4_v3d_scanout_);
+  pi4_v3d_pitch_ = 0U;
+  pi4_v3d_width_ = 0U;
+  pi4_v3d_height_ = 0U;
+  memset(&pi4_v3d_copy_dst_rect_, 0, sizeof pi4_v3d_copy_dst_rect_);
+  memset(&pi4_v3d_src_rect_, 0, sizeof pi4_v3d_src_rect_);
+  memset(pi4_kms_overlay_allocation_, 0,
+         sizeof pi4_kms_overlay_allocation_);
+  memset(pi4_kms_overlay_pixels_, 0, sizeof pi4_kms_overlay_pixels_);
+  pi4_kms_overlay_pitch_ = 0U;
+  pi4_kms_overlay_width_ = 0U;
+  pi4_kms_overlay_height_ = 0U;
+  pi4_kms_overlay_front_ = 0U;
+  pi4_kms_overlay_front_valid_ = false;
+#endif
 }
 
 FrameBufferLayer::~FrameBufferLayer() {
@@ -183,6 +531,12 @@ FrameBufferLayer::~FrameBufferLayer() {
   if (allocated_) {
     Free();
   }
+#if RASPPI == 4
+  if (logical_layer_ >= 0 && logical_layer_ < FB_NUM_LAYERS &&
+      g_pi4_layers[logical_layer_] == this) {
+    g_pi4_layers[logical_layer_] = nullptr;
+  }
+#endif
 }
 
 bool FrameBufferLayer::OGLInit() {
@@ -216,6 +570,23 @@ bool FrameBufferLayer::OGLInit() {
   egl_initialized_ = true;
   printf("boot: fbl egl init ready\r\n");
   return true;
+}
+
+bool FrameBufferLayer::ShaderBackendAvailable() {
+#if RASPPI == 4
+  return v3dcrt::IsAvailable();
+#else
+  return false;
+#endif
+}
+
+bool FrameBufferLayer::ShaderBackendAvailableForLayer(int logical_layer) {
+#if RASPPI == 4
+  return v3dcrt::IsAvailable() && logical_layer == FB_LAYER_VIC;
+#else
+  (void) logical_layer;
+  return false;
+#endif
 }
 
 void FrameBufferLayer::CreateTexture() {
@@ -594,47 +965,184 @@ void FrameBufferLayer::ShaderUpdate() {
 }
 
 void FrameBufferLayer::SetUsesShader(bool enabled) {
+#if RASPPI == 4
+  if (v3dcrt::IsAvailable()) {
+    const bool supported = CanUsePi4V3d();
+    if (enabled && !supported) {
+      printf("boot: pi4v3d menu rejected logical_layer=%d z_layer=%d "
+             "reason=unsupported-layer\r\n", logical_layer_, layer_);
+    }
+    g_pi4_v3d_crt_enabled = enabled && supported;
+    g_pi4_v3d_crt_enabled_initialized = true;
+    uses_shader_ = false;
+    return;
+  }
+#endif
   assert(!allocated_);
   uses_shader_ = enabled;
 }
 
 void FrameBufferLayer::SetShaderParams(
-		bool curvature,
-		float curvature_x,
-		float curvature_y,
-		int mask,
-		float mask_brightness,
-		bool gamma,
-		bool fake_gamma,
-		bool scanlines,
-		bool multisample,
-		float scanline_weight,
-		float scanline_gap_brightness,
-		float bloom_factor,
-		float input_gamma,
-		float output_gamma,
-		bool sharper,
-                bool bilinear_interpolation) {
+    const struct bmx_crt_effect_params &params) {
   if (uses_shader_) {
      ShaderDestroy();
   }
-  curvature_ = curvature;
-  need_cpu_crop_ = curvature;
-  curvature_x_ = curvature_x;
-  curvature_y_ = curvature_y;
-  mask_ = mask;
-  mask_brightness_ = mask_brightness;
-  gamma_ = gamma;
-  fake_gamma_ = fake_gamma;
-  scanlines_ = scanlines;
-  multisample_ = multisample;
-  scanline_weight_ = scanline_weight;
-  scanline_gap_brightness_ = scanline_gap_brightness;
-  bloom_factor_ = bloom_factor;
-  input_gamma_ = input_gamma;
-  output_gamma_ = output_gamma;
-  sharper_ = sharper;
-  bilinear_interpolation_ = bilinear_interpolation;
+  curvature_ = params.geometry_enabled != 0;
+  need_cpu_crop_ = curvature_;
+  curvature_x_ = params.curvature_x;
+  curvature_y_ = params.curvature_y;
+  skew_x_ = params.skew_x;
+  skew_y_ = params.skew_y;
+  trapezoid_ = params.trapezoid;
+  rotation_degrees_ = params.rotation_degrees;
+  overscan_scale_ = params.overscan_scale;
+  convergence_ = params.convergence_enabled != 0;
+  red_offset_x_ = params.red_offset_x;
+  red_offset_y_ = params.red_offset_y;
+  blue_offset_x_ = params.blue_offset_x;
+  blue_offset_y_ = params.blue_offset_y;
+  convergence_radial_strength_ = params.convergence_radial_strength;
+  horizontal_filtering_ = params.horizontal_filtering_enabled != 0;
+  horizontal_sigma_x_ = params.horizontal_sigma_x;
+  mask_ = params.phosphor_mask_enabled ? params.phosphor_mask_type : 0;
+  mask_brightness_ = params.phosphor_mask_brightness;
+  gamma_ = params.output_response_enabled != 0;
+  fake_gamma_ = params.output_response_fast != 0;
+  output_level_mapping_ = static_cast<unsigned>(params.output_level_mapping);
+  output_saturation_ = params.output_saturation;
+  black_level_ = params.black_level;
+  white_clip_ = params.white_clip;
+  scanlines_ = params.scanlines_enabled != 0;
+  multisample_ = params.scanline_multisample != 0;
+  scanline_weight_ = params.scanline_weight;
+  scanline_gap_brightness_ = params.scanline_gap_brightness;
+  edge_blur_ = params.edge_blur_enabled != 0;
+  edge_blur_strength_ = params.edge_blur_strength;
+  edge_blur_radius_ = params.edge_blur_radius;
+  vignette_ = params.vignette_enabled != 0;
+  vignette_strength_ = params.vignette_strength;
+  vignette_scale_ = params.vignette_scale;
+  vignette_softness_ = params.vignette_softness;
+  uneven_illumination_ = params.uneven_illumination_enabled != 0;
+  uneven_illumination_strength_ = params.uneven_illumination_strength;
+  uneven_illumination_scale_ = params.uneven_illumination_scale;
+  glass_reflection_ = params.glass_reflection_enabled != 0;
+  glass_reflection_angle_ = params.glass_reflection_angle;
+  glass_reflection_width_ = params.glass_reflection_width;
+  glass_reflection_position_ = params.glass_reflection_position;
+  rounded_screen_mask_ = params.rounded_screen_mask_enabled != 0;
+  rounded_corner_radius_ = params.rounded_corner_radius;
+  rounded_border_softness_ = params.rounded_border_softness;
+  edge_glow_ = params.edge_glow_enabled != 0;
+  edge_glow_strength_ = params.edge_glow_strength;
+  edge_glow_width_ = params.edge_glow_width;
+  bloom_ = params.bloom_enabled != 0;
+  bloom_factor_ = bloom_ ? params.bloom_factor : 1.0f;
+  horizontal_jitter_ = params.horizontal_jitter_enabled != 0;
+  horizontal_jitter_strength_ = params.horizontal_jitter_strength;
+  horizontal_jitter_frequency_ = params.horizontal_jitter_frequency;
+  horizontal_jitter_speed_ = params.horizontal_jitter_speed;
+  composite_artifacts_ = params.composite_artifacts_enabled != 0;
+  composite_chroma_blur_ = params.composite_chroma_blur;
+  composite_luma_sharpen_ = params.composite_luma_sharpen;
+  composite_color_bleed_ = params.composite_color_bleed;
+  noise_ = params.noise_enabled != 0;
+  luminance_noise_ = params.luminance_noise;
+  chroma_noise_ = params.chroma_noise;
+  noise_speed_ = params.noise_speed;
+  input_gamma_ = params.input_gamma;
+  output_gamma_ = params.output_gamma;
+  sharper_ = !params.horizontal_filtering_enabled ||
+             params.horizontal_sigma_x < 0.5f;
+  bilinear_interpolation_ = params.bilinear_interpolation != 0;
+#if RASPPI == 4
+  if (v3dcrt::IsAvailable()) {
+    const bool preserve_v3d_source = CanUsePi4V3d();
+    const char *live_preview = "deferred";
+    if (preserve_v3d_source && allocated_ && showing_ &&
+        g_pi4_v3d_crt_enabled) {
+      const unsigned preview_slot = static_cast<unsigned>(1 - rnum_);
+      FrameReady(1);
+      PresentLayer(true, this);
+      live_preview = pi4_v3d_ready_[preview_slot] ?
+          "presented" : "fallback";
+    }
+    printf("boot: pi4v3d menu params geometry=%u curvature_x10000=%u,%u "
+           "skew_x10000=%d,%d trapezoid_x10000=%d "
+           "rotation_x100=%d overscan_x100=%u "
+           "scanlines=%u multisample=%u weight_x100=%u "
+           "gap_x100=%u edge_blur=%u edge_strength_x100=%u "
+           "edge_radius_x100=%u phosphor_mask=%u mask_pattern=%u "
+           "mask_brightness_x100=%u vignette=%u vignette_strength_x100=%u "
+           "vignette_scale_x100=%u vignette_softness_x100=%u "
+           "uneven_illumination=%u uneven_strength_x100=%u "
+           "uneven_scale_x100=%u glass_reflection=%u "
+           "glass_angle_x100=%d glass_width_x100=%u "
+           "glass_position_x100=%u rounded_screen_mask=%u "
+           "rounded_radius_x100=%u rounded_softness_x100=%u "
+           "edge_glow=%u edge_glow_strength_x100=%u "
+           "edge_glow_width_x100=%u "
+           "output_response=%u response_fast=%u level_mapping=%u "
+           "input_gamma_x100=%u output_gamma_x100=%u saturation_x100=%u "
+           "black_level_x100=%u white_clip_x100=%u "
+           "display_source=%s live_preview=%s\r\n",
+           curvature_ ? 1U : 0U,
+           static_cast<unsigned>(curvature_x_ * 10000.0f + 0.5f),
+           static_cast<unsigned>(curvature_y_ * 10000.0f + 0.5f),
+           static_cast<int>(skew_x_ * 10000.0f),
+           static_cast<int>(skew_y_ * 10000.0f),
+           static_cast<int>(trapezoid_ * 10000.0f),
+           static_cast<int>(rotation_degrees_ * 100.0f),
+           static_cast<unsigned>(overscan_scale_ * 100.0f + 0.5f),
+           scanlines_ ? 1U : 0U,
+           multisample_ ? 1U : 0U,
+           static_cast<unsigned>(scanline_weight_ * 100.0f + 0.5f),
+           static_cast<unsigned>(scanline_gap_brightness_ * 100.0f + 0.5f),
+           edge_blur_ ? 1U : 0U,
+           static_cast<unsigned>(edge_blur_strength_ * 100.0f + 0.5f),
+           static_cast<unsigned>(edge_blur_radius_ * 100.0f + 0.5f),
+           mask_ != 0 ? 1U : 0U,
+           static_cast<unsigned>(mask_),
+           static_cast<unsigned>(mask_brightness_ * 100.0f + 0.5f),
+           vignette_ ? 1U : 0U,
+           static_cast<unsigned>(vignette_strength_ * 100.0f + 0.5f),
+           static_cast<unsigned>(vignette_scale_ * 100.0f + 0.5f),
+           static_cast<unsigned>(vignette_softness_ * 100.0f + 0.5f),
+           uneven_illumination_ ? 1U : 0U,
+           static_cast<unsigned>(
+               uneven_illumination_strength_ * 100.0f + 0.5f),
+           static_cast<unsigned>(
+               uneven_illumination_scale_ * 100.0f + 0.5f),
+           glass_reflection_ ? 1U : 0U,
+           static_cast<int>(glass_reflection_angle_ * 100.0f),
+           static_cast<unsigned>(glass_reflection_width_ * 100.0f + 0.5f),
+           static_cast<unsigned>(
+               glass_reflection_position_ * 100.0f + 0.5f),
+           rounded_screen_mask_ ? 1U : 0U,
+           static_cast<unsigned>(rounded_corner_radius_ * 100.0f + 0.5f),
+           static_cast<unsigned>(rounded_border_softness_ * 100.0f + 0.5f),
+           edge_glow_ ? 1U : 0U,
+           static_cast<unsigned>(edge_glow_strength_ * 100.0f + 0.5f),
+           static_cast<unsigned>(edge_glow_width_ * 100.0f + 0.5f),
+           gamma_ ? 1U : 0U,
+           fake_gamma_ ? 1U : 0U,
+           output_level_mapping_,
+           static_cast<unsigned>(input_gamma_ * 100.0f + 0.5f),
+           static_cast<unsigned>(output_gamma_ * 100.0f + 0.5f),
+           static_cast<unsigned>(output_saturation_ * 100.0f + 0.5f),
+           static_cast<unsigned>(black_level_ * 100.0f + 0.5f),
+           static_cast<unsigned>(white_clip_ * 100.0f + 0.5f),
+           preserve_v3d_source ? "preserved" : "recreated",
+           live_preview);
+    if (preserve_v3d_source) {
+      // Pi4 V3D consumes these values as per-frame uniforms/package state.
+      // Recreating the DispmanX element would temporarily bind the normal
+      // framebuffer resource and can leave the dynamic preview on that
+      // unprocessed source until a later synchronous source swap.
+      return;
+    }
+  }
+#endif
   Hide();
 }
 
@@ -668,14 +1176,151 @@ bool FrameBufferLayer::Initialize() {
     }
   }
 
+#if RASPPI == 4
+  ViceOptions *options = ViceOptions::Get();
+  const v3dcrt::ShaderPreset v3dcrt_shader =
+      v3dcrt::ParseShaderPreset(options ? options->GetV3DCrtShader() : nullptr);
+  const v3dcrt::BootTestMode v3dcrt_test =
+      v3dcrt::ParseBootTestMode(options ? options->GetV3DCrtTest() : nullptr);
+  const v3dcrt::FragmentPackageMode v3dcrt_fragment_package =
+      v3dcrt::ParseFragmentPackageMode(
+          options ? options->GetV3DCrtFragmentPackage() : nullptr);
+  const v3dcrt::RenderResolution v3dcrt_render_resolution =
+      v3dcrt::ParseRenderResolution(
+          options ? options->GetV3DCrtRenderResolution() : nullptr);
+  const bool v3dcrt_requested =
+      options && (options->V3DCrtEnabled() ||
+                  v3dcrt_test != v3dcrt::kBootTestOff);
+  const bool pi4kms_requested = options && options->Pi4KmsEnabled();
+  const bool v3dcrt_fragment_probe_wait_vblank =
+      !options || options->GetV3DCrtFragmentProbeWaitVblank();
+  g_pi4_v3d_output_resolution =
+      v3dcrt_render_resolution == v3dcrt::kRenderResolutionOutput;
+  g_pi4_v3d_scanline_weight_override_enabled =
+      options && options->GetV3DCrtScanlineWeight(
+          &g_pi4_v3d_scanline_weight_override);
+  g_pi4_v3d_scanline_gap_override_enabled =
+      options && options->GetV3DCrtScanlineGapBrightness(
+          &g_pi4_v3d_scanline_gap_override);
+  v3dcrt::Configure(v3dcrt_requested, true, v3dcrt_shader, v3dcrt_test,
+                    v3dcrt_fragment_probe_wait_vblank,
+                    v3dcrt_fragment_package, v3dcrt_render_resolution);
+  bool pi4kms_probe_usable = false;
+  if (pi4kms_requested && v3dcrt_requested) {
+    pi4kms_probe_usable = pi4kms::ProbeFirmwareScanout();
+    if (pi4kms_probe_usable) {
+      (void)pi4kms::ConfigureNativeMode(
+          options->GetHdmiGroup(), options->GetHdmiMode(),
+          options->GetPi5KmsTimings(), options->GetPi5KmsMode());
+    }
+  }
+  if (v3dcrt_requested) {
+    printf("boot: pi4 v3dcrt option shader=%s test=%s resolution=%s\r\n",
+           v3dcrt::ShaderPresetName(v3dcrt_shader),
+           v3dcrt::BootTestModeName(v3dcrt_test),
+           v3dcrt::RenderResolutionName(v3dcrt_render_resolution));
+    if (g_pi4_v3d_scanline_weight_override_enabled) {
+      printf("boot: pi4v3d option scanline_weight_x100=%u\r\n",
+             static_cast<unsigned>(
+                 g_pi4_v3d_scanline_weight_override * 100.0f + 0.5f));
+    }
+    if (g_pi4_v3d_scanline_gap_override_enabled) {
+      printf("boot: pi4v3d option scanline_gap_brightness_x100=%u\r\n",
+             static_cast<unsigned>(
+                 g_pi4_v3d_scanline_gap_override * 100.0f + 0.5f));
+    }
+    v3dcrt::Initialize();
+    if (v3dcrt_test != v3dcrt::kBootTestOff) {
+      v3dcrt::BootTestOutputLayout layout = {};
+      if (v3dcrt::GetBootTestOutputLayout(v3dcrt_test, &layout)) {
+        const bool layout_valid =
+            layout.pitch != 0U &&
+            layout.height <= kPi4V3dBootScanoutMaxBytes / layout.pitch;
+        const uint32_t buffer_bytes =
+            layout_valid ? layout.pitch * layout.height : 0U;
+        memset(g_pi4_v3d_boot_scanout, 0,
+               sizeof g_pi4_v3d_boot_scanout);
+        bool presented = false;
+        v3dcrt::OutputFramebuffer target = {};
+        target.pixels = layout_valid ? g_pi4_v3d_boot_scanout : nullptr;
+        target.width = layout.width;
+        target.height = layout.height;
+        target.pitch = layout.pitch;
+        target.depth = layout.depth;
+        target.format = layout.format;
+        target.presented = &presented;
+        const bool render_ready =
+            layout_valid && buffer_bytes <= kPi4V3dBootScanoutMaxBytes &&
+            v3dcrt::RunBootTest(target);
+        Pi4V3dDispmanxResult handoff_result = {};
+        const bool handoff =
+            render_ready && PresentPi4V3dBootScanout(
+                                dispman_display_, layout, target.pixels,
+                                &handoff_result);
+        presented = handoff;
+        printf("boot: pi4v3d test=fragment_scanout status=%s "
+               "m4=%s dispmanx_upload=%u resource_readback=%u "
+               "present_sync=%u cleanup=%u normal_fallback=preserved\r\n",
+               handoff ? "pass" : "fail",
+               render_ready ? "pass" : "fail",
+               handoff_result.upload ? 1U : 0U,
+               handoff_result.resource_readback ? 1U : 0U,
+               handoff_result.present_sync ? 1U : 0U,
+               handoff_result.cleanup ? 1U : 0U);
+      } else {
+        v3dcrt::OutputFramebuffer no_target = {};
+        v3dcrt::RunBootTest(no_target);
+      }
+    }
+  }
+  pi4kms::ConfigureTakeover(
+      pi4kms_requested && v3dcrt_requested && pi4kms_probe_usable &&
+      v3dcrt_render_resolution == v3dcrt::kRenderResolutionOutput);
+  if (pi4kms_requested &&
+      (!v3dcrt_requested || !pi4kms_probe_usable ||
+       v3dcrt_render_resolution != v3dcrt::kRenderResolutionOutput)) {
+    printf("boot: pi4kms takeover status=disabled reason=%s\r\n",
+           !v3dcrt_requested ? "v3dcrt-required" :
+           !pi4kms_probe_usable ? "probe-unusable" :
+                                  "output-resolution-required");
+  }
+#endif
+
   initialized_ = true;
   return true;
 }
 
+// static
+void FrameBufferLayer::Shutdown() {
+#if RASPPI == 4
+  pi4kms::Shutdown();
+  v3dcrt::Shutdown();
+  g_pi4_v3d_crt_enabled = true;
+  g_pi4_v3d_crt_enabled_initialized = false;
+  g_pi4_v3d_scanline_weight_override_enabled = false;
+  g_pi4_v3d_scanline_gap_override_enabled = false;
+  g_pi4_v3d_output_resolution = false;
+  g_pi4_v3d_scanline_weight_override = 0.0f;
+  g_pi4_v3d_scanline_gap_override = 1.0f;
+  memset(g_pi4_layers, 0, sizeof g_pi4_layers);
+#endif
+}
+
 bool FrameBufferLayer::CaptureDimensions(int *width, int *height) {
+  if (width == nullptr || height == nullptr || !initialized_) {
+    return false;
+  }
+#if RASPPI == 4
+  uint32_t planned_width = 0U;
+  uint32_t planned_height = 0U;
+  if (pi4kms::GetPlannedDisplaySize(&planned_width, &planned_height)) {
+    *width = static_cast<int>(planned_width);
+    *height = static_cast<int>(planned_height);
+    return true;
+  }
+#endif
   DISPMANX_MODEINFO_T info;
-  if (width == nullptr || height == nullptr || !initialized_ ||
-      vc_dispmanx_display_get_info(dispman_display_, &info) != 0) {
+  if (vc_dispmanx_display_get_info(dispman_display_, &info) != 0) {
     return false;
   }
   *width = (int)info.width;
@@ -687,6 +1332,101 @@ bool FrameBufferLayer::CaptureRgb888(uint8_t *output, int width, int height,
                                      unsigned pitch) {
   if (output == nullptr || width <= 0 || height <= 0 ||
       pitch < (unsigned)width * 3U || !initialized_) return false;
+#if RASPPI == 4
+  if (pi4kms::NativeScanoutCommitted()) {
+    uint32_t display_width = 0U;
+    uint32_t display_height = 0U;
+    FrameBufferLayer *base =
+        FB_LAYER_VIC < FB_NUM_LAYERS ? g_pi4_layers[FB_LAYER_VIC] : nullptr;
+    v3dcrt::OutputReadback readback = {};
+    if (!pi4kms::GetPlannedDisplaySize(&display_width, &display_height) ||
+        display_width == 0U || display_height == 0U || base == nullptr ||
+        !base->showing_ || base->dst_x_ < 0 || base->dst_y_ < 0 ||
+        base->dst_w_ <= 0 || base->dst_h_ <= 0 ||
+        !v3dcrt::ReadCompletedFrame(&readback) ||
+        readback.pixels == nullptr || readback.depth != 16U ||
+        readback.width == 0U || readback.height == 0U ||
+        readback.pitch < readback.width * sizeof(uint16_t)) {
+      return false;
+    }
+
+    FrameBufferLayer *overlays[FB_NUM_LAYERS] = {};
+    unsigned overlay_count = 0U;
+    for (unsigned layer = 0U; layer < FB_NUM_LAYERS; ++layer) {
+      FrameBufferLayer *candidate = g_pi4_layers[layer];
+      if (candidate == nullptr || candidate == base ||
+          !candidate->showing_ || !candidate->CanUsePi4KmsOverlay() ||
+          !candidate->pi4_kms_overlay_front_valid_) {
+        continue;
+      }
+      unsigned position = overlay_count;
+      while (position != 0U &&
+             overlays[position - 1U]->layer_ > candidate->layer_) {
+        overlays[position] = overlays[position - 1U];
+        --position;
+      }
+      overlays[position] = candidate;
+      ++overlay_count;
+    }
+
+    for (int y = 0; y < height; ++y) {
+      const uint32_t display_y = static_cast<uint32_t>(
+          (static_cast<uint64_t>(y) * display_height) /
+          static_cast<uint32_t>(height));
+      uint8_t *destination = output + static_cast<size_t>(y) * pitch;
+      for (int x = 0; x < width; ++x) {
+        const uint32_t display_x = static_cast<uint32_t>(
+            (static_cast<uint64_t>(x) * display_width) /
+            static_cast<uint32_t>(width));
+        uint32_t argb = 0xff000000U;
+        if (display_x >= static_cast<uint32_t>(base->dst_x_) &&
+            display_x < static_cast<uint32_t>(base->dst_x_ + base->dst_w_) &&
+            display_y >= static_cast<uint32_t>(base->dst_y_) &&
+            display_y < static_cast<uint32_t>(base->dst_y_ + base->dst_h_)) {
+          const uint32_t source_x = static_cast<uint32_t>(
+              (static_cast<uint64_t>(display_x - base->dst_x_) *
+               readback.width) / static_cast<uint32_t>(base->dst_w_));
+          const uint32_t source_y = static_cast<uint32_t>(
+              (static_cast<uint64_t>(display_y - base->dst_y_) *
+               readback.height) / static_cast<uint32_t>(base->dst_h_));
+          const uint16_t *source = reinterpret_cast<const uint16_t *>(
+              readback.pixels + source_y * readback.pitch);
+          argb = Pi4CaptureRgb565ToArgb(source[source_x]);
+        }
+
+        for (unsigned overlay_index = 0U;
+             overlay_index < overlay_count; ++overlay_index) {
+          const FrameBufferLayer *overlay = overlays[overlay_index];
+          if (display_x < static_cast<uint32_t>(overlay->dst_x_) ||
+              display_x >= static_cast<uint32_t>(
+                  overlay->dst_x_ + overlay->dst_w_) ||
+              display_y < static_cast<uint32_t>(overlay->dst_y_) ||
+              display_y >= static_cast<uint32_t>(
+                  overlay->dst_y_ + overlay->dst_h_)) {
+            continue;
+          }
+          const uint32_t source_x = static_cast<uint32_t>(
+              (static_cast<uint64_t>(display_x - overlay->dst_x_) *
+               overlay->pi4_kms_overlay_width_) /
+              static_cast<uint32_t>(overlay->dst_w_));
+          const uint32_t source_y = static_cast<uint32_t>(
+              (static_cast<uint64_t>(display_y - overlay->dst_y_) *
+               overlay->pi4_kms_overlay_height_) /
+              static_cast<uint32_t>(overlay->dst_h_));
+          const uint32_t *source = reinterpret_cast<const uint32_t *>(
+              overlay->pi4_kms_overlay_pixels_[
+                  overlay->pi4_kms_overlay_front_] +
+              source_y * overlay->pi4_kms_overlay_pitch_);
+          argb = Pi4CaptureBlendArgb(argb, source[source_x]);
+        }
+        destination[x * 3] = static_cast<uint8_t>(argb >> 16U);
+        destination[x * 3 + 1] = static_cast<uint8_t>(argb >> 8U);
+        destination[x * 3 + 2] = static_cast<uint8_t>(argb);
+      }
+    }
+    return true;
+  }
+#endif
   uint32_t native_image = 0U;
   DISPMANX_RESOURCE_HANDLE_T resource = vc_dispmanx_resource_create(
       VC_IMAGE_RGB888, (uint32_t)width, (uint32_t)height, &native_image);
@@ -703,11 +1443,75 @@ bool FrameBufferLayer::CaptureRgb888(uint8_t *output, int width, int height,
   return snapshot == 0 && read == 0;
 }
 
+bool FrameBufferLayer::EnsureDispmanResources() {
+#if RASPPI == 4
+  // NOTIFY_DISPLAY_DONE makes the firmware display service unavailable.  A
+  // committed native path must never recreate a hidden DispmanX fallback.
+  if (pi4kms::NativeScanoutCommitted()) {
+    return false;
+  }
+#endif
+  if (dispman_resource_[0] != 0U && dispman_resource_[1] != 0U) {
+    return true;
+  }
+  for (unsigned slot = 0U; slot < 2U; ++slot) {
+    if (dispman_resource_[slot] != 0U) {
+      (void)vc_dispmanx_resource_delete(dispman_resource_[slot]);
+      dispman_resource_[slot] = 0U;
+    }
+  }
+  if (fb_width_ <= 0 || fb_height_ <= 0) {
+    return false;
+  }
+
+  uint32_t native_image = 0U;
+  for (unsigned slot = 0U; slot < 2U; ++slot) {
+    dispman_resource_[slot] = vc_dispmanx_resource_create(
+        mode_, static_cast<uint32_t>(fb_width_),
+        static_cast<uint32_t>(fb_height_), &native_image);
+    if (dispman_resource_[slot] == 0U) {
+      for (unsigned cleanup = 0U; cleanup < 2U; ++cleanup) {
+        if (dispman_resource_[cleanup] != 0U) {
+          (void)vc_dispmanx_resource_delete(dispman_resource_[cleanup]);
+          dispman_resource_[cleanup] = 0U;
+        }
+      }
+      return false;
+    }
+  }
+  vc_dispmanx_rect_set(&copy_dst_rect_, 0, 0,
+                       static_cast<uint32_t>(fb_width_),
+                       static_cast<uint32_t>(fb_height_));
+  if (mode_ == VC_IMAGE_8BPP) {
+    const void *palette = transparency_
+        ? static_cast<const void *>(pal_argb_)
+        : static_cast<const void *>(pal_565_);
+    const int palette_bytes = transparency_
+        ? static_cast<int>(sizeof pal_argb_)
+        : static_cast<int>(sizeof pal_565_);
+    for (unsigned slot = 0U; slot < 2U; ++slot) {
+      if (vc_dispmanx_resource_set_palette(
+              dispman_resource_[slot], const_cast<void *>(palette),
+              0, palette_bytes) != 0) {
+        for (unsigned cleanup = 0U; cleanup < 2U; ++cleanup) {
+          (void)vc_dispmanx_resource_delete(dispman_resource_[cleanup]);
+          dispman_resource_[cleanup] = 0U;
+        }
+        return false;
+      }
+    }
+  }
+  printf("boot: fbl dispman resources status=ready logical_layer=%d "
+         "z_layer=%d size=%dx%d mode=%u\r\n",
+         logical_layer_, layer_, fb_width_, fb_height_,
+         static_cast<unsigned>(mode_));
+  return true;
+}
+
 int FrameBufferLayer::Allocate(int pixelmode, uint8_t **pixels,
                                int width, int height, int *pitch) {
   int ret;
-  DISPMANX_MODEINFO_T dispman_info;
-  uint32_t vc_image_ptr;
+  DISPMANX_MODEINFO_T dispman_info = {};
 
   assert(!allocated_);
   if (!Initialize()) {
@@ -739,11 +1543,39 @@ int FrameBufferLayer::Allocate(int pixelmode, uint8_t **pixels,
   fb_width_ = width;
   fb_height_ = height;
 
-  ret = vc_dispmanx_display_get_info(dispman_display_, &dispman_info);
-  assert(ret == 0);
-
-  display_width_ = dispman_info.width;
-  display_height_ = dispman_info.height;
+#if RASPPI == 4
+  uint32_t planned_width = 0U;
+  uint32_t planned_height = 0U;
+  const bool native_layout = pi4kms::NativeScanoutCommitted() &&
+      pi4kms::GetPlannedDisplaySize(&planned_width, &planned_height);
+  if (native_layout) {
+    display_width_ = static_cast<int>(planned_width);
+    display_height_ = static_cast<int>(planned_height);
+    printf("boot: pi4kms output layout logical_layer=%d "
+           "owner=core1 planned=%ux%u\r\n",
+           logical_layer_,
+           static_cast<unsigned>(planned_width),
+           static_cast<unsigned>(planned_height));
+  } else
+#endif
+  {
+    ret = vc_dispmanx_display_get_info(dispman_display_, &dispman_info);
+    assert(ret == 0);
+    display_width_ = dispman_info.width;
+    display_height_ = dispman_info.height;
+#if RASPPI == 4
+    if (pi4kms::GetPlannedDisplaySize(&planned_width, &planned_height)) {
+      display_width_ = static_cast<int>(planned_width);
+      display_height_ = static_cast<int>(planned_height);
+      printf("boot: pi4kms output layout logical_layer=%d firmware=%ux%u "
+             "planned=%ux%u\r\n",
+             logical_layer_, static_cast<unsigned>(dispman_info.width),
+             static_cast<unsigned>(dispman_info.height),
+             static_cast<unsigned>(planned_width),
+             static_cast<unsigned>(planned_height));
+    }
+#endif
+  }
 
   if (pixels) {
      pixels_ = (uint8_t*) malloc(fb_pitch_ * height);
@@ -751,20 +1583,44 @@ int FrameBufferLayer::Allocate(int pixelmode, uint8_t **pixels,
      *pixels = pixels_;
   }
 
-  // Allocate the VC resources along with the frame buffer
-
-  dispman_resource_[0] = vc_dispmanx_resource_create(mode_,
-                                                     width,
-                                                     height,
-                                                     &vc_image_ptr );
-  dispman_resource_[1] = vc_dispmanx_resource_create(mode_,
-                                                     width,
-                                                     height,
-                                                     &vc_image_ptr );
-  assert(dispman_resource_[0]);
-  assert(dispman_resource_[1]);
-
   vc_dispmanx_rect_set(&copy_dst_rect_, 0, 0, width, height);
+
+  bool defer_dispman_resources = false;
+#if RASPPI == 4
+  defer_dispman_resources = ShouldDeferPi4DispmanResources();
+#endif
+  if (!defer_dispman_resources && !EnsureDispmanResources()) {
+    printf("boot: fbl dispman resources status=fail logical_layer=%d "
+           "z_layer=%d\r\n", logical_layer_, layer_);
+    return -1;
+  }
+#if RASPPI == 4
+  if (defer_dispman_resources) {
+    printf("boot: pi4kms dispman resources status=deferred "
+           "logical_layer=%d z_layer=%d reason=%s\r\n",
+           logical_layer_, layer_,
+           pi4kms::NativeScanoutCommitted() ? "native-committed" :
+                                              "native-overlay");
+  }
+#endif
+
+#if RASPPI == 4
+  if (v3dcrt::IsAvailable()) {
+    if (logical_layer_ == FB_LAYER_VIC || logical_layer_ == FB_LAYER_VDC) {
+      printf("boot: pi4v3d frame route logical_layer=%d z_layer=%d "
+             "eligible=%u transparency=%u\r\n",
+             logical_layer_, layer_, CanUsePi4V3d() ? 1U : 0U,
+             transparency_ ? 1U : 0U);
+    }
+    if (CanUsePi4V3d() && !g_pi4_v3d_output_resolution &&
+        !AllocatePi4V3dResources(
+            static_cast<unsigned>(fb_width_),
+            static_cast<unsigned>(fb_height_))) {
+      printf("boot: pi4v3d frame scanout resources status=fail; "
+             "normal-fallback-active\r\n");
+    }
+  }
+#endif
 
   if (pixels) {
      // Don't clobber these on realloc.
@@ -827,6 +1683,30 @@ int FrameBufferLayer::Allocate(int pixelmode, uint8_t **pixels,
 int FrameBufferLayer::ReAllocate(bool shader_enable) {
   assert(allocated_);
 
+#if RASPPI == 4
+  if (v3dcrt::IsAvailable()) {
+    if (shader_enable && !CanUsePi4V3d()) {
+      uses_shader_ = false;
+      printf("boot: pi4v3d menu rejected logical_layer=%d z_layer=%d "
+             "reason=unsupported-layer\r\n", logical_layer_, layer_);
+      return -1;
+    }
+    const bool changed = !g_pi4_v3d_crt_enabled_initialized ||
+                         g_pi4_v3d_crt_enabled != shader_enable;
+    g_pi4_v3d_crt_enabled = shader_enable;
+    g_pi4_v3d_crt_enabled_initialized = true;
+    uses_shader_ = false;
+    if (changed) {
+      printf("boot: pi4v3d menu master=%s present=%s "
+             "logical_layer=%d z_layer=%d\r\n",
+             shader_enable ? "on" : "off",
+             shader_enable ? "v3d" : "framebuffer",
+             logical_layer_, layer_);
+    }
+    return 0;
+  }
+#endif
+
   if (uses_shader_ == shader_enable) {
      // No need to realloc if nothing changed;
      return 0;
@@ -878,10 +1758,39 @@ void FrameBufferLayer::FreeInternal(bool keepPixels) {
      free(cropped_pixels_);
   }
 
-  ret = vc_dispmanx_resource_delete(dispman_resource_[0]);
-  assert(ret == 0);
-  ret = vc_dispmanx_resource_delete(dispman_resource_[1]);
-  assert(ret == 0);
+#if RASPPI == 4
+  FreePi4V3dResources();
+  FreePi4KmsOverlayResources();
+#endif
+
+  for (unsigned slot = 0U; slot < 2U; ++slot) {
+    if (dispman_resource_[slot] != 0U) {
+#if RASPPI == 4
+      if (pi4kms::NativeScanoutCommitted()) {
+        // DISPLAY_DONE retired the firmware service.  The first native
+        // present already attempted to release these recovery anchors on
+        // Core 0; never re-enter DispmanX later from the Core-1 owner.
+        dispman_resource_[slot] = 0U;
+        continue;
+      }
+#endif
+      ret = vc_dispmanx_resource_delete(dispman_resource_[slot]);
+      if (ret == 0) {
+        dispman_resource_[slot] = 0U;
+      }
+#if RASPPI == 4
+      else if (pi4kms::NativeScanoutCommitted()) {
+        printf("boot: pi4kms dispman resource cleanup status=fail "
+               "logical_layer=%d slot=%u result=%d\r\n",
+               logical_layer_, slot, ret);
+      }
+#endif
+      else {
+        assert(ret == 0);
+      }
+    }
+  }
+  dispman_element_ = 0U;
 
   allocated_ = false;
 }
@@ -941,6 +1850,44 @@ void FrameBufferLayer::Show() {
      }
   }
 
+#if RASPPI == 4
+  const bmc64::MachineId output_machine = bmc64::CurrentMachine().id;
+  if (g_pi4_v3d_output_resolution &&
+      output_machine == bmc64::MachineId::VIC20 &&
+      fb_width_ >= 1108 && fb_height_ >= 312) {
+    src_x_ = 540;
+    src_y_ = 28;
+    src_w_ = 568;
+    src_h_ = 284;
+    dst_w = 1242;
+    dst_h = 720;
+    printf("boot: pi4v3d output-geometry machine=VIC20 "
+           "source=540,28 568x284 target=1242x720\r\n");
+  } else if (g_pi4_v3d_output_resolution &&
+             output_machine == bmc64::MachineId::PET &&
+             fb_height_ >= 272) {
+    if (fb_width_ >= 704) {
+      src_x_ = 4;
+      src_y_ = 8;
+      src_w_ = 696;
+      src_h_ = 256;
+      dst_w = 1100;
+      dst_h = 720;
+      printf("boot: pi4v3d output-geometry machine=PET80 "
+             "source=4,8 696x256 target=1100x720\r\n");
+    } else if (fb_width_ >= 384) {
+      src_x_ = 4;
+      src_y_ = 8;
+      src_w_ = 376;
+      src_h_ = 256;
+      dst_w = 1003;
+      dst_h = 720;
+      printf("boot: pi4v3d output-geometry machine=PET40 "
+             "source=4,8 376x256 target=1003x720\r\n");
+    }
+  }
+#endif
+
   // Resulting image is centered
   int oy;
   switch (valign_) {
@@ -986,6 +1933,21 @@ void FrameBufferLayer::Show() {
   dst_w_ = dst_w;
   dst_h_ = dst_h;
 
+#if RASPPI == 4
+  if (v3dcrt::IsAvailable() && CanUsePi4V3d()) {
+    const unsigned render_width = static_cast<unsigned>(
+        g_pi4_v3d_output_resolution ? dst_w_ : fb_width_);
+    const unsigned render_height = static_cast<unsigned>(
+        g_pi4_v3d_output_resolution ? dst_h_ : fb_height_);
+    if (!AllocatePi4V3dResources(render_width, render_height)) {
+      printf("boot: pi4v3d frame scanout resources status=fail "
+             "resolution=%s target=%ux%u; normal-fallback-active\r\n",
+             g_pi4_v3d_output_resolution ? "output" : "source",
+             render_width, render_height);
+    }
+  }
+#endif
+
   if (uses_shader_) {
      // When we use opengl + shader the source rect needs to
      // be the dest rect because the shader ends up doing the
@@ -1013,6 +1975,39 @@ void FrameBufferLayer::Show() {
                        dst_w_,
                        dst_h_);
 
+#if RASPPI == 4
+  if (g_pi4_v3d_output_resolution) {
+    vc_dispmanx_rect_set(&pi4_v3d_src_rect_, 0, 0,
+                         pi4_v3d_width_ << 16,
+                         pi4_v3d_height_ << 16);
+  } else {
+    pi4_v3d_src_rect_ = src_rect_;
+  }
+#endif
+
+#if RASPPI == 4
+  if (pi4kms::NativeScanoutCommitted() && CanUsePi4V3d()) {
+    showing_ = true;
+    FrameReady(0);
+    PresentLayer(false, this);
+    return;
+  }
+  if (pi4kms::FirmwareDisplayClaimed() && CanUsePi4KmsOverlay()) {
+    showing_ = true;
+    printf("boot: pi4kms overlay show logical_layer=%d z_layer=%d "
+           "src=%d,%d %dx%d dst=%d,%d %dx%d\r\n",
+           logical_layer_, layer_, src_x_, src_y_, src_w_, src_h_,
+           dst_x_, dst_y_, dst_w_, dst_h_);
+    PresentLayer(false, this);
+    return;
+  }
+#endif
+
+  if (!EnsureDispmanResources()) {
+    printf("boot: fbl show status=fail reason=dispman-resource "
+           "logical_layer=%d z_layer=%d\r\n", logical_layer_, layer_);
+    return;
+  }
   dispman_update = vc_dispmanx_update_start(0);
   assert( dispman_update );
 
@@ -1104,6 +2099,31 @@ void FrameBufferLayer::Hide() {
 
   if (!showing_) return;
 
+#if RASPPI == 4
+  if (pi4kms::NativeScanoutCommitted() && !CanUsePi4KmsOverlay()) {
+    showing_ = false;
+    printf("boot: pi4kms layer hide logical_layer=%d z_layer=%d "
+           "action=hold-last-native-frame\r\n",
+           logical_layer_, layer_);
+    return;
+  }
+  if (pi4kms::FirmwareDisplayClaimed() && CanUsePi4KmsOverlay()) {
+    showing_ = false;
+    printf("boot: pi4kms overlay hide logical_layer=%d z_layer=%d\r\n",
+           logical_layer_, layer_);
+    PresentLayer(false, this);
+    return;
+  }
+  if (pi4kms::TakeoverActive()) {
+    (void)pi4kms::RestoreFirmwareScanout(true);
+  }
+#endif
+
+  if (dispman_element_ == 0U) {
+    showing_ = false;
+    return;
+  }
+
   if (uses_shader_) {
     eglMakeCurrent(egl_display_, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_context_);
     eglDestroySurface(egl_display_, egl_surface_);
@@ -1114,6 +2134,7 @@ void FrameBufferLayer::Hide() {
   assert(ret == 0);
   ret = vc_dispmanx_update_submit(dispman_update, NULL, NULL);
   assert(ret == 0);
+  dispman_element_ = 0U;
   showing_ = false;
 }
 
@@ -1121,17 +2142,641 @@ void* FrameBufferLayer::GetPixels() {
   return pixels_;
 }
 
+#if RASPPI == 4
+bool FrameBufferLayer::CanUsePi4V3d() const {
+  return logical_layer_ == FB_LAYER_VIC && !transparency_;
+}
+
+bool FrameBufferLayer::ShouldDeferPi4DispmanResources() const {
+  return pi4kms::NativeScanoutCommitted() ||
+         (pi4kms::TakeoverReady() &&
+         (logical_layer_ == FB_LAYER_UI ||
+          logical_layer_ == FB_LAYER_STATUS) &&
+         transparency_ && mode_ == VC_IMAGE_8BPP);
+}
+
+bool FrameBufferLayer::ReleasePi4KmsDispmanResources() {
+  if (!pi4kms::NativeScanoutCommitted()) {
+    return false;
+  }
+
+  const bool had_element = dispman_element_ != 0U;
+  unsigned released = 0U;
+  unsigned failures = 0U;
+  // DISPLAY_DONE has already detached the firmware-owned composition.  The
+  // stale element handle must not be submitted to DispmanX again.
+  dispman_element_ = 0U;
+  for (unsigned slot = 0U; slot < 2U; ++slot) {
+    if (dispman_resource_[slot] == 0U) {
+      continue;
+    }
+    const int result = vc_dispmanx_resource_delete(dispman_resource_[slot]);
+    if (result == 0) {
+      dispman_resource_[slot] = 0U;
+      ++released;
+    } else {
+      ++failures;
+    }
+  }
+
+  static bool failure_logged = false;
+  if (failures != 0U && !failure_logged) {
+    failure_logged = true;
+    printf("boot: pi4kms dispman recovery-anchor status=retry "
+           "logical_layer=%d released=%u failures=%u\r\n",
+           logical_layer_, released, failures);
+  } else if (failures == 0U && (had_element || released != 0U)) {
+    printf("boot: pi4kms dispman recovery-anchor status=released "
+           "logical_layer=%d resources=%u element=retired\r\n",
+           logical_layer_, released);
+  }
+  return failures == 0U;
+}
+
+bool FrameBufferLayer::AllocatePi4V3dResources(unsigned width,
+                                               unsigned height) {
+  if (pi4_v3d_width_ == width && pi4_v3d_height_ == height &&
+      pi4_v3d_pitch_ != 0U && pi4_v3d_pixels_[0] != nullptr &&
+      pi4_v3d_pixels_[1] != nullptr) {
+    return pi4kms::TakeoverReady() || EnsurePi4V3dDispmanResources();
+  }
+  FreePi4V3dResources();
+  if (width == 0U || height == 0U || width > UINT32_MAX / 2U) {
+    return false;
+  }
+
+  pi4_v3d_pitch_ = ALIGN_UP(width * 2U, 32U);
+  if (height > UINT32_MAX / pi4_v3d_pitch_) {
+    pi4_v3d_pitch_ = 0U;
+    return false;
+  }
+  const size_t bytes =
+      static_cast<size_t>(pi4_v3d_pitch_) * height;
+  if (bytes > UINT32_MAX - 31U) {
+    pi4_v3d_pitch_ = 0U;
+    return false;
+  }
+  for (unsigned slot = 0U; slot < 2U; ++slot) {
+    uint8_t *allocation =
+        new (HEAP_DMA30) uint8_t[static_cast<unsigned>(bytes) + 31U];
+    if (allocation == nullptr) {
+      FreePi4V3dResources();
+      return false;
+    }
+    const uintptr_t aligned =
+        (reinterpret_cast<uintptr_t>(allocation) + 31U) &
+        ~static_cast<uintptr_t>(31U);
+    pi4_v3d_allocation_[slot] = allocation;
+    pi4_v3d_pixels_[slot] = reinterpret_cast<uint8_t *>(aligned);
+    memset(pi4_v3d_pixels_[slot], 0, bytes);
+    CleanAndInvalidateDataCacheRange(static_cast<u32>(aligned), bytes);
+  }
+  pi4_v3d_width_ = width;
+  pi4_v3d_height_ = height;
+  vc_dispmanx_rect_set(&pi4_v3d_copy_dst_rect_, 0, 0, width, height);
+  const bool direct = pi4kms::TakeoverReady();
+  if (!direct && !EnsurePi4V3dDispmanResources()) {
+    FreePi4V3dResources();
+    return false;
+  }
+  printf("boot: pi4v3d frame scanout resources status=ready slots=2 "
+         "logical_layer=%d z_layer=%d resolution=%s size=%ux%u pitch=%u "
+         "format=rgb565 backend=%s\r\n",
+         logical_layer_, layer_,
+         g_pi4_v3d_output_resolution ? "output" : "source",
+         width, height, pi4_v3d_pitch_,
+         direct ? "pi4kms-native" : "dispmanx-staged");
+  return true;
+}
+
+bool FrameBufferLayer::EnsurePi4V3dDispmanResources() {
+  if (pi4_v3d_resource_[0] != 0U && pi4_v3d_resource_[1] != 0U) {
+    return true;
+  }
+  for (unsigned slot = 0U; slot < 2U; ++slot) {
+    if (pi4_v3d_resource_[slot] != 0U) {
+      (void)vc_dispmanx_resource_delete(pi4_v3d_resource_[slot]);
+      pi4_v3d_resource_[slot] = 0U;
+    }
+  }
+  if (pi4_v3d_width_ == 0U || pi4_v3d_height_ == 0U ||
+      pi4_v3d_pixels_[0] == nullptr || pi4_v3d_pixels_[1] == nullptr) {
+    return false;
+  }
+  uint32_t native_image = 0U;
+  for (unsigned slot = 0U; slot < 2U; ++slot) {
+    pi4_v3d_resource_[slot] = vc_dispmanx_resource_create(
+        VC_IMAGE_RGB565, pi4_v3d_width_, pi4_v3d_height_, &native_image);
+    if (pi4_v3d_resource_[slot] == 0U) {
+      for (unsigned cleanup = 0U; cleanup < 2U; ++cleanup) {
+        if (pi4_v3d_resource_[cleanup] != 0U) {
+          (void)vc_dispmanx_resource_delete(pi4_v3d_resource_[cleanup]);
+          pi4_v3d_resource_[cleanup] = 0U;
+        }
+      }
+      return false;
+    }
+  }
+  printf("boot: pi4v3d frame dispmanx staging status=ready "
+         "logical_layer=%d size=%ux%u\r\n",
+         logical_layer_, pi4_v3d_width_, pi4_v3d_height_);
+  return true;
+}
+
+bool FrameBufferLayer::UploadPi4V3dDispmanResource(
+    unsigned resource_index) {
+  return resource_index < 2U && EnsurePi4V3dDispmanResources() &&
+         vc_dispmanx_resource_write_data(
+             pi4_v3d_resource_[resource_index], VC_IMAGE_RGB565,
+             static_cast<int>(pi4_v3d_pitch_),
+             pi4_v3d_pixels_[resource_index],
+             &pi4_v3d_copy_dst_rect_) == 0;
+}
+
+void FrameBufferLayer::FreePi4V3dResources() {
+  if (g_pi4_v3d_pipeline_timing.layer == this) {
+    g_pi4_v3d_pipeline_timing = {};
+  }
+  g_pi4_v3d_pipeline_samples_remaining = 0U;
+  g_pi4_v3d_pipeline_aggregate = {};
+  for (unsigned slot = 0U; slot < 2U; ++slot) {
+    if (pi4_v3d_resource_[slot] != 0U) {
+      if (!pi4kms::NativeScanoutCommitted()) {
+        const int result =
+            vc_dispmanx_resource_delete(pi4_v3d_resource_[slot]);
+        if (result != 0) {
+          printf("boot: pi4v3d frame dispmanx delete failed "
+                 "slot=%u result=%d\r\n", slot, result);
+        }
+      }
+    }
+    pi4_v3d_resource_[slot] = 0U;
+    delete[] pi4_v3d_allocation_[slot];
+    pi4_v3d_allocation_[slot] = nullptr;
+    pi4_v3d_pixels_[slot] = nullptr;
+    pi4_v3d_ready_[slot] = false;
+    pi4_v3d_scanout_[slot] = {};
+  }
+  pi4_v3d_pitch_ = 0U;
+  pi4_v3d_width_ = 0U;
+  pi4_v3d_height_ = 0U;
+  memset(&pi4_v3d_copy_dst_rect_, 0, sizeof pi4_v3d_copy_dst_rect_);
+  memset(&pi4_v3d_src_rect_, 0, sizeof pi4_v3d_src_rect_);
+}
+
+bool FrameBufferLayer::CanUsePi4KmsOverlay() const {
+  return (logical_layer_ == FB_LAYER_UI ||
+          logical_layer_ == FB_LAYER_STATUS) &&
+         transparency_ && mode_ == VC_IMAGE_8BPP &&
+         pixels_ != nullptr && fb_width_ > 0 && fb_height_ > 0 &&
+         fb_pitch_ >= fb_width_ &&
+         src_x_ >= 0 && src_y_ >= 0 && src_w_ > 0 && src_h_ > 0 &&
+         src_x_ + src_w_ <= fb_width_ &&
+         src_y_ + src_h_ <= fb_height_ &&
+         dst_x_ >= 0 && dst_y_ >= 0 && dst_w_ > 0 && dst_h_ > 0 &&
+         dst_x_ + dst_w_ <= display_width_ &&
+         dst_y_ + dst_h_ <= display_height_;
+}
+
+bool FrameBufferLayer::AllocatePi4KmsOverlayResources(unsigned width,
+                                                       unsigned height) {
+  if (pi4_kms_overlay_width_ == width &&
+      pi4_kms_overlay_height_ == height &&
+      pi4_kms_overlay_pitch_ != 0U &&
+      pi4_kms_overlay_pixels_[0] != nullptr &&
+      pi4_kms_overlay_pixels_[1] != nullptr) {
+    return true;
+  }
+  FreePi4KmsOverlayResources();
+  if (width == 0U || height == 0U || width > UINT32_MAX / 4U) {
+    return false;
+  }
+
+  const unsigned pitch = ALIGN_UP(width * 4U, 32U);
+  if (height > UINT32_MAX / pitch) {
+    return false;
+  }
+  const unsigned bytes = pitch * height;
+  if (bytes > UINT32_MAX - 31U) {
+    return false;
+  }
+  for (unsigned slot = 0U; slot < 2U; ++slot) {
+    uint8_t *allocation = new (HEAP_DMA30) uint8_t[bytes + 31U];
+    if (allocation == nullptr) {
+      FreePi4KmsOverlayResources();
+      return false;
+    }
+    const uintptr_t aligned =
+        (reinterpret_cast<uintptr_t>(allocation) + 31U) &
+        ~static_cast<uintptr_t>(31U);
+    pi4_kms_overlay_allocation_[slot] = allocation;
+    pi4_kms_overlay_pixels_[slot] = reinterpret_cast<uint8_t *>(aligned);
+    memset(pi4_kms_overlay_pixels_[slot], 0, bytes);
+    CleanAndInvalidateDataCacheRange(
+        static_cast<u32>(aligned), bytes);
+  }
+  pi4_kms_overlay_pitch_ = pitch;
+  pi4_kms_overlay_width_ = width;
+  pi4_kms_overlay_height_ = height;
+  pi4_kms_overlay_front_ = 0U;
+  pi4_kms_overlay_front_valid_ = false;
+  printf("boot: pi4kms overlay buffers status=ready logical_layer=%d "
+         "size=%ux%u pitch=%u slots=2 format=argb8888\r\n",
+         logical_layer_, width, height, pitch);
+  return true;
+}
+
+void FrameBufferLayer::FreePi4KmsOverlayResources() {
+  for (unsigned slot = 0U; slot < 2U; ++slot) {
+    delete[] pi4_kms_overlay_allocation_[slot];
+    pi4_kms_overlay_allocation_[slot] = nullptr;
+    pi4_kms_overlay_pixels_[slot] = nullptr;
+  }
+  pi4_kms_overlay_pitch_ = 0U;
+  pi4_kms_overlay_width_ = 0U;
+  pi4_kms_overlay_height_ = 0U;
+  pi4_kms_overlay_front_ = 0U;
+  pi4_kms_overlay_front_valid_ = false;
+}
+
+bool FrameBufferLayer::BuildPi4KmsOverlayPlane(unsigned resource_index,
+                                               pi4kms::Plane *plane) {
+  if (resource_index >= 2U || plane == nullptr ||
+      !CanUsePi4KmsOverlay() ||
+      !AllocatePi4KmsOverlayResources(
+          static_cast<unsigned>(src_w_), static_cast<unsigned>(src_h_))) {
+    return false;
+  }
+
+  uint8_t *destination = pi4_kms_overlay_pixels_[resource_index];
+  for (int y = 0; y < src_h_; ++y) {
+    const uint8_t *source_row =
+        pixels_ + (src_y_ + y) * fb_pitch_ + src_x_;
+    uint32_t *destination_row = reinterpret_cast<uint32_t *>(
+        destination + static_cast<unsigned>(y) * pi4_kms_overlay_pitch_);
+    for (int x = 0; x < src_w_; ++x) {
+      destination_row[x] = pal_argb_[source_row[x]];
+    }
+  }
+  const unsigned bytes = pi4_kms_overlay_pitch_ * pi4_kms_overlay_height_;
+  CleanAndInvalidateDataCacheRange(
+      reinterpret_cast<u32>(destination), bytes);
+
+  *plane = {
+    reinterpret_cast<u32>(destination),
+    pi4_kms_overlay_pitch_,
+    pi4_kms_overlay_width_,
+    pi4_kms_overlay_height_,
+    pi4kms::kPlaneFormatArgb8888,
+    g_pi4_kms_interpolation_enabled ? pi4kms::kScaleFilterMitchell
+                                    : pi4kms::kScaleFilterNearest,
+    static_cast<uint32_t>(dst_x_),
+    static_cast<uint32_t>(dst_y_),
+    static_cast<uint32_t>(dst_w_),
+    static_cast<uint32_t>(dst_h_)
+  };
+  return true;
+}
+
+bool FrameBufferLayer::RenderPi4V3dFrame(unsigned resource_index) {
+  if (g_pi4_v3d_pipeline_timing.layer == this) {
+    g_pi4_v3d_pipeline_timing = {};
+  }
+  if (resource_index >= 2U || pi4_v3d_pixels_[resource_index] == nullptr ||
+      pi4_v3d_pitch_ == 0U || pi4_v3d_width_ == 0U ||
+      pi4_v3d_height_ == 0U ||
+      !CanUsePi4V3d() ||
+      !g_pi4_v3d_crt_enabled ||
+      !v3dcrt::IsAvailable()) {
+    return false;
+  }
+  pi4_v3d_scanout_[resource_index] = {};
+
+  const u32 render_source_x = g_pi4_v3d_output_resolution ?
+      static_cast<u32>(src_x_) : 0U;
+  const u32 render_source_y = g_pi4_v3d_output_resolution ?
+      static_cast<u32>(src_y_) : 0U;
+  const u32 render_source_width = g_pi4_v3d_output_resolution ?
+      static_cast<u32>(src_w_) : static_cast<u32>(fb_width_);
+  const u32 render_source_height = g_pi4_v3d_output_resolution ?
+      static_cast<u32>(src_h_) : static_cast<u32>(fb_height_);
+  const u32 render_source_left_edge_padding =
+      g_pi4_v3d_output_resolution &&
+      bmc64::CurrentMachine().id == bmc64::MachineId::VIC20 &&
+      render_source_width == 568U && render_source_height == 284U ?
+          12U : 0U;
+  if (render_source_left_edge_padding != 0U) {
+    static bool vic20_centering_logged = false;
+    if (!vic20_centering_logged) {
+      vic20_centering_logged = true;
+      printf("boot: pi4v3d source-centering machine=VIC20 "
+             "left_edge_padding=%u source=%u,%u %ux%u\r\n",
+             static_cast<unsigned>(render_source_left_edge_padding),
+             static_cast<unsigned>(render_source_x),
+             static_cast<unsigned>(render_source_y),
+             static_cast<unsigned>(render_source_width),
+             static_cast<unsigned>(render_source_height));
+    }
+  }
+  v3dcrt::InputFramebuffer source = {
+    pixels_,
+    static_cast<u32>(fb_width_),
+    static_cast<u32>(fb_height_),
+    static_cast<u32>(fb_pitch_),
+    mode_ == VC_IMAGE_RGB565 ? v3dcrt::kPixelFormatRgb565
+                             : v3dcrt::kPixelFormatIndexed8,
+    pal_565_,
+    0U,
+    0U,
+    {render_source_x, render_source_y,
+     render_source_width, render_source_height},
+    render_source_left_edge_padding
+  };
+  v3dcrt::OutputFramebuffer target = {};
+  target.pixels = pi4_v3d_pixels_[resource_index];
+  target.width = static_cast<u32>(pi4_v3d_width_);
+  target.height = static_cast<u32>(pi4_v3d_height_);
+  target.pitch = pi4_v3d_pitch_;
+  target.depth = 16U;
+  target.format = v3dcrt::kPixelFormatRgb565;
+  v3dcrt::EffectParams params = {};
+  params.enable_interpolation = bilinear_interpolation_;
+  params.enable_geometry = curvature_;
+  params.curvature_x = curvature_x_;
+  params.curvature_y = curvature_y_;
+  params.skew_x = skew_x_;
+  params.skew_y = skew_y_;
+  params.trapezoid = trapezoid_;
+  params.rotation_degrees = rotation_degrees_;
+  params.overscan_scale = overscan_scale_;
+  params.enable_convergence = convergence_;
+  params.red_offset_x = red_offset_x_;
+  params.red_offset_y = red_offset_y_;
+  params.blue_offset_x = blue_offset_x_;
+  params.blue_offset_y = blue_offset_y_;
+  params.convergence_radial_strength = convergence_radial_strength_;
+  params.enable_horizontal_filtering = horizontal_filtering_;
+  params.horizontal_sigma_x = horizontal_sigma_x_;
+  params.enable_scanlines = scanlines_;
+  params.enable_scanline_multisample = multisample_;
+  params.scanline_weight = g_pi4_v3d_scanline_weight_override_enabled ?
+      g_pi4_v3d_scanline_weight_override : scanline_weight_;
+  params.scanline_gap_brightness =
+      g_pi4_v3d_scanline_gap_override_enabled ?
+          g_pi4_v3d_scanline_gap_override : scanline_gap_brightness_;
+  params.enable_edge_blur = edge_blur_;
+  params.edge_blur_strength = edge_blur_strength_;
+  params.edge_blur_radius = edge_blur_radius_;
+  params.enable_mask = mask_ != 0;
+  params.phosphor_mask_pattern =
+      static_cast<v3dcrt::PhosphorMaskPattern>(mask_);
+  params.mask_brightness = mask_brightness_;
+  params.enable_vignette = vignette_;
+  params.vignette_strength = vignette_strength_;
+  params.vignette_scale = vignette_scale_;
+  params.vignette_softness = vignette_softness_;
+  params.enable_uneven_illumination = uneven_illumination_;
+  params.uneven_illumination_strength = uneven_illumination_strength_;
+  params.uneven_illumination_scale = uneven_illumination_scale_;
+  params.enable_glass_reflection = glass_reflection_;
+  params.glass_reflection_angle = glass_reflection_angle_;
+  params.glass_reflection_width = glass_reflection_width_;
+  params.glass_reflection_position = glass_reflection_position_;
+  params.enable_rounded_screen_mask = rounded_screen_mask_;
+  params.rounded_corner_radius = rounded_corner_radius_;
+  params.rounded_border_softness = rounded_border_softness_;
+  params.enable_edge_glow = edge_glow_;
+  params.edge_glow_strength = edge_glow_strength_;
+  params.edge_glow_width = edge_glow_width_;
+  params.enable_bloom = bloom_;
+  params.bloom_factor = bloom_factor_;
+  params.enable_horizontal_jitter = horizontal_jitter_;
+  params.horizontal_jitter_strength = horizontal_jitter_strength_;
+  params.horizontal_jitter_frequency = horizontal_jitter_frequency_;
+  params.horizontal_jitter_speed = horizontal_jitter_speed_;
+  params.enable_composite_artifacts = composite_artifacts_;
+  params.composite_chroma_blur = composite_chroma_blur_;
+  params.composite_luma_sharpen = composite_luma_sharpen_;
+  params.composite_color_bleed = composite_color_bleed_;
+  params.enable_noise = noise_;
+  params.luminance_noise = luminance_noise_;
+  params.chroma_noise = chroma_noise_;
+  params.noise_speed = noise_speed_;
+  params.enable_output_response = gamma_;
+  params.fast_output_response = fake_gamma_;
+  params.output_level_mapping =
+      static_cast<v3dcrt::OutputLevelMapping>(output_level_mapping_);
+  params.input_gamma = input_gamma_;
+  params.output_gamma = output_gamma_;
+  params.output_saturation = output_saturation_;
+  params.black_level = black_level_;
+  params.white_clip = white_clip_;
+  const u64 frame_start_us = CTimer::GetClockTicks64();
+  if (!v3dcrt::RenderFrame(source, target, params)) {
+    return false;
+  }
+  const u64 render_done_us = CTimer::GetClockTicks64();
+  if (!pi4v3d::GetLastRenderedFrame(
+          &pi4_v3d_scanout_[resource_index])) {
+    return false;
+  }
+  static bool pi4kms_native_logged = false;
+  bool write_ok = true;
+  if (!pi4kms::TakeoverReady()) {
+    write_ok = UploadPi4V3dDispmanResource(resource_index);
+  } else if (!pi4kms_native_logged) {
+    pi4kms_native_logged = true;
+    printf("boot: pi4kms frame resources status=native "
+           "dispmanx_staging=unallocated\r\n");
+  }
+  const u64 write_done_us = CTimer::GetClockTicks64();
+  if (!write_ok) {
+    return false;
+  }
+  g_pi4_v3d_pipeline_timing.valid = true;
+  g_pi4_v3d_pipeline_timing.effect_change =
+      v3dcrt::LastFrameChangedEffect();
+  g_pi4_v3d_pipeline_timing.sample_after_effect_change =
+      g_pi4_v3d_pipeline_samples_remaining != 0U &&
+      !g_pi4_v3d_pipeline_timing.effect_change;
+  if (g_pi4_v3d_pipeline_timing.effect_change) {
+    g_pi4_v3d_pipeline_samples_remaining =
+        kPi4V3dPipelineEffectSampleCount;
+    g_pi4_v3d_pipeline_aggregate = {};
+  }
+  g_pi4_v3d_pipeline_timing.layer = this;
+  g_pi4_v3d_pipeline_timing.sequence = v3dcrt::LastFrameSequence();
+  g_pi4_v3d_pipeline_timing.frame_start_us = frame_start_us;
+  g_pi4_v3d_pipeline_timing.render_done_us = render_done_us;
+  g_pi4_v3d_pipeline_timing.write_done_us = write_done_us;
+  return true;
+}
+
+bool FrameBufferLayer::TryPi4KmsPresent(bool sync,
+                                        FrameBufferLayer **layers,
+                                        unsigned count) {
+  (void)sync;
+  FrameBufferLayer *vic =
+      FB_LAYER_VIC < FB_NUM_LAYERS ? g_pi4_layers[FB_LAYER_VIC] : nullptr;
+  bool vic_ready = false;
+  for (unsigned i = 0U; i < count; ++i) {
+    vic_ready = vic_ready || layers[i] == vic;
+  }
+
+  FrameBufferLayer *overlays[FB_NUM_LAYERS - 1U] = {};
+  unsigned overlay_count = 0U;
+  bool supported_layers = vic != nullptr && vic->showing_;
+  for (unsigned i = 0U; i < FB_NUM_LAYERS; ++i) {
+    FrameBufferLayer *active = g_pi4_layers[i];
+    if (active == nullptr || !active->showing_ || active == vic) {
+      continue;
+    }
+    if (!active->CanUsePi4KmsOverlay() ||
+        overlay_count >= FB_NUM_LAYERS - 1U) {
+      supported_layers = false;
+      break;
+    }
+    overlays[overlay_count++] = active;
+  }
+  for (unsigned i = 1U; i < overlay_count; ++i) {
+    FrameBufferLayer *current = overlays[i];
+    unsigned j = i;
+    while (j != 0U && overlays[j - 1U]->layer_ > current->layer_) {
+      overlays[j] = overlays[j - 1U];
+      --j;
+    }
+    overlays[j] = current;
+  }
+  const bool eligible = pi4kms::TakeoverReady() &&
+                        g_pi4_v3d_output_resolution && supported_layers &&
+                        !vic->uses_shader_ &&
+                        vic->CanUsePi4V3d();
+  if (!eligible) {
+    if (pi4kms::FirmwareDisplayClaimed()) {
+      static bool unsupported_layers_logged = false;
+      if (!unsupported_layers_logged) {
+        unsupported_layers_logged = true;
+        printf("boot: pi4kms presentation held reason=unsupported-layers "
+               "firmware-display-stopped overlays=%u\r\n",
+               overlay_count);
+      }
+      return pi4kms::TakeoverActive();
+    }
+    if (pi4kms::TakeoverActive() &&
+        !pi4kms::RestoreFirmwareScanout(true)) {
+      printf("boot: pi4kms fallback restore failed\r\n");
+    }
+    return false;
+  }
+
+  unsigned next_resource = vic_ready
+      ? 1U - static_cast<unsigned>(vic->rnum_)
+      : static_cast<unsigned>(vic->rnum_);
+  if (!vic->pi4_v3d_ready_[next_resource]) {
+    const unsigned alternate = next_resource ^ 1U;
+    if (!vic->pi4_v3d_ready_[alternate]) {
+      return false;
+    }
+    next_resource = alternate;
+  }
+  const pi4v3d::RenderedFrame &frame =
+      vic->pi4_v3d_scanout_[next_resource];
+  if (!vic->pi4_v3d_ready_[next_resource] || !frame.valid ||
+      frame.framebuffer_bus_address == 0U ||
+      frame.width != static_cast<unsigned>(vic->dst_w_) ||
+      frame.height != static_cast<unsigned>(vic->dst_h_) ||
+      vic->dst_x_ < 0 || vic->dst_y_ < 0 ||
+      vic->display_width_ <= 0 || vic->display_height_ <= 0) {
+    return false;
+  }
+
+  pi4kms::Plane kms_planes[FB_NUM_LAYERS] = {};
+  kms_planes[0] = {
+    frame.framebuffer_bus_address,
+    frame.pitch,
+    frame.width,
+    frame.height,
+    pi4kms::kPlaneFormatRgb565,
+    g_pi4_kms_interpolation_enabled ? pi4kms::kScaleFilterMitchell
+                                    : pi4kms::kScaleFilterNearest,
+    static_cast<uint32_t>(vic->dst_x_),
+    static_cast<uint32_t>(vic->dst_y_),
+    frame.width,
+    frame.height
+  };
+  unsigned overlay_resources[FB_NUM_LAYERS - 1U] = {};
+  for (unsigned i = 0U; i < overlay_count; ++i) {
+    overlay_resources[i] = overlays[i]->pi4_kms_overlay_front_valid_
+        ? overlays[i]->pi4_kms_overlay_front_ ^ 1U : 0U;
+    if (!overlays[i]->BuildPi4KmsOverlayPlane(
+            overlay_resources[i], &kms_planes[i + 1U])) {
+      static bool overlay_build_failure_logged = false;
+      if (!overlay_build_failure_logged) {
+        overlay_build_failure_logged = true;
+        printf("boot: pi4kms overlay build status=fail logical_layer=%d "
+               "src=%d,%d %dx%d dst=%d,%d %dx%d\r\n",
+               overlays[i]->logical_layer_,
+               overlays[i]->src_x_, overlays[i]->src_y_,
+               overlays[i]->src_w_, overlays[i]->src_h_,
+               overlays[i]->dst_x_, overlays[i]->dst_y_,
+               overlays[i]->dst_w_, overlays[i]->dst_h_);
+      }
+      return pi4kms::TakeoverActive();
+    }
+  }
+  if (!pi4kms::PresentPlanes(
+          kms_planes, overlay_count + 1U,
+          static_cast<uint32_t>(vic->display_width_),
+          static_cast<uint32_t>(vic->display_height_), true)) {
+    if (!pi4kms::NativeScanoutCommitted()) {
+      (void)pi4kms::RestoreFirmwareScanout(true);
+    }
+    return pi4kms::FirmwareDisplayClaimed();
+  }
+  (void)vic->ReleasePi4KmsDispmanResources();
+  vic->rnum_ = static_cast<int>(next_resource);
+  for (unsigned i = 0U; i < overlay_count; ++i) {
+    overlays[i]->pi4_kms_overlay_front_ = overlay_resources[i];
+    overlays[i]->pi4_kms_overlay_front_valid_ = true;
+  }
+  static unsigned last_overlay_count = UINT32_MAX;
+  if (last_overlay_count != overlay_count) {
+    last_overlay_count = overlay_count;
+    printf("boot: pi4kms composition status=active base=vic overlays=%u "
+           "backend=hvs5-planes\r\n", overlay_count);
+  }
+  return true;
+}
+#endif
+
 void FrameBufferLayer::FrameReady(int to_offscreen) {
   int rnum = to_offscreen ? 1 - rnum_ : rnum_;
 
   // Copy data into either the offscreen resource (if swap) or the
   // on screen resource (if !swap).
   if (!uses_shader_) {
-      vc_dispmanx_resource_write_data(dispman_resource_[rnum],
-                                      mode_,
-                                      fb_pitch_,
-                                      pixels_,
-                                      &copy_dst_rect_);
+#if RASPPI == 4
+      if (pi4kms::FirmwareDisplayClaimed() &&
+          CanUsePi4KmsOverlay()) {
+        return;
+      }
+      const bool v3d_ready = RenderPi4V3dFrame(rnum);
+      pi4_v3d_ready_[rnum] = v3d_ready;
+      if (!v3d_ready || !to_offscreen) {
+        if (pi4kms::NativeScanoutCommitted()) {
+          return;
+        }
+#endif
+        if (EnsureDispmanResources()) {
+          vc_dispmanx_resource_write_data(dispman_resource_[rnum],
+                                          mode_,
+                                          fb_pitch_,
+                                          pixels_,
+                                          &copy_dst_rect_);
+        }
+#if RASPPI == 4
+      }
+#endif
   } else {
       RenderGL();
   }
@@ -1146,9 +2791,42 @@ void FrameBufferLayer::Swap(DISPMANX_UPDATE_HANDLE_T& dispman_update) {
 
   rnum_ = 1 - rnum_;
 
+  DISPMANX_RESOURCE_HANDLE_T resource = dispman_resource_[rnum_];
+#if RASPPI == 4
+  bool use_pi4_v3d = pi4_v3d_ready_[rnum_];
+  if (use_pi4_v3d && pi4_v3d_resource_[rnum_] == 0U &&
+      !UploadPi4V3dDispmanResource(static_cast<unsigned>(rnum_))) {
+    use_pi4_v3d = false;
+  }
+  if (use_pi4_v3d) {
+    resource = pi4_v3d_resource_[rnum_];
+  }
+#endif
+  if (resource == 0U) {
+    if (!EnsureDispmanResources()) {
+      return;
+    }
+    resource = dispman_resource_[rnum_];
+  }
   vc_dispmanx_element_change_source(dispman_update,
-                                    dispman_element_,
-                                    dispman_resource_[rnum_]);
+                                    dispman_element_, resource);
+#if RASPPI == 4
+  if (g_pi4_v3d_output_resolution) {
+    const VC_RECT_T *source_rect =
+        use_pi4_v3d ? &pi4_v3d_src_rect_ : &src_rect_;
+    const int attributes_result = vc_dispmanx_element_change_attributes(
+        dispman_update, dispman_element_, 0U, layer_, alpha_.opacity,
+        &scale_dst_rect_, source_rect, 0U, DISPMANX_NO_ROTATE);
+    if (attributes_result != 0) {
+      static bool attributes_failure_logged = false;
+      if (!attributes_failure_logged) {
+        attributes_failure_logged = true;
+        printf("boot: pi4v3d frame source-rect switch failed result=%d\r\n",
+               attributes_result);
+      }
+    }
+  }
+#endif
 }
 
 void FrameBufferLayer::SwapGL(bool sync) {
@@ -1255,6 +2933,23 @@ void FrameBufferLayer::PresentLayerList(bool sync, FrameBufferLayer **layers,
     return;
   }
 
+#if RASPPI == 4
+  const u64 pi4kms_present_start_us = CTimer::GetClockTicks64();
+  if (TryPi4KmsPresent(sync, layers, count)) {
+    const u64 pi4kms_present_done_us = CTimer::GetClockTicks64();
+    RecordPi4V3dPipelinePresent(
+        pi4kms_present_start_us, pi4kms_present_done_us,
+        count, "pi4kms-direct");
+    if (sync && !first_sync_swap_logged) {
+      first_sync_swap_logged = true;
+      printf("bootprof: %10u us fbl first sync swap %u layer(s) "
+             "backend=pi4kms-direct\r\n",
+             CTimer::GetClockTicks(), count);
+    }
+    return;
+  }
+#endif
+
   // We need to know whether the dispmanx code below
   // is actually going to cause a sync. It turns out if we
   // don't actually change resources on any layer,
@@ -1279,12 +2974,30 @@ void FrameBufferLayer::PresentLayerList(bool sync, FrameBufferLayer **layers,
   }
 
   if (sync) {
+#if RASPPI == 4
+    bool presents_timed_layer = false;
+    for (unsigned i = 0; i < count; ++i) {
+      if (g_pi4_v3d_pipeline_timing.valid &&
+          layers[i] == g_pi4_v3d_pipeline_timing.layer) {
+        presents_timed_layer = true;
+        break;
+      }
+    }
+    const u64 present_start_us = CTimer::GetClockTicks64();
+#endif
     DISPMANX_UPDATE_HANDLE_T dispman_update;
     dispman_update = vc_dispmanx_update_start(0);
     for (unsigned i = 0; i < count; i++) {
       layers[i]->Swap(dispman_update);
     }
     vc_dispmanx_update_submit_sync(dispman_update);
+#if RASPPI == 4
+    const u64 present_done_us = CTimer::GetClockTicks64();
+    if (presents_timed_layer) {
+      RecordPi4V3dPipelinePresent(
+          present_start_us, present_done_us, count, "dispmanx");
+    }
+#endif
     if (!first_sync_swap_logged) {
       first_sync_swap_logged = true;
       printf("bootprof: %10u us fbl first sync swap %u layer(s)\r\n",
@@ -1308,6 +3021,21 @@ void FrameBufferLayer::SetPalette(uint8_t index, uint32_t argb) {
 void FrameBufferLayer::UpdatePalette() {
   if (!allocated_) return;
   assert (mode_ == VC_IMAGE_8BPP);
+
+#if RASPPI == 4
+  if (pi4kms::FirmwareDisplayClaimed() && CanUsePi4KmsOverlay()) {
+    return;
+  }
+  if (pi4kms::NativeScanoutCommitted()) {
+    return;
+  }
+  if (ShouldDeferPi4DispmanResources() &&
+      dispman_resource_[0] == 0U && dispman_resource_[1] == 0U) {
+    return;
+  }
+#endif
+
+  if (!EnsureDispmanResources()) return;
 
   int ret;
   if (transparency_) {
@@ -1338,6 +3066,20 @@ void FrameBufferLayer::UpdatePalette() {
 }
 
 void FrameBufferLayer::SetLayer(int layer) {
+  if (logical_layer_ < 0) {
+    logical_layer_ = layer;
+#if RASPPI == 4
+    if (logical_layer_ >= 0 && logical_layer_ < FB_NUM_LAYERS) {
+      g_pi4_layers[logical_layer_] = this;
+    }
+#endif
+  }
+#if RASPPI == 4
+  else if (layer_ != layer && v3dcrt::Requested()) {
+    printf("boot: pi4v3d frame z-order logical_layer=%d old=%d new=%d\r\n",
+           logical_layer_, layer_, layer);
+  }
+#endif
   layer_ = layer;
 }
 
@@ -1421,6 +3163,18 @@ void FrameBufferLayer::GetDimensions(int *display_w, int *display_h,
 }
 
 void FrameBufferLayer::SetInterpolation(int enable) {
+#if RASPPI == 4
+  const bool interpolation_enabled = enable != 0;
+  if (g_pi4_kms_interpolation_enabled != interpolation_enabled) {
+    g_pi4_kms_interpolation_enabled = interpolation_enabled;
+    printf("boot: pi4kms scaling interpolation=%s plane_filter=%s\r\n",
+           interpolation_enabled ? "on" : "off",
+           interpolation_enabled ? "mitchell" : "nearest");
+  }
+  if (pi4kms::NativeScanoutCommitted()) {
+    return;
+  }
+#endif
   if (enable) {
      bcm_set_sclker(config_scaling_kernel);
   } else {

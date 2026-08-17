@@ -2,9 +2,11 @@
 #define BMX_REMOTE_DEVELOPER_ROUTER_H
 
 #include "remote/command_mailbox.h"
+#include "remote/bmx_api_types.h"
 #include "remote/developer_log_ring.h"
 #include "remote/developer_usb_diagnostic.h"
 #include "remote/http_router.h"
+#include "remote/v3d_test_status.h"
 #include "update/update_filesystem.h"
 
 #include <stddef.h>
@@ -114,6 +116,7 @@ struct DeveloperStatusSnapshot {
     uint64_t remote_upload_finish_calls;
     uint64_t remote_upload_finish_us;
     uint64_t remote_upload_finish_max_us;
+    V3dTestStatusSnapshot v3d_test;
 };
 
 enum class DeveloperMemoryStatus : uint8_t {
@@ -151,6 +154,10 @@ public:
     virtual UsbDiagnosticRequestStatus StartUsbDiagnostic(
         UsbDiagnosticMode mode, const UsbDiagnosticTarget &target) = 0;
     virtual UsbDiagnosticRequestStatus StopUsbDiagnostic() = 0;
+    virtual V3dTestReviewRequestStatus RequestV3dTestReview(
+        V3dTestReviewAction action, uint32_t index) = 0;
+    virtual bool CaptureV3dTestReviewScreenshot(
+        uint32_t maximum_width, BmxBinaryPayload *payload) = 0;
     virtual void Yield() = 0;
     virtual uint64_t MonotonicMicroseconds() = 0;
     virtual void RecordUploadWrite(size_t size, uint64_t elapsed_us) = 0;
@@ -195,6 +202,10 @@ private:
                        HttpRouteResult *result);
     void RouteUsbStop(const HttpRequestHead &request,
                       HttpRouteResult *result);
+    void RouteV3dReview(const HttpRequestHead &request,
+                        HttpRouteResult *result);
+    void RouteV3dReviewScreenshot(const HttpRequestHead &request,
+                                  HttpRouteResult *result);
     void UploadReleased(UploadSink *sink);
     void LogReleased(LogStream *stream);
     static void CooperativeYield(void *context);

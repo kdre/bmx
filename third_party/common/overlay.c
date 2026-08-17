@@ -163,6 +163,19 @@ int overlay_dirty;
 static int diagnostics_mode;
 static unsigned diagnostics_fps_milli;
 static unsigned diagnostics_core_busy_milli;
+static int diagnostics_timing_active;
+static unsigned diagnostics_timing_samples;
+static unsigned diagnostics_snapshot_min_us;
+static unsigned diagnostics_snapshot_max_us;
+static unsigned long long diagnostics_snapshot_total_us;
+static unsigned diagnostics_draw_min_us;
+static unsigned diagnostics_draw_max_us;
+static unsigned long long diagnostics_draw_total_us;
+static unsigned diagnostics_total_min_us;
+static unsigned diagnostics_total_max_us;
+static unsigned long long diagnostics_total_total_us;
+
+#define DIAGNOSTICS_TIMING_SAMPLES 10
 
 static void draw_drive_status(int state, int *drive_led_color);
 static void draw_drive_led(int drive, unsigned int pwm1, unsigned int pwm2);
@@ -207,7 +220,7 @@ static void overlay_update_layer_visibility(void) {
 
 int overlay_status_layer_suppressed(void) {
 #if defined(RASPPI) && RASPPI == 4
-  return ui_enabled != 0;
+  return ui_enabled != 0 && !circle_status_layer_can_coexist_with_ui();
 #else
   return 0;
 #endif
@@ -227,6 +240,73 @@ static unsigned hz_to_mhz(unsigned hz) {
   return (hz + 500000) / 1000000;
 }
 
+static void reset_diagnostics_timing(void) {
+  diagnostics_timing_active = 1;
+  diagnostics_timing_samples = 0;
+  diagnostics_snapshot_min_us = 0;
+  diagnostics_snapshot_max_us = 0;
+  diagnostics_snapshot_total_us = 0;
+  diagnostics_draw_min_us = 0;
+  diagnostics_draw_max_us = 0;
+  diagnostics_draw_total_us = 0;
+  diagnostics_total_min_us = 0;
+  diagnostics_total_max_us = 0;
+  diagnostics_total_total_us = 0;
+}
+
+static void accumulate_diagnostics_timing(unsigned value,
+                                          unsigned *minimum,
+                                          unsigned *maximum,
+                                          unsigned long long *total) {
+  if (diagnostics_timing_samples == 0 || value < *minimum) {
+    *minimum = value;
+  }
+  if (diagnostics_timing_samples == 0 || value > *maximum) {
+    *maximum = value;
+  }
+  *total += value;
+}
+
+static void record_diagnostics_timing(unsigned snapshot_us,
+                                      unsigned draw_us,
+                                      unsigned total_us) {
+  if (!diagnostics_timing_active) {
+    return;
+  }
+
+  accumulate_diagnostics_timing(
+      snapshot_us, &diagnostics_snapshot_min_us,
+      &diagnostics_snapshot_max_us, &diagnostics_snapshot_total_us);
+  accumulate_diagnostics_timing(
+      draw_us, &diagnostics_draw_min_us,
+      &diagnostics_draw_max_us, &diagnostics_draw_total_us);
+  accumulate_diagnostics_timing(
+      total_us, &diagnostics_total_min_us,
+      &diagnostics_total_max_us, &diagnostics_total_total_us);
+  diagnostics_timing_samples++;
+  if (diagnostics_timing_samples < DIAGNOSTICS_TIMING_SAMPLES) {
+    return;
+  }
+
+  printf("boot: diagnostics update stats samples=%u "
+         "snapshot_us=%u/%u/%u draw_us=%u/%u/%u "
+         "total_us=%u/%u/%u\n",
+         diagnostics_timing_samples,
+         diagnostics_snapshot_min_us,
+         (unsigned)(diagnostics_snapshot_total_us /
+                    diagnostics_timing_samples),
+         diagnostics_snapshot_max_us,
+         diagnostics_draw_min_us,
+         (unsigned)(diagnostics_draw_total_us /
+                    diagnostics_timing_samples),
+         diagnostics_draw_max_us,
+         diagnostics_total_min_us,
+         (unsigned)(diagnostics_total_total_us /
+                    diagnostics_timing_samples),
+         diagnostics_total_max_us);
+  diagnostics_timing_active = 0;
+}
+
 static void draw_diagnostics(void) {
   if (!overlay_buf || diagnostics_mode == DIAG_MODE_OFF) {
     return;
@@ -236,8 +316,10 @@ static void draw_diagnostics(void) {
   char line[96];
   int y = DIAG_Y + DIAG_PAD_Y;
   int panel_h = diagnostics_mode == DIAG_MODE_COMPACT ? DIAG_COMPACT_H : DIAG_H;
+  unsigned long timing_start = circle_get_ticks();
 
   circle_get_diagnostics(&snap);
+  unsigned long snapshot_done = circle_get_ticks();
 
   ui_draw_rect_buf(DIAG_X, DIAG_Y, DIAG_W, DIAG_H,
                    TRANSPARENT_COLOR, 1, overlay_buf, overlay_buf_pitch);
@@ -298,6 +380,11 @@ static void draw_diagnostics(void) {
   }
 
   overlay_dirty = 1;
+  unsigned long draw_done = circle_get_ticks();
+  record_diagnostics_timing(
+      (unsigned)(snapshot_done - timing_start),
+      (unsigned)(draw_done - snapshot_done),
+      (unsigned)(draw_done - timing_start));
 }
 
 static void draw_statusbar() {
@@ -456,7 +543,10 @@ void overlay_diagnostics_set_mode(int mode) {
   diagnostics_showing = mode != DIAG_MODE_OFF;
 
   if (diagnostics_showing) {
+    reset_diagnostics_timing();
     draw_diagnostics();
+  } else {
+    diagnostics_timing_active = 0;
   }
   overlay_update_layer_visibility();
 }

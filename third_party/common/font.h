@@ -29,5 +29,7 @@
 extern char font8x8[256][8];
 /* Fixed Unscii upper-case/graphics glyphs, indexed by Commodore screen code. */
 extern char font8x8_petscii_upper[256][8];
+/* Dedicated Unscii U+2191/U+2193 glyphs for BMX scroll indicators. */
+extern char font8x8_ui_arrows[2][8];
 
 #endif

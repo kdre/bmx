@@ -44,6 +44,105 @@
 #include <sys/types.h>
 #include <stdint.h>
 
+struct bmx_crt_effect_params {
+   int geometry_enabled;
+   float curvature_x;
+   float curvature_y;
+   float skew_x;
+   float skew_y;
+   float trapezoid;
+   float rotation_degrees;
+   float overscan_scale;
+
+   int convergence_enabled;
+   float red_offset_x;
+   float red_offset_y;
+   float blue_offset_x;
+   float blue_offset_y;
+   float convergence_radial_strength;
+
+   int horizontal_filtering_enabled;
+   float horizontal_sigma_x;
+
+   int edge_blur_enabled;
+   float edge_blur_strength;
+   float edge_blur_radius;
+
+   int scanlines_enabled;
+   int scanline_multisample;
+   float scanline_weight;
+   float scanline_gap_brightness;
+
+   int phosphor_mask_enabled;
+   int phosphor_mask_type;
+   float phosphor_mask_brightness;
+
+   int bloom_enabled;
+   float bloom_factor;
+
+   int vignette_enabled;
+   float vignette_strength;
+   float vignette_scale;
+   float vignette_softness;
+
+   int uneven_illumination_enabled;
+   float uneven_illumination_strength;
+   float uneven_illumination_scale;
+
+   int horizontal_jitter_enabled;
+   float horizontal_jitter_strength;
+   float horizontal_jitter_frequency;
+   float horizontal_jitter_speed;
+
+   int composite_artifacts_enabled;
+   float composite_chroma_blur;
+   float composite_luma_sharpen;
+   float composite_color_bleed;
+
+   int glass_reflection_enabled;
+   float glass_reflection_angle;
+   float glass_reflection_width;
+   float glass_reflection_position;
+
+   int rounded_screen_mask_enabled;
+   float rounded_corner_radius;
+   float rounded_border_softness;
+
+   int edge_glow_enabled;
+   float edge_glow_strength;
+   float edge_glow_width;
+
+   int noise_enabled;
+   float luminance_noise;
+   float chroma_noise;
+   float noise_speed;
+
+   int output_response_enabled;
+   int output_response_fast;
+   int output_level_mapping;
+   float input_gamma;
+   float output_gamma;
+   float output_saturation;
+   float black_level;
+   float white_clip;
+
+   int bilinear_interpolation;
+};
+
+struct circle_present_timing {
+   uint32_t sequence;
+   uint32_t wait_us;
+   uint32_t total_us;
+   int valid;
+   int wait_requested;
+};
+
+enum bmx_output_level_mapping {
+   BMX_OUTPUT_LEVEL_MAPPING_LINEAR = 0,
+   BMX_OUTPUT_LEVEL_MAPPING_CUBIC,
+   BMX_OUTPUT_LEVEL_MAPPING_TOE_SHOULDER
+};
+
 #define MIN(a,b) \
    ({ __typeof__ (a) _a = (a); \
        __typeof__ (b) _b = (b); \
@@ -214,17 +313,25 @@ extern unsigned int gpio_bindings[NUM_GPIO_PINS];
 extern int circle_get_machine_timing();
 extern void circle_sleep(long);
 extern unsigned long circle_get_ticks();
+extern uint64_t circle_get_ticks64();
 extern void circle_yield();
+typedef int (*circle_platform_call_t)(void *context);
+extern int circle_run_on_platform_core(circle_platform_call_t function,
+                                       void *context);
 extern void circle_check_gpio();
 extern void circle_reset_gpio(int gpio_config);
 extern int circle_alloc_fbl(int pixelmode, int layer, uint8_t **pixels,
                             int width, int height, int *pitch);
 extern int circle_realloc_fbl(int layer, int shader);
+extern int circle_shader_backend_available(void);
+extern int circle_shader_backend_available_for_layer(int layer);
+extern int circle_status_layer_can_coexist_with_ui(void);
 extern void circle_free_fbl(int layer);
 extern void circle_clear_fbl(int layer);
 extern void circle_show_fbl(int layer);
 extern void circle_hide_fbl(int layer);
 extern void circle_present_fbl(uint32_t ready_mask, int sync);
+extern int circle_get_last_present_timing(struct circle_present_timing *timing);
 extern void circle_set_palette_fbl(int layer, uint8_t index, uint16_t rgb565);
 extern void circle_set_palette32_fbl(int layer, uint8_t index, uint32_t argb);
 extern void circle_update_palette_fbl(int layer);
@@ -295,22 +402,7 @@ extern void circle_get_scaling_params(int display,
                                       int *sx, int *sy);
 extern void circle_set_interpolation(int enable);
 extern void circle_set_use_shader(int enable);
-extern void circle_set_shader_params(int curvature,
-			float curvature_x,
-			float curvature_y,
-			int mask,
-			float mask_brightness,
-			int gamma,
-			int fake_gamma,
-			int scanlines,
-			int multisample,
-			float scanline_weight,
-			float scanline_gap_brightness,
-			float bloom_factor,
-			float input_gamma,
-			float output_gamma,
-			int sharper,
-			int bilinear_interpolation);
+extern void circle_set_shader_params(const struct bmx_crt_effect_params *params);
 
 // -----------------------------------------------------------------------
 // Functions called from kernel layer into emulator layer

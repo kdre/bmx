@@ -1,0 +1,23 @@
+--- a/libs/circle/addon/wlan/ether4330.c
++++ b/libs/circle/addon/wlan/ether4330.c
+@@ -3889,7 +3889,7 @@
+ static void
+ wlwpakey(Ctlr *ctl, int id, uvlong iv, uchar *ea)
+ {
+-	uchar params[164];
++	uchar params[164], wsec[4];
+ 	uchar *p;
+ 	int pairwise, keyidx;
+ #if defined(BMC64_WLAN_TRACE) || defined(BMC64_WLAN_LOW_IMPACT_TRACE)
+@@ -3930,6 +3930,11 @@
+ 		wltrace_keyname(id), pairwise, ctl->keys[0].len);
+ #endif
+ 	wlsetvar(ctl, "wsec_key", params, sizeof params);
++	if(!pairwise){
++		/* Commit the group-key cipher state as required by brcmfmac. */
++		wlgetvar(ctl, "wsec", wsec, sizeof wsec);
++		wlsetint(ctl, "wsec", get4(wsec) | (ctl->cryptotype == Wpa ? 2 : 4));
++	}
+ 	if(keyidx >= 0 && keyidx < WNFirmwareKeys)
+ 		ctl->keyinstalled[keyidx] = 1;
+ #ifdef BMC64_WLAN_LOW_IMPACT_TRACE

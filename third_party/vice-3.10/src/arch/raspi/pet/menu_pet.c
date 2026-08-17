@@ -59,6 +59,7 @@ static void menu_value_changed(struct menu_item *item) {
      case MENU_MODEL_PET_8296:
      case MENU_MODEL_PET_SUPERPET:
         petmodel_set(item->sub_id);
+        emux_keyboard_type_changed();
         ui_pop_all_and_toggle();
         break;
      default:
@@ -175,6 +176,7 @@ struct menu_item* emux_add_cartridge_options(struct menu_item* root) {
 }
 
 void emux_machine_load_settings_done(void) {
+  emux_keyboard_type_changed();
 }
 
 void machine_keymap_changed(int row, int col, signed long sym) {

@@ -29,6 +29,23 @@ configuration, toolchains and install directories. The shorter
 `build/<board>/circle-stdlib` path is maintained as a convenience symlink to
 the last completed configuration when that path is not already a real tree.
 
+## Mesa V3D Offline Compiler
+
+`mesa-24.2.8-7d908b5a-full.tar.gz.part-*` contains a split copy of the clean
+Mesa source archive used by the desktop V3D offline compiler. The build script
+reconstructs it in `build/host/v3d-offline/source-cache/`, verifies the archive
+SHA256 from `SHA256SUMS`, and extracts it into a private host build tree.
+
+The archive contains:
+
+- Mesa tag `mesa-24.2.8`
+- commit `7d908b5aed61a280411380e29814ad48336427a7`
+- no `.git` directory or generated build products
+
+BMX-specific compiler export, V3D 4.2/7.1 no-op shim selection, and host
+compatibility changes remain as versioned patches under
+`tools/v3d/offline-compiler/patches/mesa-24.2.8/`.
+
 ## Mbed TLS
 
 Circle stdlib v20 embeds an old Mbed TLS source snapshot. BMX replaces it with

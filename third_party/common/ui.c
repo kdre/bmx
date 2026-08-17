@@ -70,12 +70,14 @@ static int osd_active;
 static int ui_commodore_down;
 static int ui_transparent;
 static int ui_transparent_layer; // which layer we are revealing for adjustment
+static ui_canvas_preview_mode_t ui_canvas_preview_mode;
 static int ui_render_current_item_only;
 static int mouse_preview_active;
 static float mouse_preview_x;
 static float mouse_preview_y;
 
 // Stubs for vice callbacks. Unimplemented for now.
+void vsync_suspend_speed_eval(void);
 void ui_pause_emulation(int flag) {}
 int ui_emulation_is_paused(void) { return 0; }
 int ui_pause_active(void) { return ui_emulation_is_paused(); }
@@ -366,6 +368,7 @@ void ui_init_menu(void) {
   ui_enabled = 0;
   ui_showing = 0;
   current_menu = -1;
+  ui_canvas_preview_mode = UI_CANVAS_PREVIEW_CONTENT;
   ui_load_appearance_settings();
 
   // Init menu roots
@@ -431,6 +434,21 @@ static void ui_draw_char(uint8_t c, int pos_x, int pos_y, int color,
   }
 }
 
+static uint8_t ui_petscii_to_screencode(uint8_t c,
+                                        ui_text_encoding_t encoding) {
+  if (encoding == UI_TEXT_ENCODING_PETSCII_NATIVE) {
+    // Disk directory names are printed inside quotes.  A Commodore displays
+    // control codes there as inverse glyphs instead of executing them.
+    if (c < 0x20U) {
+      return c | 0x80U;
+    }
+    if (c >= 0x80U && c < 0xa0U) {
+      return charset_petscii_to_screencode((uint8_t)(c - 0x20U), 1);
+    }
+  }
+  return charset_petscii_to_screencode(c, 0);
+}
+
 // Draw a string of text at location x,y. Does not word wrap.
 static void ui_draw_text_encoded_buf(const char *text, int x, int y, int color,
                                      uint8_t *dst, int dst_pitch, int stretch,
@@ -450,7 +468,7 @@ static void ui_draw_text_encoded_buf(const char *text, int x, int y, int color,
           c = (uint8_t)'?';
         }
       } else {
-        c = charset_petscii_to_screencode(c, 0);
+        c = ui_petscii_to_screencode(c, encoding);
         if (encoding == UI_TEXT_ENCODING_PETSCII_NATIVE &&
             raw_video_font != NULL) {
           font = raw_video_font;
@@ -606,9 +624,13 @@ static void ui_key_pressed(long key) {
   // only while the user is on the item they were triggered
   // for.
   if (key != KEYCODE_Left && key != KEYCODE_Right) {
+    if (ui_transparent) {
+      vsync_suspend_speed_eval();
+    }
     ui_mouse_preview_end();
     ui_transparent = 0;
     ui_transparent_layer = -1;
+    ui_canvas_preview_mode = UI_CANVAS_PREVIEW_CONTENT;
     ui_render_current_item_only = 0;
   }
 
@@ -725,6 +747,9 @@ static void ui_key_released(long key) {
     return;
   case KEYCODE_Return:
     ui_action(ACTION_Return);
+    return;
+  case KEYCODE_Space:
+    menu_quick_access_try_assign(menu_cursor_item[current_menu]);
     return;
   case KEYCODE_Escape:
   case KEYCODE_BackQuote:
@@ -941,10 +966,13 @@ static void ui_toggle(void) {
   if (ui_enabled && !menu_before_ui_close()) {
     return;
   }
+  const int was_enabled = ui_enabled;
   ui_enabled = 1 - ui_enabled;
   __atomic_add_fetch(&ui_menu_revision, 1U, __ATOMIC_RELEASE);
   if (ui_enabled) {
     emux_trap_main_loop_ui();
+  } else if (was_enabled) {
+    vsync_suspend_speed_eval();
   }
 }
 
@@ -1803,6 +1831,36 @@ static void ui_draw_shadow_text(const char* txt, int *x, int *y, int col) {
   *x = *x + strlen(txt) *8;
 }
 
+static void ui_render_scroll_indicators(int menu_stack_index,
+                                        int total_rows, int row_pitch) {
+  const struct menu_item *root = &menu_roots[menu_stack_index];
+  const int window_top = menu_window_top[menu_stack_index];
+  const int window_bottom = menu_window_bottom[menu_stack_index];
+  const int first_text_row = root->scroll_text_first_row > window_top
+                                 ? root->scroll_text_first_row
+                                 : window_top;
+  const int text_end = root->scroll_text_end_row < window_bottom
+                           ? root->scroll_text_end_row
+                           : window_bottom;
+  const int marker_x = root->menu_left + root->menu_width -
+                       (int)UI_MESSAGE_DIALOG_SCROLL_GUTTER_COLUMNS *
+                           UI_MENU_GLYPH_WIDTH;
+
+  if (root->scroll_text_first_row < 0 || first_text_row >= text_end) return;
+  if (window_top > 0) {
+    const int marker_y = root->menu_top +
+                         (first_text_row - window_top) * row_pitch;
+    ui_draw_char(0, marker_x, marker_y, FG_COLOR, NULL, 0, 1,
+                 (const uint8_t *)font8x8_ui_arrows);
+  }
+  if (window_bottom < total_rows) {
+    const int marker_y = root->menu_top +
+                         (text_end - 1 - window_top) * row_pitch;
+    ui_draw_char(1, marker_x, marker_y, FG_COLOR, NULL, 0, 1,
+                 (const uint8_t *)font8x8_ui_arrows);
+  }
+}
+
 void ui_render_now(int menu_stack_index) {
   int index = 0;
   int indent = 0;
@@ -1834,21 +1892,43 @@ void ui_render_now(int menu_stack_index) {
 
   max_index[menu_stack_index] = index;
 
+  ui_render_scroll_indicators(menu_stack_index, index, row_pitch);
+
   if (menu_cursor[menu_stack_index] >= max_index[menu_stack_index]) {
     menu_cursor[menu_stack_index] = max_index[menu_stack_index] - 1;
     cursor_pos_updated();
   }
 
   // Reveal dimensions in top left corner
-  if (ui_transparent && ui_transparent_layer >= 0) {
+  if (ui_transparent && ui_transparent_layer >= 0 &&
+      ui_canvas_preview_mode == UI_CANVAS_PREVIEW_GEOMETRY) {
     char str1[32];
     char str2[32];
     int dpx, dpy, fbw, fbh, dw, dh, sw, sh;
+    const int show_range_help =
+        menu_cursor_item[current_menu] != NULL &&
+        menu_cursor_item[current_menu]->type == RANGE;
+    const int info_height = show_range_help ? 58 : 28;
+    const int panel_margin = 8;
+    const int active_y = menu_cursor_item[current_menu] != NULL
+        ? menu_cursor_item[current_menu]->menu_top +
+              (menu_cursor[current_menu] -
+               menu_window_top[current_menu]) * row_pitch
+        : menu_roots[0].menu_top + menu_roots[0].menu_height / 2;
 
     int cx = menu_roots[0].menu_left +
              menu_roots[0].menu_width / 2 - 18 * 8 / 2;
-    int cy = menu_roots[0].menu_top +
-             menu_roots[0].menu_height / 2 - 7 * 10 / 2;
+    int cy;
+
+    // The active option row spans the menu width. Put the diagnostics in the
+    // opposite half so both remain readable at every supported menu scale.
+    if (active_y + UI_MENU_GLYPH_HEIGHT / 2 <
+        menu_roots[0].menu_top + menu_roots[0].menu_height / 2) {
+      cy = menu_roots[0].menu_top + menu_roots[0].menu_height -
+           panel_margin - info_height;
+    } else {
+      cy = menu_roots[0].menu_top + panel_margin;
+    }
 
     // Now get info about the layer we are djusting
     circle_get_fbl_dimensions(ui_transparent_layer,
@@ -1893,8 +1973,7 @@ void ui_render_now(int menu_stack_index) {
        ui_draw_shadow_text("*", &qx, &qy, 1);
     }
 
-    if (menu_cursor_item[current_menu] != NULL &&
-        menu_cursor_item[current_menu]->type == RANGE) {
+    if (show_range_help) {
       qx = cx; qy+=20;
       ui_draw_shadow_text("Use , and . for", &qx, &qy, 1);
       qx = cx; qy+=10;
@@ -2031,6 +2110,8 @@ struct menu_item *ui_push_menu(int w_chars, int h_chars) {
   menu_roots[current_menu].key_listener_func = NULL;
   menu_roots[current_menu].on_popped_off = NULL;
   menu_roots[current_menu].on_popped_to = NULL;
+  menu_roots[current_menu].scroll_text_first_row = -1;
+  menu_roots[current_menu].scroll_text_end_row = -1;
 
   // Set dimensions
   menu_roots[current_menu].menu_width = menu_width;
@@ -2084,89 +2165,51 @@ int emu_is_ui_activated(void) {
   return ui_enabled;
 }
 
-static struct menu_item *ui_push_dialog_header(int is_error) {
-  struct menu_item *root = ui_push_menu(30, 4);
-  if (is_error) {
-    ui_menu_add_button(MENU_ERROR_DIALOG, root, "Error");
-  } else {
-    ui_menu_add_button(MENU_INFO_DIALOG, root, "Info");
-  }
-  ui_menu_add_divider(root);
-  return root;
-}
-
 // Attach this callback to any OSD dialog
 void glob_osd_popped(struct menu_item *new_root,
                      struct menu_item *old_root) {
   ui_disable_osd();
 }
 
-void ui_error(const char *format, ...) {
-  struct menu_item *root = ui_push_dialog_header(1);
-  // Don't show layer info when we want to show error.
-  ui_transparent_layer = 0;
-  if (!ui_enabled) {
-     // We were called without the UI being up. Make this an OSD.
-     ui_enable_osd();
-     root->on_popped_off = glob_osd_popped;
-  }
-  char buffer[256];
-  va_list args;
-  va_start(args, format);
-  vsnprintf(buffer, 255, format, args);
-  ui_menu_add_button(MENU_ERROR_DIALOG, root, buffer);
-  va_end(args);
-  ui_render_single_frame();
-}
-
-void ui_info(const char *format, ...) {
-  struct menu_item *root = ui_push_dialog_header(0);
-  // Don't show layer info when we want to show info.
-  ui_transparent_layer = 0;
-  if (!ui_enabled) {
-     // We were called without the UI being up. Make this an OSD.
-     ui_enable_osd();
-     root->on_popped_off = glob_osd_popped;
-  }
-  char buffer[256];
-  va_list args;
-  va_start(args, format);
-  vsnprintf(buffer, 255, format, args);
-  ui_menu_add_button(MENU_INFO_DIALOG, root, buffer);
-  va_end(args);
-  ui_render_single_frame();
-}
-
 // Add bounded text as independently stored menu rows. Horizontal whitespace
 // is normalized for word wrapping, while explicit line endings remain hard
 // breaks (including empty lines). Long words are split without ever exceeding
-// either the 30-column dialog interior or menu_item::name.
+// the selected dialog interior or menu_item::name. Passing a NULL root counts
+// rows without allocating them; the exact same state machine is then used to
+// populate the measured dialog.
 static int ui_add_wrapped_line(struct menu_item *root, int item_id,
                                const char *line, size_t *line_count) {
   if (*line_count >= UI_WRAPPED_DIALOG_MAX_LINES) return 0;
-  ui_menu_add_button(item_id, root, line);
+  if (root != NULL) ui_menu_add_button(item_id, root, line);
   ++*line_count;
   return 1;
 }
 
-static void ui_add_wrapped_text(struct menu_item *root, const char *txt,
-                                int item_id) {
-  char line[UI_WRAPPED_DIALOG_LINE_COLUMNS + 1U];
+static size_t ui_add_wrapped_text(struct menu_item *root, const char *txt,
+                                  int item_id, size_t columns) {
+  char line[UI_MESSAGE_DIALOG_MAX_LINE_COLUMNS + 1U];
   size_t input_pos = 0U;
   size_t line_pos = 0U;
   size_t line_count = 0U;
   int line_had_content = 0;
   int ended_with_newline = 0;
 
+  if (columns == 0U || columns > UI_MESSAGE_DIALOG_MAX_LINE_COLUMNS) {
+    columns = UI_MESSAGE_DIALOG_MAX_LINE_COLUMNS;
+  }
   line[0] = '\0';
   while (txt != NULL && input_pos < UI_WRAPPED_DIALOG_MAX_TEXT &&
          txt[input_pos] != '\0') {
     if (txt[input_pos] == '\r' || txt[input_pos] == '\n') {
       if (line_pos > 0U) {
         line[line_pos] = '\0';
-        if (!ui_add_wrapped_line(root, item_id, line, &line_count)) return;
+        if (!ui_add_wrapped_line(root, item_id, line, &line_count)) {
+          return line_count;
+        }
       } else if (!line_had_content) {
-        if (!ui_add_wrapped_line(root, item_id, "", &line_count)) return;
+        if (!ui_add_wrapped_line(root, item_id, "", &line_count)) {
+          return line_count;
+        }
       }
       line_pos = 0U;
       line_had_content = 0;
@@ -2197,18 +2240,19 @@ static void ui_add_wrapped_text(struct menu_item *root, const char *txt,
     }
     if (line_pos != 0U) {
       const size_t word_length = word_end - input_pos;
-      const size_t available =
-          UI_WRAPPED_DIALOG_LINE_COLUMNS - line_pos;
+      const size_t available = columns - line_pos;
       if (word_length + 1U <= available) {
         line[line_pos++] = ' ';
       } else {
         line[line_pos] = '\0';
-        if (!ui_add_wrapped_line(root, item_id, line, &line_count)) return;
+        if (!ui_add_wrapped_line(root, item_id, line, &line_count)) {
+          return line_count;
+        }
         line_pos = 0U;
       }
     }
     while (input_pos < word_end) {
-      size_t available = UI_WRAPPED_DIALOG_LINE_COLUMNS - line_pos;
+      size_t available = columns - line_pos;
       size_t remaining = word_end - input_pos;
       size_t amount = remaining < available ? remaining : available;
       memcpy(line + line_pos, txt + input_pos, amount);
@@ -2216,10 +2260,11 @@ static void ui_add_wrapped_text(struct menu_item *root, const char *txt,
       input_pos += amount;
       line_had_content = 1;
       ended_with_newline = 0;
-      if (input_pos < word_end ||
-          line_pos == UI_WRAPPED_DIALOG_LINE_COLUMNS) {
+      if (input_pos < word_end || line_pos == columns) {
         line[line_pos] = '\0';
-        if (!ui_add_wrapped_line(root, item_id, line, &line_count)) return;
+        if (!ui_add_wrapped_line(root, item_id, line, &line_count)) {
+          return line_count;
+        }
         line_pos = 0U;
       }
     }
@@ -2230,24 +2275,135 @@ static void ui_add_wrapped_text(struct menu_item *root, const char *txt,
   } else if (ended_with_newline) {
     ui_add_wrapped_line(root, item_id, "", &line_count);
   }
+  return line_count;
+}
+
+struct ui_message_dialog_layout {
+  int width_columns;
+  int height_rows;
+  size_t text_columns;
+  int scrollable;
+};
+
+static size_t ui_message_longest_explicit_line(const char *title,
+                                               const char *txt) {
+  size_t longest = title != NULL ? strlen(title) : 0U;
+  size_t current = 0U;
+  size_t input_pos = 0U;
+
+  while (txt != NULL && input_pos < UI_WRAPPED_DIALOG_MAX_TEXT &&
+         txt[input_pos] != '\0') {
+    if (txt[input_pos] == '\r' || txt[input_pos] == '\n') {
+      if (current > longest) longest = current;
+      current = 0U;
+      if (txt[input_pos] == '\r' &&
+          input_pos + 1U < UI_WRAPPED_DIALOG_MAX_TEXT &&
+          txt[input_pos + 1U] == '\n') {
+        ++input_pos;
+      }
+    } else {
+      ++current;
+    }
+    ++input_pos;
+  }
+  if (current > longest) longest = current;
+  return longest;
+}
+
+static struct ui_message_dialog_layout ui_measure_message_dialog(
+    const char *title, const char *txt, size_t fixed_rows) {
+  struct ui_message_dialog_layout layout;
+  size_t longest = ui_message_longest_explicit_line(title, txt);
+  size_t total_rows;
+
+  if (longest >= UI_MESSAGE_DIALOG_MAX_LINE_COLUMNS) {
+    layout.width_columns = UI_MESSAGE_DIALOG_MAX_WIDTH_COLUMNS;
+  } else {
+    layout.width_columns = (int)longest + 1;
+    if (layout.width_columns < (int)UI_MESSAGE_DIALOG_MIN_WIDTH_COLUMNS) {
+      layout.width_columns = UI_MESSAGE_DIALOG_MIN_WIDTH_COLUMNS;
+    }
+  }
+  layout.text_columns = (size_t)layout.width_columns - 1U;
+  total_rows = fixed_rows +
+      ui_add_wrapped_text(NULL, txt, MENU_INFO_DIALOG,
+                          layout.text_columns);
+  layout.scrollable = total_rows > UI_MESSAGE_DIALOG_MAX_ROWS;
+  if (layout.scrollable) {
+    layout.width_columns = UI_MESSAGE_DIALOG_MAX_WIDTH_COLUMNS;
+    layout.text_columns = UI_WRAPPED_DIALOG_LINE_COLUMNS;
+    total_rows = fixed_rows +
+        ui_add_wrapped_text(NULL, txt, MENU_INFO_DIALOG,
+                            layout.text_columns);
+    layout.height_rows = UI_MESSAGE_DIALOG_MAX_ROWS;
+  } else {
+    if (total_rows < UI_MESSAGE_DIALOG_MIN_ROWS) {
+      total_rows = UI_MESSAGE_DIALOG_MIN_ROWS;
+    }
+    layout.height_rows = (int)total_rows;
+  }
+  return layout;
 }
 
 static struct menu_item *ui_push_wrapped_message(int is_error,
                                                   const char *txt) {
   const int item_id = is_error ? MENU_ERROR_DIALOG : MENU_INFO_DIALOG;
-  struct menu_item *root = ui_push_menu(30, 10);
-  ui_menu_add_button(item_id, root, is_error ? "Error" : "Info");
+  const char *title = is_error ? "Error" : "Info";
+  struct ui_message_dialog_layout layout =
+      ui_measure_message_dialog(title, txt, 2U);
+  struct menu_item *root =
+      ui_push_menu(layout.width_columns, layout.height_rows);
+  size_t text_rows;
+  ui_menu_add_button(item_id, root, title);
   ui_menu_add_divider(root);
-  ui_add_wrapped_text(root, txt, item_id);
+  text_rows = ui_add_wrapped_text(root, txt, item_id, layout.text_columns);
+  if (layout.scrollable) {
+    root->scroll_text_first_row = 2;
+    root->scroll_text_end_row = 2 + (int)text_rows;
+  }
 
+  // A message replaces any temporary canvas preview, including failures
+  // raised while stepping through a palette or another visual option.
+  ui_transparent = 0;
+  ui_transparent_layer = -1;
+  ui_canvas_preview_mode = UI_CANVAS_PREVIEW_CONTENT;
+  ui_render_current_item_only = 0;
   // Match ui_error/ui_info when a caller needs an OSD outside the open menu.
-  ui_transparent_layer = 0;
   if (!ui_enabled) {
     ui_enable_osd();
     root->on_popped_off = glob_osd_popped;
   }
   ui_render_single_frame();
   return root;
+}
+
+static void ui_push_formatted_message(int is_error, const char *format,
+                                      va_list args) {
+  char fallback[256];
+  char *buffer = (char *)malloc(UI_WRAPPED_DIALOG_MAX_TEXT + 1U);
+
+  if (buffer != NULL) {
+    vsnprintf(buffer, UI_WRAPPED_DIALOG_MAX_TEXT + 1U, format, args);
+    ui_push_wrapped_message(is_error, buffer);
+    free(buffer);
+  } else {
+    vsnprintf(fallback, sizeof fallback, format, args);
+    ui_push_wrapped_message(is_error, fallback);
+  }
+}
+
+void ui_error(const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  ui_push_formatted_message(1, format, args);
+  va_end(args);
+}
+
+void ui_info(const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  ui_push_formatted_message(0, format, args);
+  va_end(args);
 }
 
 void ui_error_wrapped(const char *txt) {
@@ -2262,11 +2418,17 @@ static struct menu_item *ui_confirm_wrapped_internal(char *title,
                                                      const char *txt,
                                                      int ok_value, int ok_id,
                                                      int cancel_default) {
-  struct menu_item *root = ui_push_menu(30, 10);
+  const int has_buttons = ok_value >= 0 && ok_id >= 0;
+  const size_t fixed_rows = has_buttons ? 4U : 2U;
+  struct ui_message_dialog_layout layout =
+      ui_measure_message_dialog(title, txt, fixed_rows);
+  struct menu_item *root =
+      ui_push_menu(layout.width_columns, layout.height_rows);
+  size_t text_rows;
   ui_menu_add_button(MENU_ERROR_DIALOG, root, title);
 
   struct menu_item *child;
-  if (ok_value >=0 && ok_id >=0) {
+  if (has_buttons) {
      child = ui_menu_add_button(MENU_CONFIRM_OK, root, "OK");
      child->value = ok_value;
      child->sub_id = ok_id;
@@ -2280,7 +2442,16 @@ static struct menu_item *ui_confirm_wrapped_internal(char *title,
   // The update warning can contain six complete 256-byte signed
   // descriptions. Wrap directly from the caller's immutable buffer so there
   // is no second large stack copy.
-  ui_add_wrapped_text(root, txt, MENU_INFO_DIALOG);
+  text_rows = ui_add_wrapped_text(root, txt, MENU_INFO_DIALOG,
+                                  layout.text_columns);
+  if (layout.scrollable) {
+    root->scroll_text_first_row = (int)fixed_rows;
+    root->scroll_text_end_row = (int)fixed_rows + (int)text_rows;
+  }
+  ui_transparent = 0;
+  ui_transparent_layer = -1;
+  ui_canvas_preview_mode = UI_CANVAS_PREVIEW_CONTENT;
+  ui_render_current_item_only = 0;
 
   if (cancel_default && ok_value >= 0 && ok_id >= 0) {
      // Title, OK, CANCEL. Select CANCEL so Return cannot trigger a
@@ -2403,6 +2574,16 @@ void ui_set_cur_pos(int pos) {
   ui_traverse();
 }
 
+void ui_focus_item(struct menu_item *item) {
+  if (item == NULL) {
+    return;
+  }
+  ui_traverse();
+  if (item->render_index >= 0) {
+    ui_set_cur_pos(item->render_index);
+  }
+}
+
 struct menu_item* ui_find_item_by_id(struct menu_item *node, int id) {
   if (node == NULL) {
     return NULL;
@@ -2453,15 +2634,27 @@ void emu_quick_func_interrupt(int button_assignment) {
 
 // These will revert back to 0 when the user moves off the
 // current item.
-void ui_canvas_reveal_temp(int layer) {
+void ui_canvas_preview_temp(int layer, ui_canvas_preview_mode_t mode) {
+  // REST control commits use the same callbacks as the visible menu. Keep
+  // their state changes headless instead of leaving preview-only UI flags set
+  // for the next time the menu is opened.
+  if (!ui_enabled) {
+    return;
+  }
+  if (mode != UI_CANVAS_PREVIEW_CONTENT &&
+      mode != UI_CANVAS_PREVIEW_GEOMETRY) {
+    return;
+  }
   if (layer == FB_LAYER_VIC && vic_showing) {
     ui_transparent = 1;
     ui_transparent_layer = layer;
+    ui_canvas_preview_mode = mode;
     ui_set_render_current_item_only(1);
   }
   else if (layer == FB_LAYER_VDC && vdc_showing) {
     ui_transparent = 1;
     ui_transparent_layer = layer;
+    ui_canvas_preview_mode = mode;
     ui_set_render_current_item_only(1);
   }
 }
@@ -2477,6 +2670,7 @@ void ui_mouse_preview_begin(void) {
   emux_mouse_input_clear();
   ui_transparent = 1;
   ui_transparent_layer = -1;
+  ui_canvas_preview_mode = UI_CANVAS_PREVIEW_CONTENT;
   ui_set_render_current_item_only(1);
 }
 
@@ -2488,6 +2682,7 @@ void ui_mouse_preview_end(void) {
   emux_mouse_input_clear();
   ui_transparent = 0;
   ui_transparent_layer = -1;
+  ui_canvas_preview_mode = UI_CANVAS_PREVIEW_CONTENT;
   ui_set_render_current_item_only(0);
 }
 

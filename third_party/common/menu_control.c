@@ -29,6 +29,8 @@ int menu_control_public_set_bindings(
   if (bindings == NULL && count != 0) return 0;
   for (i = 0; i < count; ++i) {
     if (!is_public_key(bindings[i].key) ||
+        (bindings[i].sub_id < 0 &&
+         bindings[i].sub_id != MENU_CONTROL_SUB_ID_ANY) ||
         (bindings[i].kind != MENU_CONTROL_PUBLIC_CONTROL &&
          bindings[i].kind != MENU_CONTROL_PUBLIC_ACTION) ||
         (bindings[i].kind == MENU_CONTROL_PUBLIC_CONTROL &&
@@ -74,7 +76,8 @@ static int is_secret(int id) {
 static struct menu_item *find_item_in(struct menu_item *node, int id,
                                       int sub_id) {
   while (node != NULL) {
-    if (node->id == id && node->sub_id == sub_id &&
+    if (node->id == id &&
+        (sub_id == MENU_CONTROL_SUB_ID_ANY || node->sub_id == sub_id) &&
         is_functional_item(node)) {
       return node;
     }

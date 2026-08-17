@@ -24,6 +24,10 @@
 
 #include "defs.h"
 
+#if BMX_V3D_RENDER_TEST_KERNEL
+#include "v3dtest/network_render_test.h"
+#endif
+
 #if defined(BMX_SID_WORKER) || defined(BMX_SID_DIAGNOSTICS)
 #include "sidworker.h"
 #endif
@@ -54,7 +58,7 @@ ViceEmulatorCore::ViceEmulatorCore(CMemorySystem *pMemorySystem,
 
   // These calls only allocate the sampling table. Population is
   // done by cores 1 and 2 in parellel below.
-#ifdef BMC64_USE_EMU_MULTICORE
+#if defined(BMC64_USE_EMU_MULTICORE) && !BMX_V3D_RENDER_TEST_KERNEL
 
 #ifdef BMC64_USE_RESID_PRECOMPUTE
   passBandFreq_ = 19845; // 90%
@@ -81,16 +85,21 @@ ViceEmulatorCore::ViceEmulatorCore(CMemorySystem *pMemorySystem,
 
 ViceEmulatorCore::~ViceEmulatorCore(void) {}
 
+void ViceEmulatorCore::WaitForLaunch() {
+  printf("Core waiting for launch\n");
+  bool waiting = true;
+  while (waiting) {
+    m_Lock.Acquire();
+    if (launch_) {
+      waiting = false;
+    }
+    m_Lock.Release();
+  }
+}
+
 void ViceEmulatorCore::RunMainVice(bool wait) {
   if (wait) {
-     printf("Core waiting for launch\n");
-     bool waiting = true;
-     while (waiting) {
-       m_Lock.Acquire();
-       if (launch_)
-         waiting = false;
-       m_Lock.Release();
-     }
+    WaitForLaunch();
   }
 
   // Call Vice's main_program
@@ -132,13 +141,20 @@ void ViceEmulatorCore::Run(unsigned nCore) {
   assert(nCore > 0);
   switch (nCore) {
   case 1:
+#if BMX_V3D_RENDER_TEST_KERNEL
+    printf("multicore: core 1 role=v3d-render-test\r\n");
+    WaitForLaunch();
+    bmx_v3d_test::RunNetworkRenderTest();
+#else
+    printf("multicore: core 1 role=vice\r\n");
     RunMainVice(true);
+#endif
     break;
   case 2:
     // Core 2 will initialize 6581 filter data. Then partition 1
     // of the resampling tables. Then sleep.
 #ifdef BMC64_USE_EMU_MULTICORE
-#ifdef BMC64_USE_RESID_PRECOMPUTE
+#if defined(BMC64_USE_RESID_PRECOMPUTE) && !BMX_V3D_RENDER_TEST_KERNEL
     ComputeResidFilter(0);
     reSID::SID::ComputeSamplingTable(cyclesPerSecond_,
                                      reSID::SAMPLE_RESAMPLE,
@@ -156,7 +172,7 @@ void ViceEmulatorCore::Run(unsigned nCore) {
     // Core 3 will initialize 8580 filter data. Then partition 2
     // of the resampling tables. Then sleep.
 #ifdef BMC64_USE_EMU_MULTICORE
-#ifdef BMC64_USE_RESID_PRECOMPUTE
+#if defined(BMC64_USE_RESID_PRECOMPUTE) && !BMX_V3D_RENDER_TEST_KERNEL
     ComputeResidFilter(1);
     reSID::SID::ComputeSamplingTable(cyclesPerSecond_,
                                      reSID::SAMPLE_RESAMPLE,
@@ -172,7 +188,8 @@ void ViceEmulatorCore::Run(unsigned nCore) {
     break;
   }
 
-  #if defined(BMC64_USE_EMU_MULTICORE) && defined(RASPI_COMPILE) && defined(BMC64_USE_RESID_PRECOMPUTE)
+  #if defined(BMC64_USE_EMU_MULTICORE) && defined(RASPI_COMPILE) && \
+      defined(BMC64_USE_RESID_PRECOMPUTE) && !BMX_V3D_RENDER_TEST_KERNEL
   if (nCore == 2) {
      while (true) {
         sem_dec(&sid_job);
@@ -184,8 +201,10 @@ void ViceEmulatorCore::Run(unsigned nCore) {
   #endif
 
   #if defined(BMC64_USE_EMU_MULTICORE) && BMX_SID_WORKER && \
+      !BMX_V3D_RENDER_TEST_KERNEL && \
       !defined(BMC64_USE_RESID_PRECOMPUTE)
   if (nCore == 2) {
+    printf("multicore: core 2 role=sid-worker\r\n");
     bmx_sid_worker_run();
   }
   #endif

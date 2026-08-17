@@ -11,5 +11,7 @@ WLAN firmware source repository: https://github.com/RPi-Distro/firmware-nonfree
 
 WLAN firmware source commit: `c9d3ae6584ab79d19a4f94ccf701e888f9f87a53`
 
-Pi 4 also stages `armstub7-rpi4.bin`; that file comes from the Circle armstub
-build output in `third_party/circle-stdlib-pi4/libs/circle/boot`.
+Pi 4 AArch32 fallback staging uses `armstub7-rpi4.bin`; that file comes from
+the Circle armstub build output in `third_party/circle-stdlib-pi4/libs/circle/boot`.
+The default AArch64 stage omits it and uses the separately built
+`armstub8-rpi4.bin` instead.

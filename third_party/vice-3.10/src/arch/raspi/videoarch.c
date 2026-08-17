@@ -142,6 +142,326 @@ static unsigned diagnostics_presented_frames;
 static unsigned diagnostics_busy_samples;
 static unsigned diagnostics_busy_milli_sum;
 
+#ifdef BMC64_DEBUG_PROFILE
+#define FRAME_OVERRUN_PROFILE_SAMPLES 64
+#define FRAME_OVERRUN_PROFILE_STABLE_FRAMES 120
+#define FRAME_OVERRUN_PROFILE_STABLE_MAX_US 20500UL
+#define FRAME_OVERRUN_PROFILE_TRIGGER_US 21000UL
+#define FRAME_OVERRUN_PROFILE_TRIGGER_FRAMES 4
+#define FRAME_OVERRUN_PROFILE_POST_FRAMES 32
+
+typedef struct frame_overrun_sample_s {
+    unsigned sequence;
+    unsigned cycle_us;
+    unsigned emulation_us;
+    unsigned pre_present_us;
+    unsigned present_us;
+    unsigned render_us;
+    unsigned hvs_wait_us;
+    unsigned hvs_program_us;
+    unsigned post_present_us;
+    uint32_t ready_mask;
+} frame_overrun_sample_t;
+
+static frame_overrun_sample_t
+    frame_overrun_samples[FRAME_OVERRUN_PROFILE_SAMPLES];
+static unsigned frame_overrun_write_index;
+static unsigned frame_overrun_sample_count;
+static unsigned frame_overrun_sequence;
+static unsigned frame_overrun_stable_frames;
+static unsigned frame_overrun_slow_streak;
+static unsigned frame_overrun_trigger_sequence;
+static unsigned frame_overrun_post_frames;
+static unsigned long frame_overrun_last_frame_end;
+static int frame_overrun_armed;
+static int frame_overrun_capturing;
+static int frame_overrun_complete;
+static uint32_t frame_overrun_last_kms_sequence;
+
+static unsigned frame_overrun_average(unsigned long long total,
+                                      unsigned count)
+{
+    return count == 0 ? 0 : (unsigned)(total / count);
+}
+
+static void frame_overrun_dump(void)
+{
+    unsigned oldest;
+    unsigned i;
+    unsigned slow_count = 0;
+    unsigned fast_count = 0;
+    unsigned cycle_min = 0;
+    unsigned cycle_max = 0;
+    unsigned emulation_min = 0;
+    unsigned emulation_max = 0;
+    unsigned present_min = 0;
+    unsigned present_max = 0;
+    unsigned render_min = 0;
+    unsigned render_max = 0;
+    unsigned hvs_wait_min = 0;
+    unsigned hvs_wait_max = 0;
+    unsigned long long cycle_total = 0;
+    unsigned long long emulation_total = 0;
+    unsigned long long pre_present_total = 0;
+    unsigned long long present_total = 0;
+    unsigned long long render_total = 0;
+    unsigned long long hvs_wait_total = 0;
+    unsigned long long hvs_program_total = 0;
+    unsigned long long post_present_total = 0;
+    unsigned long long fast_emulation_total = 0;
+    unsigned long long fast_present_total = 0;
+    unsigned long long fast_render_total = 0;
+    unsigned long long fast_hvs_wait_total = 0;
+    unsigned long long slow_emulation_total = 0;
+    unsigned long long slow_present_total = 0;
+    unsigned long long slow_render_total = 0;
+    unsigned long long slow_hvs_wait_total = 0;
+
+    if (frame_overrun_sample_count == 0) {
+        return;
+    }
+
+    oldest = (frame_overrun_write_index + FRAME_OVERRUN_PROFILE_SAMPLES -
+              frame_overrun_sample_count) %
+             FRAME_OVERRUN_PROFILE_SAMPLES;
+    for (i = 0; i < frame_overrun_sample_count; ++i) {
+        const frame_overrun_sample_t *sample =
+            &frame_overrun_samples[
+                (oldest + i) % FRAME_OVERRUN_PROFILE_SAMPLES];
+        if (i == 0 || sample->cycle_us < cycle_min) {
+            cycle_min = sample->cycle_us;
+        }
+        if (i == 0 || sample->cycle_us > cycle_max) {
+            cycle_max = sample->cycle_us;
+        }
+        if (i == 0 || sample->emulation_us < emulation_min) {
+            emulation_min = sample->emulation_us;
+        }
+        if (i == 0 || sample->emulation_us > emulation_max) {
+            emulation_max = sample->emulation_us;
+        }
+        if (i == 0 || sample->present_us < present_min) {
+            present_min = sample->present_us;
+        }
+        if (i == 0 || sample->present_us > present_max) {
+            present_max = sample->present_us;
+        }
+        if (i == 0 || sample->render_us < render_min) {
+            render_min = sample->render_us;
+        }
+        if (i == 0 || sample->render_us > render_max) {
+            render_max = sample->render_us;
+        }
+        if (i == 0 || sample->hvs_wait_us < hvs_wait_min) {
+            hvs_wait_min = sample->hvs_wait_us;
+        }
+        if (i == 0 || sample->hvs_wait_us > hvs_wait_max) {
+            hvs_wait_max = sample->hvs_wait_us;
+        }
+
+        cycle_total += sample->cycle_us;
+        emulation_total += sample->emulation_us;
+        pre_present_total += sample->pre_present_us;
+        present_total += sample->present_us;
+        render_total += sample->render_us;
+        hvs_wait_total += sample->hvs_wait_us;
+        hvs_program_total += sample->hvs_program_us;
+        post_present_total += sample->post_present_us;
+        if (sample->cycle_us >= FRAME_OVERRUN_PROFILE_TRIGGER_US) {
+            ++slow_count;
+            slow_emulation_total += sample->emulation_us;
+            slow_present_total += sample->present_us;
+            slow_render_total += sample->render_us;
+            slow_hvs_wait_total += sample->hvs_wait_us;
+        } else {
+            ++fast_count;
+            fast_emulation_total += sample->emulation_us;
+            fast_present_total += sample->present_us;
+            fast_render_total += sample->render_us;
+            fast_hvs_wait_total += sample->hvs_wait_us;
+        }
+    }
+
+    printf("boot: frame overrun profile trigger_seq=%u samples=%u "
+           "slow=%u threshold_us=%lu\r\n",
+           frame_overrun_trigger_sequence, frame_overrun_sample_count,
+           slow_count, FRAME_OVERRUN_PROFILE_TRIGGER_US);
+    printf("boot: frame overrun summary "
+           "cycle_us=%u/%u/%u emulation_us=%u/%u/%u "
+           "pre_present_avg_us=%u present_us=%u/%u/%u "
+           "post_present_avg_us=%u\r\n",
+           cycle_min,
+           frame_overrun_average(cycle_total,
+                                 frame_overrun_sample_count),
+           cycle_max,
+           emulation_min,
+           frame_overrun_average(emulation_total,
+                                 frame_overrun_sample_count),
+           emulation_max,
+           frame_overrun_average(pre_present_total,
+                                 frame_overrun_sample_count),
+           present_min,
+           frame_overrun_average(present_total,
+                                 frame_overrun_sample_count),
+           present_max,
+           frame_overrun_average(post_present_total,
+                                 frame_overrun_sample_count));
+    printf("boot: frame overrun present split "
+           "render_us=%u/%u/%u hvs_wait_us=%u/%u/%u "
+           "hvs_program_avg_us=%u\r\n",
+           render_min,
+           frame_overrun_average(render_total,
+                                 frame_overrun_sample_count),
+           render_max,
+           hvs_wait_min,
+           frame_overrun_average(hvs_wait_total,
+                                 frame_overrun_sample_count),
+           hvs_wait_max,
+           frame_overrun_average(hvs_program_total,
+                                 frame_overrun_sample_count));
+    printf("boot: frame overrun comparison "
+           "fast_frames=%u fast_emulation_avg_us=%u "
+           "fast_present_avg_us=%u slow_frames=%u "
+           "slow_emulation_avg_us=%u slow_present_avg_us=%u\r\n",
+           fast_count,
+           frame_overrun_average(fast_emulation_total, fast_count),
+           frame_overrun_average(fast_present_total, fast_count),
+           slow_count,
+           frame_overrun_average(slow_emulation_total, slow_count),
+           frame_overrun_average(slow_present_total, slow_count));
+    printf("boot: frame overrun split comparison "
+           "fast_render_avg_us=%u fast_hvs_wait_avg_us=%u "
+           "slow_render_avg_us=%u slow_hvs_wait_avg_us=%u\r\n",
+           frame_overrun_average(fast_render_total, fast_count),
+           frame_overrun_average(fast_hvs_wait_total, fast_count),
+           frame_overrun_average(slow_render_total, slow_count),
+           frame_overrun_average(slow_hvs_wait_total, slow_count));
+
+    for (i = 0; i < frame_overrun_sample_count; ++i) {
+        const frame_overrun_sample_t *sample =
+            &frame_overrun_samples[
+                (oldest + i) % FRAME_OVERRUN_PROFILE_SAMPLES];
+        const int relative =
+            (int)sample->sequence -
+            (int)frame_overrun_trigger_sequence;
+        if (relative < -6 || relative > 8) {
+            continue;
+        }
+        printf("boot: frame overrun sample rel=%d seq=%u "
+               "cycle_us=%u emulation_us=%u pre_present_us=%u "
+               "present_us=%u render_us=%u hvs_wait_us=%u "
+               "hvs_program_us=%u post_present_us=%u "
+               "ready_mask=0x%08x\r\n",
+               relative, sample->sequence, sample->cycle_us,
+               sample->emulation_us, sample->pre_present_us,
+               sample->present_us, sample->render_us,
+               sample->hvs_wait_us, sample->hvs_program_us,
+               sample->post_present_us,
+               sample->ready_mask);
+    }
+    printf("boot: frame overrun profile complete; UART dump timing is "
+           "outside the captured window\r\n");
+}
+
+static void frame_overrun_record(int eligible,
+                                 unsigned long frame_start,
+                                 unsigned long present_start,
+                                 unsigned long present_end,
+                                 unsigned long frame_end,
+                                 uint32_t ready_mask,
+                                 const struct circle_present_timing
+                                     *present_timing)
+{
+    frame_overrun_sample_t *sample;
+    unsigned cycle_us;
+
+    if (frame_overrun_complete) {
+        frame_overrun_last_frame_end = frame_end;
+        return;
+    }
+
+    if (!eligible || frame_overrun_last_frame_end == 0) {
+        frame_overrun_write_index = 0;
+        frame_overrun_sample_count = 0;
+        frame_overrun_stable_frames = 0;
+        frame_overrun_slow_streak = 0;
+        frame_overrun_armed = 0;
+        frame_overrun_capturing = 0;
+        frame_overrun_last_frame_end = frame_end;
+        return;
+    }
+
+    cycle_us = (unsigned)(frame_end - frame_overrun_last_frame_end);
+    sample = &frame_overrun_samples[frame_overrun_write_index];
+    sample->sequence = ++frame_overrun_sequence;
+    sample->cycle_us = cycle_us;
+    sample->emulation_us =
+        (unsigned)(frame_start - frame_overrun_last_frame_end);
+    sample->pre_present_us = (unsigned)(present_start - frame_start);
+    sample->present_us = (unsigned)(present_end - present_start);
+    sample->hvs_wait_us =
+        present_timing != NULL && present_timing->valid
+            ? present_timing->wait_us : 0;
+    sample->hvs_program_us =
+        present_timing != NULL && present_timing->valid
+            ? present_timing->total_us : 0;
+    sample->render_us =
+        sample->hvs_program_us <= sample->present_us
+            ? sample->present_us - sample->hvs_program_us
+            : sample->present_us;
+    sample->post_present_us = (unsigned)(frame_end - present_end);
+    sample->ready_mask = ready_mask;
+    frame_overrun_write_index =
+        (frame_overrun_write_index + 1) %
+        FRAME_OVERRUN_PROFILE_SAMPLES;
+    if (frame_overrun_sample_count < FRAME_OVERRUN_PROFILE_SAMPLES) {
+        ++frame_overrun_sample_count;
+    }
+    frame_overrun_last_frame_end = frame_end;
+
+    if (frame_overrun_capturing) {
+        if (frame_overrun_post_frames > 0) {
+            --frame_overrun_post_frames;
+        }
+        if (frame_overrun_post_frames == 0) {
+            frame_overrun_dump();
+            frame_overrun_capturing = 0;
+            frame_overrun_complete = 1;
+        }
+        return;
+    }
+
+    if (!frame_overrun_armed) {
+        if (cycle_us <= FRAME_OVERRUN_PROFILE_STABLE_MAX_US) {
+            ++frame_overrun_stable_frames;
+        } else {
+            frame_overrun_stable_frames = 0;
+        }
+        if (frame_overrun_stable_frames >=
+            FRAME_OVERRUN_PROFILE_STABLE_FRAMES) {
+            frame_overrun_armed = 1;
+            printf("boot: frame overrun profiler armed "
+                   "stable_frames=%u trigger_us=%lu\r\n",
+                   frame_overrun_stable_frames,
+                   FRAME_OVERRUN_PROFILE_TRIGGER_US);
+        }
+        return;
+    }
+
+    if (cycle_us >= FRAME_OVERRUN_PROFILE_TRIGGER_US) {
+        ++frame_overrun_slow_streak;
+    } else {
+        frame_overrun_slow_streak = 0;
+    }
+    if (frame_overrun_slow_streak >=
+        FRAME_OVERRUN_PROFILE_TRIGGER_FRAMES) {
+        frame_overrun_trigger_sequence = sample->sequence;
+        frame_overrun_post_frames = FRAME_OVERRUN_PROFILE_POST_FRAMES;
+        frame_overrun_capturing = 1;
+    }
+}
+#endif
+
 static int raspi_boot_warp = 1;
 /* Keep boot warp to the first rendered frame only.  The previous 120-frame
    delay held back the first visible synchronized frame by about 2.4 seconds. */
@@ -461,8 +781,16 @@ void vsyncarch_presync(void) { kbdbuf_flush(); }
 
 void vsyncarch_postsync(void) {
   unsigned long frame_start = circle_get_ticks();
+#ifdef BMC64_DEBUG_PROFILE
+  unsigned long present_start = frame_start;
+  unsigned long present_end = frame_start;
+  struct circle_present_timing present_timing = {0};
+#endif
   unsigned core_busy_milli = 0;
   uint32_t ready_mask = 0;
+#ifdef BMC64_DEBUG_PROFILE
+  int present_called = 0;
+#endif
 
   if (diagnostics_last_frame_start != 0 &&
       diagnostics_last_frame_end != 0 &&
@@ -535,7 +863,21 @@ void vsyncarch_postsync(void) {
                       FB_LAYER_MASK(FB_LAYER_STATUS))) {
       present_sync = 1;
     }
+#ifdef BMC64_DEBUG_PROFILE
+    present_start = circle_get_ticks();
+#endif
     circle_present_fbl(ready_mask, present_sync);
+#ifdef BMC64_DEBUG_PROFILE
+    present_end = circle_get_ticks();
+    if (!circle_get_last_present_timing(&present_timing) ||
+        !present_timing.valid ||
+        present_timing.sequence == frame_overrun_last_kms_sequence) {
+      memset(&present_timing, 0, sizeof present_timing);
+    } else {
+      frame_overrun_last_kms_sequence = present_timing.sequence;
+    }
+    present_called = 1;
+#endif
   }
 
   if (diagnostics_window_start == 0) {
@@ -676,6 +1018,16 @@ void vsyncarch_postsync(void) {
 
   diagnostics_last_frame_start = frame_start;
   diagnostics_last_frame_end = circle_get_ticks();
+#ifdef BMC64_DEBUG_PROFILE
+  frame_overrun_record(
+      present_called &&
+          !raspi_warp &&
+          ready_mask == FB_LAYER_MASK(FB_LAYER_VIC) &&
+          present_timing.valid &&
+          present_timing.wait_requested,
+      frame_start, present_start, present_end,
+      diagnostics_last_frame_end, ready_mask, &present_timing);
+#endif
 }
 
 void vsyncarch_sleep(unsigned long delay) {

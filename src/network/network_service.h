@@ -6,6 +6,7 @@
 #define _bmx_network_service_h
 
 #include "viceoptions.h"
+#include "update/update_progress_mailbox.h"
 #include "update/update_service.h"
 
 #include <circle/net/netsubsystem.h>
@@ -47,7 +48,6 @@ public:
   bool Initialize(const ViceOptions &options);
   bool IsReady(void) const;
   CNetSubSystem *GetNetSubSystem(void) const;
-  void RunScheduler(void);
   bool ReadSnapshot(bool *feature_enabled, bool *ready,
                     char *ip = 0, unsigned ip_size = 0,
                     char *netmask = 0, unsigned netmask_size = 0,
@@ -92,8 +92,7 @@ private:
   update::UpdateServiceOperation m_updateOperation;
   bool m_updateDestructiveResetConsent;
   bool m_updateCancelRequested;
-  bool m_updateProgressValid;
-  update::UpdateForegroundUiEvent m_updateProgress;
+  update::UpdateProgressMailbox m_updateProgressMailbox;
   int m_updateResult;
   char m_updateMessage[2048];
   uint32_t m_updateToken;

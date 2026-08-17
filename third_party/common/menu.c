@@ -38,11 +38,13 @@
 
 // RASPI Includes
 #include "emux_api.h"
+#include "crt_preset.h"
 #include "demo.h"
 #include "joy.h"
 #include "kbd.h"
 #include "keymap_editor.h"
 #include "menu_confirm_osd.h"
+#include "menu_quick_access.h"
 #include "menu_reset_osd.h"
 #include "menu_tape_osd.h"
 #include "menu_timing.h"
@@ -103,17 +105,6 @@ extern void poweroff(void);
                         "code above. You may have to manually edit " \
                         "config.txt and/or cmdline.txt to restore boot."
 
-#define MACHINE_SWITCH_MSG \
-    "Apply %s and reboot? BMX will update config.txt and " \
-    "cmdline.txt."
-
-#define MACHINE_NETWORK_SWITCH_MSG \
-    "Apply %s, save pending network changes and reboot? " \
-    "BMX will update config.txt and cmdline.txt."
-
-#define NETWORK_REBOOT_MSG "Network changes require reboot.\n" \
-                           "Save and reboot now?"
-
 #define OVERCLOCK_RECOVERY_MSG \
     "If the next boot fails, remove arm_freq, core_freq, v3d_freq, " \
     "over_voltage_delta and temp_limit from the BMX-managed block in " \
@@ -164,7 +155,13 @@ static struct menu_item *overclock_v3d_item;
 static struct menu_item *overclock_current_arm_item;
 static struct menu_item *overclock_current_temp_item;
 static struct menu_item *overclock_restore_item;
-static struct menu_item *overclock_apply_item;
+static struct menu_item *system_apply_item;
+static struct menu_item *system_reboot_item;
+
+static struct menu_quick_access_state quick_access_state;
+static struct menu_item *quick_access_folder_item;
+static struct menu_item *quick_access_slot_items[MENU_QUICK_ACCESS_SLOT_COUNT];
+static struct menu_quick_access_slot quick_access_pending_target;
 
 static int machine_change_pending(void);
 static const struct bmx_machine *machine_selected_machine(void);
@@ -181,6 +178,7 @@ static void build_overclock_menu(struct menu_item *parent);
 static void refresh_overclock_diagnostics(void);
 static int menu_file_item_to_dir_index(struct menu_item *item);
 static int show_text_file_if_supported(struct menu_item *item);
+static void quick_access_refresh_slot_items(void);
 
 // For filename filters
 typedef enum {
@@ -397,20 +395,94 @@ struct menu_item *dir_convention_item;
 struct menu_item *scaling_interp_item;
 
 struct menu_item* s_enable_shader_item;
+struct menu_item* s_crt_preset_item;
 struct menu_item* s_curvature_item;
 struct menu_item* s_curvature_x_item;
 struct menu_item* s_curvature_y_item;
+struct menu_item* s_skew_x_item;
+struct menu_item* s_skew_y_item;
+struct menu_item* s_trapezoid_item;
+struct menu_item* s_rotation_item;
+struct menu_item* s_overscan_item;
+struct menu_item* s_convergence_item;
+struct menu_item* s_red_offset_x_item;
+struct menu_item* s_red_offset_y_item;
+struct menu_item* s_blue_offset_x_item;
+struct menu_item* s_blue_offset_y_item;
+struct menu_item* s_convergence_radial_strength_item;
+struct menu_item* s_horizontal_filtering_item;
+struct menu_item* s_sigma_x_item;
+struct menu_item* s_edge_blur_item;
+struct menu_item* s_edge_blur_strength_item;
+struct menu_item* s_edge_blur_radius_item;
+struct menu_item* s_mask_enable_item;
 struct menu_item* s_mask_item;
 struct menu_item* s_mask_brightness_item;
-struct menu_item* s_gamma_item;
+struct menu_item* s_bloom_item;
+struct menu_item* s_output_response_item;
+struct menu_item* s_response_mode_item;
+struct menu_item* s_level_mapping_item;
 struct menu_item* s_scanlines_item;
 struct menu_item* s_multisample_item;
 struct menu_item* s_scanline_weight_item;
 struct menu_item* s_scanline_gap_brightness_item;
 struct menu_item* s_bloom_factor_item;
+struct menu_item* s_vignette_item;
+struct menu_item* s_vignette_strength_item;
+struct menu_item* s_vignette_scale_item;
+struct menu_item* s_vignette_softness_item;
+struct menu_item* s_uneven_illumination_item;
+struct menu_item* s_uneven_illumination_strength_item;
+struct menu_item* s_uneven_illumination_scale_item;
+struct menu_item* s_horizontal_jitter_item;
+struct menu_item* s_horizontal_jitter_strength_item;
+struct menu_item* s_horizontal_jitter_frequency_item;
+struct menu_item* s_horizontal_jitter_speed_item;
+struct menu_item* s_composite_artifacts_item;
+struct menu_item* s_composite_chroma_blur_item;
+struct menu_item* s_composite_luma_sharpen_item;
+struct menu_item* s_composite_color_bleed_item;
+struct menu_item* s_glass_reflection_item;
+struct menu_item* s_glass_reflection_angle_item;
+struct menu_item* s_glass_reflection_width_item;
+struct menu_item* s_glass_reflection_position_item;
+struct menu_item* s_rounded_screen_mask_item;
+struct menu_item* s_rounded_corner_radius_item;
+struct menu_item* s_rounded_border_softness_item;
+struct menu_item* s_edge_glow_item;
+struct menu_item* s_edge_glow_strength_item;
+struct menu_item* s_edge_glow_width_item;
+struct menu_item* s_noise_item;
+struct menu_item* s_luminance_noise_item;
+struct menu_item* s_chroma_noise_item;
+struct menu_item* s_noise_speed_item;
 struct menu_item* s_input_gamma_item;
 struct menu_item* s_output_gamma_item;
-struct menu_item* s_sharper_item;
+struct menu_item* s_response_saturation_item;
+struct menu_item* s_black_level_item;
+struct menu_item* s_white_clip_item;
+
+static void refresh_crt_shader_runtime(void);
+
+struct crt_preset_binding {
+  const char *key;
+  struct menu_item **item;
+};
+
+#define CRT_PRESET_BIND(key, item) {key, &item},
+static const struct crt_preset_binding s_crt_preset_bindings[] = {
+#include "crt_preset_fields.inc"
+};
+#undef CRT_PRESET_BIND
+
+#define CRT_PRESET_FIELD_COUNT \
+  (sizeof(s_crt_preset_bindings) / sizeof(s_crt_preset_bindings[0]))
+#define CRT_PRESET_DIR "/crt"
+#define CRT_PRESET_EXTENSION ".crt"
+#define CRT_PRESET_CURRENT_CHOICE 0
+
+static char s_crt_preset_paths[MAX_CHOICES][MAX_STR_VAL_LEN];
+static int s_crt_preset_applied_choice = CRT_PRESET_CURRENT_CHOICE;
 
 static int unit;
 static int joyswap;
@@ -1157,6 +1229,96 @@ static void show_license() {
   }
 }
 
+static void quick_access_set_slot_display(struct menu_item *item, int slot,
+                                          int disable_when_empty) {
+  const struct menu_quick_access_slot *assignment;
+  struct menu_item *root = ui_menu_root();
+  struct menu_item *target = NULL;
+  char fitted[MAX_DSP_VAL_LEN];
+  char path[MAX_STR_VAL_LEN];
+
+  if (item == NULL) return;
+  assignment = menu_quick_access_get(&quick_access_state, slot);
+  if (assignment != NULL && assignment->id != MENU_ID_DO_NOTHING) {
+    target = menu_quick_access_find(root, assignment->id,
+                                    assignment->sub_id, 0);
+  }
+
+  if (target != NULL &&
+      menu_quick_access_format_path(root, target, path, sizeof path)) {
+    menu_quick_access_fit_path(path, fitted, sizeof fitted);
+    snprintf(item->str_value, sizeof item->str_value, "%s", path);
+    snprintf(item->displayed_value, sizeof item->displayed_value, "%s",
+             fitted);
+    item->disabled = disable_when_empty &&
+                     (target->hidden || target->disabled);
+  } else {
+    snprintf(item->str_value, sizeof item->str_value, "%s",
+             "<Not assigned>");
+    snprintf(item->displayed_value, sizeof item->displayed_value, "%s",
+             "<Not assigned>");
+    item->disabled = disable_when_empty;
+  }
+  item->prefer_str = 1;
+}
+
+static void quick_access_refresh_slot_items(void) {
+  int slot;
+  for (slot = 0; slot < MENU_QUICK_ACCESS_SLOT_COUNT; ++slot) {
+    quick_access_set_slot_display(quick_access_slot_items[slot], slot, 1);
+  }
+}
+
+static void build_quick_access_menu(struct menu_item *root) {
+  int slot;
+  quick_access_folder_item = ui_menu_add_folder(root, "Quick Access...");
+  for (slot = 0; slot < MENU_QUICK_ACCESS_SLOT_COUNT; ++slot) {
+    char label[16];
+    snprintf(label, sizeof label, "Slot %d", slot + 1);
+    quick_access_slot_items[slot] = ui_menu_add_button(
+        menu_quick_access_menu_id_for_slot(slot), quick_access_folder_item,
+        label);
+    quick_access_set_slot_display(quick_access_slot_items[slot], slot, 1);
+  }
+}
+
+void menu_quick_access_try_assign(struct menu_item *item) {
+  struct menu_item *picker;
+  struct menu_item *picker_item;
+  struct menu_item *root = ui_menu_root();
+  char path[MAX_STR_VAL_LEN];
+  int slot;
+
+  if (item == NULL || item->hidden || item->disabled ||
+      !menu_quick_access_item_supported(item) ||
+      !menu_quick_access_format_path(root, item, path, sizeof path)) {
+    return;
+  }
+
+  quick_access_pending_target.id = item->id;
+  quick_access_pending_target.sub_id = item->sub_id;
+  picker = ui_push_menu(32, 7);
+  if (picker == NULL) {
+    quick_access_pending_target.id = MENU_ID_DO_NOTHING;
+    quick_access_pending_target.sub_id = MENU_SUB_NONE;
+    return;
+  }
+
+  picker_item = ui_menu_add_button(MENU_TEXT, picker,
+                                   "Assign to Quick Access");
+  picker_item->disabled = 1;
+  ui_menu_add_divider(picker);
+  for (slot = 0; slot < MENU_QUICK_ACCESS_SLOT_COUNT; ++slot) {
+    char label[16];
+    snprintf(label, sizeof label, "Slot %d", slot + 1);
+    picker_item = ui_menu_add_button(
+        menu_quick_access_menu_id_for_slot(slot), picker, label);
+    picker_item->sub_id = MENU_SUB_QUICK_ACCESS_ASSIGN;
+    quick_access_set_slot_display(picker_item, slot, 0);
+  }
+  ui_set_cur_pos(2);
+}
+
 static void configure_usb(int dev) {
   struct menu_item *usb_root = ui_push_menu(-1, -1);
   build_usb_menu(dev, usb_root);
@@ -1262,13 +1424,30 @@ static int pending_reboot_confirm_open;
 static struct menu_item *developer_status_item;
 static struct menu_item *developer_password_item;
 static struct menu_item *developer_buffer_size_item;
-static int developer_mode_target;
-static char developer_password_target[BMX_DEVELOPER_PASSWORD_MAX_LEN + 1];
-static unsigned developer_buffer_size_target;
+static int developer_mode_saved;
+static char developer_password_saved[BMX_DEVELOPER_PASSWORD_MAX_LEN + 1];
+static unsigned developer_buffer_size_saved;
 static struct menu_item *api_status_item;
 static struct menu_item *api_password_item;
-static int api_mode_target;
-static char api_password_target[BMX_API_PASSWORD_MAX_LEN + 1];
+static int api_mode_saved;
+static char api_password_saved[BMX_API_PASSWORD_MAX_LEN + 1];
+
+struct pending_system_changes {
+  int machine;
+  int network;
+  int developer;
+  int api;
+  int overclock;
+  int gpio;
+  int developer_mode;
+  char developer_password[BMX_DEVELOPER_PASSWORD_MAX_LEN + 1];
+  unsigned developer_buffer_kb;
+  int api_mode;
+  char api_password[BMX_API_PASSWORD_MAX_LEN + 1];
+  int gpio_outputs;
+};
+
+static struct pending_system_changes confirmed_system_changes;
 
 static int save_network_cmdline(void);
 static int append_network_boot_options(struct bmx_boot_plan *plan);
@@ -1681,33 +1860,95 @@ static void show_machine_switch_error(const struct bmx_machine *machine,
   }
 }
 
-static int apply_pending_system_changes(int force_network_save,
-                                        int developer_mode,
-                                        const char *developer_password,
-                                        unsigned developer_buffer_kb,
-                                        int api_mode,
-                                        const char *api_password) {
-  int machine_pending = machine_change_pending();
-  int network_pending = network_menu_requires_reboot();
-  int overclock_pending = overclock_change_pending();
-  int gpio_pending = gpio_outputs_item != NULL &&
-                     gpio_outputs_item->value !=
-                         circle_gpio_outputs_enabled();
-  int apply_network = force_network_save || network_pending;
-  int apply_developer = developer_mode >= 0 || developer_password != NULL ||
-                        developer_buffer_kb != 0U;
-  int apply_api = api_mode >= 0 || api_password != NULL;
+static int developer_change_pending(void) {
+  if (developer_status_item == NULL || developer_password_item == NULL ||
+      developer_buffer_size_item == NULL) {
+    return 0;
+  }
+  return developer_status_item->value != developer_mode_saved ||
+         text_differs(developer_password_item->str_value,
+                      developer_password_saved) ||
+         (unsigned)developer_buffer_size_item->value !=
+             developer_buffer_size_saved;
+}
+
+static int api_change_pending(void) {
+  if (api_status_item == NULL || api_password_item == NULL) {
+    return 0;
+  }
+  return api_status_item->value != api_mode_saved ||
+         text_differs(api_password_item->str_value, api_password_saved);
+}
+
+static int gpio_change_pending(void) {
+  return gpio_outputs_item != NULL &&
+         gpio_outputs_item->value != circle_gpio_outputs_enabled();
+}
+
+static void capture_pending_system_changes(
+    struct pending_system_changes *pending) {
+  memset(pending, 0, sizeof(*pending));
+  pending->machine = machine_change_pending();
+  pending->network = network_menu_requires_reboot();
+  pending->developer = developer_change_pending();
+  pending->api = api_change_pending();
+  pending->overclock = overclock_change_pending();
+  pending->gpio = gpio_change_pending();
+
+  if (pending->developer) {
+    pending->developer_mode = developer_status_item->value ? 1 : 0;
+    snprintf(pending->developer_password,
+             sizeof pending->developer_password, "%s",
+             developer_password_item->str_value);
+    pending->developer_buffer_kb =
+        (unsigned)developer_buffer_size_item->value;
+  }
+  if (pending->api) {
+    pending->api_mode = api_status_item->value ? 1 : 0;
+    snprintf(pending->api_password, sizeof pending->api_password, "%s",
+             api_password_item->str_value);
+  }
+  if (pending->gpio) {
+    pending->gpio_outputs = gpio_outputs_item->value ? 1 : 0;
+  }
+}
+
+static int pending_system_changes_any(
+    const struct pending_system_changes *pending) {
+  return pending->machine || pending->network || pending->developer ||
+         pending->api || pending->overclock || pending->gpio;
+}
+
+static int system_changes_pending(void) {
+  struct pending_system_changes pending;
+
+  capture_pending_system_changes(&pending);
+  return pending_system_changes_any(&pending);
+}
+
+static void update_pending_action_state(void) {
+  int pending = system_changes_pending();
+
+  if (system_apply_item != NULL) {
+    system_apply_item->disabled = !pending;
+  }
+  if (system_reboot_item != NULL) {
+    system_reboot_item->disabled = pending;
+  }
+}
+
+static int apply_pending_system_changes(
+    const struct pending_system_changes *pending) {
   const struct bmx_machine *machine = machine_selected_machine();
   const struct bmx_machine_mode *mode = machine_selected_mode();
   BMC64C64Core c64_core = machine_selected_c64_core();
   struct bmx_boot_plan plan;
   int status;
 
-  if (!machine_pending && !apply_network && !overclock_pending &&
-      !gpio_pending && !apply_developer && !apply_api) {
+  if (!pending_system_changes_any(pending)) {
     return 1;
   }
-  if (apply_network && !validate_network_menu()) {
+  if (pending->network && !validate_network_menu()) {
     return 0;
   }
 
@@ -1715,12 +1956,12 @@ static int apply_pending_system_changes(int force_network_save,
 
   // Resolve and check the complete destination before writing either boot
   // file. Network options are added to the same plan below.
-  if ((machine_pending || overclock_pending) &&
+  if ((pending->machine || pending->overclock) &&
       overclock_load_status != BMX_OVERCLOCK_READ_OK) {
     show_overclock_config_error();
     return 0;
   }
-  if (machine_pending || overclock_pending) {
+  if (pending->machine || pending->overclock) {
     status = switch_build_boot_plan(machine, mode, c64_core, &plan);
     if (status != 0) {
       show_machine_switch_error(machine, c64_core, status);
@@ -1733,38 +1974,39 @@ static int apply_pending_system_changes(int force_network_save,
     }
   }
 
-  if (apply_network && append_network_boot_options(&plan)) {
+  if (pending->network && append_network_boot_options(&plan)) {
     ui_error("Problem saving network config");
     return 0;
   }
-  if (developer_mode >= 0 &&
-      bmx_boot_plan_set_developer_mode(&plan, developer_mode) != 0) {
+  if (pending->developer &&
+      bmx_boot_plan_set_developer_mode(&plan, pending->developer_mode) != 0) {
     ui_error("Problem changing Developer settings");
     return 0;
   }
-  if (developer_password != NULL &&
-      bmx_boot_plan_set_developer_password(&plan, developer_password) != 0) {
+  if (pending->developer &&
+      bmx_boot_plan_set_developer_password(
+          &plan, pending->developer_password) != 0) {
     ui_error("Problem changing Developer settings");
     return 0;
   }
-  if (developer_buffer_kb != 0U &&
+  if (pending->developer &&
       bmx_boot_plan_set_developer_log_buffer_kb(
-          &plan, developer_buffer_kb) != 0) {
+          &plan, pending->developer_buffer_kb) != 0) {
     ui_error("Problem changing Developer settings");
     return 0;
   }
-  if (api_mode >= 0 &&
-      bmx_boot_plan_set_api_mode(&plan, api_mode) != 0) {
+  if (pending->api &&
+      bmx_boot_plan_set_api_mode(&plan, pending->api_mode) != 0) {
     ui_error("Problem changing Remote API settings");
     return 0;
   }
-  if (api_password != NULL &&
-      bmx_boot_plan_set_api_password(&plan, api_password) != 0) {
+  if (pending->api &&
+      bmx_boot_plan_set_api_password(&plan, pending->api_password) != 0) {
     ui_error("Problem changing Remote API settings");
     return 0;
   }
-  if (gpio_pending &&
-      (gpio_outputs_item->value
+  if (pending->gpio &&
+      (pending->gpio_outputs
            ? bmx_boot_plan_set_cmdline_option(
                  &plan, "enable_gpio_outputs", "true")
            : bmx_boot_plan_manage_cmdline_key(
@@ -1774,11 +2016,11 @@ static int apply_pending_system_changes(int force_network_save,
   }
   status = switch_apply_boot_plan(&plan);
   if (status != 0) {
-    if (machine_pending || overclock_pending) {
+    if (pending->machine || pending->overclock) {
       show_machine_switch_error(machine, c64_core, status);
-    } else if (apply_developer || apply_api) {
+    } else if (pending->developer || pending->api) {
       ui_error("Problem changing remote interface settings");
-    } else if (gpio_pending) {
+    } else if (pending->gpio) {
       ui_error("Problem changing GPIO Outputs");
     } else {
       ui_error("Problem saving network config");
@@ -1810,20 +2052,11 @@ static int prepare_system_shutdown_storage(void) {
   return 1;
 }
 
-static void perform_system_action(SystemAction action,
-                                  int force_network_save,
-                                  int developer_mode,
-                                  const char *developer_password,
-                                  unsigned developer_buffer_kb,
-                                  int api_mode,
-                                  const char *api_password) {
+static void perform_system_action(SystemAction action) {
   if (rs232net_dirty && !apply_rs232net_config(1)) {
     return;
   }
-  if (!apply_pending_system_changes(force_network_save, developer_mode,
-                                    developer_password,
-                                    developer_buffer_kb, api_mode,
-                                    api_password)) {
+  if (!apply_pending_system_changes(&confirmed_system_changes)) {
     return;
   }
   if (!prepare_system_shutdown_storage()) {
@@ -1839,110 +2072,90 @@ static void perform_system_action(SystemAction action,
   }
 }
 
-static void show_developer_settings_confirm(void) {
-  char message[384];
+static void append_pending_message(char *message, size_t message_size,
+                                   const char *text) {
+  size_t used = strlen(message);
 
-  if (developer_status_item == NULL || developer_password_item == NULL ||
-      developer_buffer_size_item == NULL) {
-    ui_error("Developer settings unavailable");
-    return;
+  if (used < message_size) {
+    snprintf(message + used, message_size - used, "%s", text);
   }
-  developer_mode_target = developer_status_item->value ? 1 : 0;
-  strncpy(developer_password_target, developer_password_item->str_value,
-          sizeof developer_password_target - 1);
-  developer_password_target[sizeof developer_password_target - 1] = '\0';
-  developer_buffer_size_target =
-      (unsigned)developer_buffer_size_item->value;
-  snprintf(message, sizeof message,
-           "Apply Developer settings and reboot? Status: %s. Password: %s. "
-           "Buffer size: %u KiB. BMX will update cmdline.txt and apply any "
-           "pending system changes.",
-           developer_mode_target ? "Enabled" : "Disabled",
-           developer_password_target[0] == '\0' ? "None" : "Set",
-           developer_buffer_size_target);
-  ui_confirm_wrapped_cancel_default("Apply Developer Settings?", message, 0,
-                                    MENU_CONFIRM_SYSTEM_DEVELOPER);
 }
 
-static void show_api_settings_confirm(void) {
-  char message[320];
-
-  if (api_status_item == NULL || api_password_item == NULL) {
-    ui_error("Remote API settings unavailable");
-    return;
-  }
-  api_mode_target = api_status_item->value ? 1 : 0;
-  strncpy(api_password_target, api_password_item->str_value,
-          sizeof api_password_target - 1);
-  api_password_target[sizeof api_password_target - 1] = '\0';
-  snprintf(message, sizeof message,
-           "Apply Remote API settings and reboot? Status: %s. Password: %s. "
-           "BMX will update cmdline.txt and apply any pending system changes.",
-           api_mode_target ? "Enabled" : "Disabled",
-           api_password_target[0] == '\0' ? "None" : "Set");
-  ui_confirm_wrapped_cancel_default("Apply Remote API Settings?", message, 0,
-                                    MENU_CONFIRM_SYSTEM_API);
-}
-
-static void show_system_action_confirm(SystemAction action) {
-  int machine_pending = machine_change_pending();
-  int network_pending = network_menu_requires_reboot() || rs232net_dirty;
-  int overclock_pending = overclock_change_pending();
-  int gpio_pending = gpio_outputs_item != NULL &&
-                     gpio_outputs_item->value !=
-                         circle_gpio_outputs_enabled();
+static int build_pending_changes_message(
+    char *message, size_t message_size,
+    const struct pending_system_changes *pending, SystemAction action) {
   const char *action_text = action == SYSTEM_ACTION_POWER_OFF
                                 ? "power off"
                                 : "reboot";
+  char line[256];
+
+  message[0] = '\0';
+  if (!pending_system_changes_any(pending)) {
+    return 0;
+  }
+
+  append_pending_message(message, message_size, "Pending changes:\n");
+  if (pending->machine) {
+    char target[160];
+
+    machine_target_description(target, sizeof target);
+    snprintf(line, sizeof line, "- Machine: %s\n", target);
+    append_pending_message(message, message_size, line);
+  }
+  if (pending->network) {
+    append_pending_message(message, message_size, "- Network settings\n");
+  }
+  if (pending->developer) {
+    snprintf(line, sizeof line,
+             "- Developer: %s, password %s, buffer %u KiB\n",
+             pending->developer_mode ? "Enabled" : "Disabled",
+             pending->developer_password[0] == '\0' ? "None" : "Set",
+             pending->developer_buffer_kb);
+    append_pending_message(message, message_size, line);
+  }
+  if (pending->api) {
+    snprintf(line, sizeof line, "- Remote API: %s, password %s\n",
+             pending->api_mode ? "Enabled" : "Disabled",
+             pending->api_password[0] == '\0' ? "None" : "Set");
+    append_pending_message(message, message_size, line);
+  }
+  if (pending->overclock) {
+    append_pending_message(message, message_size,
+                           "- Overclocking settings\n");
+  }
+  if (pending->gpio) {
+    snprintf(line, sizeof line, "- GPIO Outputs: %s\n",
+             pending->gpio_outputs ? "Enabled" : "Disabled");
+    append_pending_message(message, message_size, line);
+  }
+  snprintf(line, sizeof line, "\nApply changes and %s?", action_text);
+  append_pending_message(message, message_size, line);
+  if (pending->overclock) {
+    append_pending_message(message, message_size, " ");
+    append_pending_message(message, message_size, OVERCLOCK_RECOVERY_MSG);
+  }
+  return 1;
+}
+
+static void show_system_action_confirm(SystemAction action) {
   const char *title = action == SYSTEM_ACTION_POWER_OFF
                           ? "Power off?"
                           : "Reboot?";
   int confirm_id = action == SYSTEM_ACTION_POWER_OFF
                        ? MENU_CONFIRM_SYSTEM_POWER_OFF
                        : MENU_CONFIRM_SYSTEM_REBOOT;
-  char message[512];
+  char message[1024];
 
-  if (overclock_pending) {
-    if (machine_pending) {
-      char target[160];
-      machine_target_description(target, sizeof target);
-      snprintf(message, sizeof message,
-               network_pending
-                   ? "Apply %s, save network and overclocking settings, then "
-                     "%s? %s"
-                   : "Apply %s and overclocking settings, then %s? %s",
-               target, action_text, OVERCLOCK_RECOVERY_MSG);
-    } else {
-      snprintf(message, sizeof message,
-               network_pending
-                   ? "Save network and overclocking settings, then %s? %s"
-                   : "Apply overclocking settings and %s? %s",
-               action_text, OVERCLOCK_RECOVERY_MSG);
-    }
-  } else if (machine_pending) {
-    char target[160];
-    machine_target_description(target, sizeof target);
-    snprintf(message, sizeof message,
-             network_pending
-                 ? "Apply %s, save pending network changes and %s? "
-                   "BMX will update config.txt and cmdline.txt."
-                 : "Apply %s and %s? BMX will update config.txt and "
-                   "cmdline.txt.",
-             target, action_text);
-  } else if (network_pending) {
-    snprintf(message, sizeof message,
-             "Save pending network changes and %s?", action_text);
+  capture_pending_system_changes(&confirmed_system_changes);
+  if (build_pending_changes_message(message, sizeof message,
+                                    &confirmed_system_changes, action)) {
+    title = action == SYSTEM_ACTION_POWER_OFF
+                ? "Apply & Power Off?"
+                : "Apply & Reboot?";
   } else {
     snprintf(message, sizeof message,
              "%s the Raspberry Pi now? Unsaved emulator state will be lost.",
              action == SYSTEM_ACTION_POWER_OFF ? "Power off" : "Reboot");
-  }
-
-  if (gpio_pending) {
-    size_t used = strlen(message);
-    snprintf(message + used, sizeof message - used,
-             " GPIO Outputs will be %s.",
-             gpio_outputs_item->value ? "enabled" : "disabled");
   }
 
   ui_confirm_wrapped_cancel_default((char *)title, message, 0, confirm_id);
@@ -3526,6 +3739,7 @@ static void show_wifi_ap_list(void) {
 }
 
 static int menu_text_field_return(struct menu_item *item) {
+  update_pending_action_state();
   if (item == network_wifi_ssid_item &&
       item->str_value[0] == '\0' &&
       !item->disabled) {
@@ -3564,11 +3778,13 @@ static void refresh_dhcp_network_fields(void) {
 }
 
 void menu_before_render(void) {
+  quick_access_refresh_slot_items();
   keymap_editor_refresh_capture();
   keyboard_monitor_refresh();
   mouse_monitor_refresh();
   gpio_monitor_refresh();
   refresh_overclock_diagnostics();
+  update_pending_action_state();
 
   if (network_folder_item == NULL || !network_folder_item->is_expanded) {
     return;
@@ -3733,71 +3949,23 @@ static int apply_rs232net_config(int strict) {
 }
 
 int menu_before_ui_close(void) {
-  int machine_pending;
-  int network_pending;
-  int overclock_pending;
-  int gpio_pending;
-
   if (rs232net_dirty) {
     if (!apply_rs232net_config(1)) {
       return 0;
     }
   }
-  machine_pending = machine_change_pending();
-  network_pending = network_menu_requires_reboot();
-  overclock_pending = overclock_change_pending();
-  gpio_pending = gpio_outputs_item != NULL &&
-                 gpio_outputs_item->value !=
-                     circle_gpio_outputs_enabled();
-  if (machine_pending || network_pending || overclock_pending ||
-      gpio_pending) {
+  if (system_changes_pending()) {
     if (!pending_reboot_confirm_open) {
-      const char *message = NETWORK_REBOOT_MSG;
-      char pending_message[512];
-      char gpio_message[640];
-      char target[160];
+      char message[1024];
       struct menu_item *confirm_root;
 
-      if (overclock_pending && machine_pending) {
-        machine_target_description(target, sizeof target);
-        snprintf(pending_message, sizeof pending_message,
-                 network_pending
-                     ? "Apply %s, save network and overclocking settings, then "
-                       "reboot? %s"
-                     : "Apply %s and overclocking settings, then reboot? %s",
-                 target, OVERCLOCK_RECOVERY_MSG);
-        message = pending_message;
-      } else if (overclock_pending) {
-        snprintf(pending_message, sizeof pending_message,
-                 network_pending
-                     ? "Save network and overclocking settings, then reboot? %s"
-                     : "Apply overclocking settings and reboot? %s",
-                 OVERCLOCK_RECOVERY_MSG);
-        message = pending_message;
-      } else if (machine_pending) {
-        machine_target_description(target, sizeof target);
-        snprintf(pending_message, sizeof pending_message,
-                 network_pending ? MACHINE_NETWORK_SWITCH_MSG
-                                 : MACHINE_SWITCH_MSG,
-                 target);
-        message = pending_message;
-      }
-      if (gpio_pending) {
-        if (!machine_pending && !network_pending && !overclock_pending) {
-          snprintf(gpio_message, sizeof gpio_message,
-                   "Set GPIO Outputs to %s and reboot? BMX will update "
-                   "cmdline.txt.",
-                   gpio_outputs_item->value ? "Enabled" : "Disabled");
-        } else {
-          snprintf(gpio_message, sizeof gpio_message,
-                   "%s GPIO Outputs will be %s.", message,
-                   gpio_outputs_item->value ? "enabled" : "disabled");
-        }
-        message = gpio_message;
-      }
+      capture_pending_system_changes(&confirmed_system_changes);
+      build_pending_changes_message(message, sizeof message,
+                                    &confirmed_system_changes,
+                                    SYSTEM_ACTION_REBOOT);
       pending_reboot_confirm_open = 1;
       confirm_root = ui_confirm_wrapped_cancel_default(
-          "Reboot?", message, 0, MENU_PENDING_REBOOT);
+          "Apply & Reboot?", message, 0, MENU_PENDING_REBOOT);
       confirm_root->on_popped_off = pending_reboot_confirm_popped;
     }
     return 0;
@@ -3850,8 +4018,6 @@ static void build_network_menu(struct menu_item *root) {
   ui_menu_set_text_field_display(network_wifi_country_item, 3, 1);
   update_network_address_field_state();
   refresh_dhcp_network_fields();
-
-  ui_menu_add_button(MENU_NETWORK_SAVE, root, "Save and Reboot");
 
   ui_menu_add_divider(root);
   rs232net_enable_item = ui_menu_add_toggle(
@@ -4323,6 +4489,15 @@ static int save_settings() {
   fprintf(fp, "hotkey_tf3=%d\n", hotkey_tf3_item->value);
   fprintf(fp, "hotkey_tf5=%d\n", hotkey_tf5_item->value);
   fprintf(fp, "hotkey_tf7=%d\n", hotkey_tf7_item->value);
+  for (int slot = 0; slot < MENU_QUICK_ACCESS_SLOT_COUNT; ++slot) {
+    const struct menu_quick_access_slot *assignment =
+        menu_quick_access_get(&quick_access_state, slot);
+    const char *id_name = assignment != NULL
+                              ? menu_quick_access_id_name(assignment->id)
+                              : NULL;
+    fprintf(fp, "quick_slot_%d=%s\n", slot + 1,
+            id_name != NULL ? id_name : "");
+  }
   // Can't change the 'overlay_*' names, legacy.
   fprintf(fp, "overlay=%d\n", statusbar_item->value);
   fprintf(fp, "diagnostics_overlay=%d\n", diagnostics_overlay_item->value);
@@ -4406,17 +4581,88 @@ static int save_settings() {
   fprintf(fp,"s_curvature=%d\n", s_curvature_item->value);
   fprintf(fp,"s_curvature_x=%d\n", s_curvature_x_item->value);
   fprintf(fp,"s_curvature_y=%d\n", s_curvature_y_item->value);
-  fprintf(fp,"s_sharper=%d\n", s_sharper_item->value);
-  fprintf(fp,"s_mask=%d\n", s_mask_item->value);
+  fprintf(fp,"s_skew_x=%d\n", s_skew_x_item->value);
+  fprintf(fp,"s_skew_y=%d\n", s_skew_y_item->value);
+  fprintf(fp,"s_trapezoid=%d\n", s_trapezoid_item->value);
+  fprintf(fp,"s_rotation=%d\n", s_rotation_item->value);
+  fprintf(fp,"s_overscan=%d\n", s_overscan_item->value);
+  fprintf(fp,"s_convergence=%d\n", s_convergence_item->value);
+  fprintf(fp,"s_red_offset_x=%d\n", s_red_offset_x_item->value);
+  fprintf(fp,"s_red_offset_y=%d\n", s_red_offset_y_item->value);
+  fprintf(fp,"s_blue_offset_x=%d\n", s_blue_offset_x_item->value);
+  fprintf(fp,"s_blue_offset_y=%d\n", s_blue_offset_y_item->value);
+  fprintf(fp,"s_convergence_radial_strength=%d\n",
+          s_convergence_radial_strength_item->value);
+  fprintf(fp,"s_horizontal_filtering=%d\n", s_horizontal_filtering_item->value);
+  fprintf(fp,"s_sigma_x=%d\n", s_sigma_x_item->value);
+  fprintf(fp,"s_edge_blur=%d\n", s_edge_blur_item->value);
+  fprintf(fp,"s_edge_blur_strength=%d\n", s_edge_blur_strength_item->value);
+  fprintf(fp,"s_edge_blur_radius=%d\n", s_edge_blur_radius_item->value);
+  fprintf(fp,"s_sharper=%d\n",
+          (!s_horizontal_filtering_item->value || s_sigma_x_item->value < 50) ? 1 : 0);
+  fprintf(fp,"s_mask=%d\n",
+          s_mask_enable_item->value ? s_mask_item->value + 1 : 0);
+  fprintf(fp,"s_mask_enable=%d\n", s_mask_enable_item->value);
+  fprintf(fp,"s_mask_type=%d\n", s_mask_item->value);
   fprintf(fp,"s_mask_brightness=%d\n", s_mask_brightness_item->value);
   fprintf(fp,"s_scanlines=%d\n", s_scanlines_item->value);
   fprintf(fp,"s_multisample=%d\n", s_multisample_item->value);
   fprintf(fp,"s_scanline_weight=%d\n", s_scanline_weight_item->value);
   fprintf(fp,"s_scanline_gap_brightness=%d\n", s_scanline_gap_brightness_item->value);
+  fprintf(fp,"s_bloom=%d\n", s_bloom_item->value);
   fprintf(fp,"s_bloom_factor=%d\n", s_bloom_factor_item->value);
-  fprintf(fp,"s_gamma=%d\n", s_gamma_item->value);
+  fprintf(fp,"s_vignette=%d\n", s_vignette_item->value);
+  fprintf(fp,"s_vignette_strength=%d\n", s_vignette_strength_item->value);
+  fprintf(fp,"s_vignette_scale=%d\n", s_vignette_scale_item->value);
+  fprintf(fp,"s_vignette_softness=%d\n", s_vignette_softness_item->value);
+  fprintf(fp,"s_uneven_illumination=%d\n", s_uneven_illumination_item->value);
+  fprintf(fp,"s_uneven_illumination_strength=%d\n",
+          s_uneven_illumination_strength_item->value);
+  fprintf(fp,"s_uneven_illumination_scale=%d\n",
+          s_uneven_illumination_scale_item->value);
+  fprintf(fp,"s_horizontal_jitter=%d\n", s_horizontal_jitter_item->value);
+  fprintf(fp,"s_horizontal_jitter_strength=%d\n",
+          s_horizontal_jitter_strength_item->value);
+  fprintf(fp,"s_horizontal_jitter_frequency=%d\n",
+          s_horizontal_jitter_frequency_item->value);
+  fprintf(fp,"s_horizontal_jitter_speed=%d\n",
+          s_horizontal_jitter_speed_item->value);
+  fprintf(fp,"s_composite_artifacts=%d\n", s_composite_artifacts_item->value);
+  fprintf(fp,"s_composite_chroma_blur=%d\n",
+          s_composite_chroma_blur_item->value);
+  fprintf(fp,"s_composite_luma_sharpen=%d\n",
+          s_composite_luma_sharpen_item->value);
+  fprintf(fp,"s_composite_color_bleed=%d\n",
+          s_composite_color_bleed_item->value);
+  fprintf(fp,"s_glass_reflection=%d\n", s_glass_reflection_item->value);
+  fprintf(fp,"s_glass_reflection_angle=%d\n",
+          s_glass_reflection_angle_item->value);
+  fprintf(fp,"s_glass_reflection_width=%d\n",
+          s_glass_reflection_width_item->value);
+  fprintf(fp,"s_glass_reflection_position=%d\n",
+          s_glass_reflection_position_item->value);
+  fprintf(fp,"s_rounded_screen_mask=%d\n", s_rounded_screen_mask_item->value);
+  fprintf(fp,"s_rounded_corner_radius=%d\n",
+          s_rounded_corner_radius_item->value);
+  fprintf(fp,"s_rounded_border_softness=%d\n",
+          s_rounded_border_softness_item->value);
+  fprintf(fp,"s_edge_glow=%d\n", s_edge_glow_item->value);
+  fprintf(fp,"s_edge_glow_strength=%d\n", s_edge_glow_strength_item->value);
+  fprintf(fp,"s_edge_glow_width=%d\n", s_edge_glow_width_item->value);
+  fprintf(fp,"s_noise=%d\n", s_noise_item->value);
+  fprintf(fp,"s_luminance_noise=%d\n", s_luminance_noise_item->value);
+  fprintf(fp,"s_chroma_noise=%d\n", s_chroma_noise_item->value);
+  fprintf(fp,"s_noise_speed=%d\n", s_noise_speed_item->value);
+  fprintf(fp,"s_gamma=%d\n",
+          s_output_response_item->value ? s_response_mode_item->value + 1 : 0);
+  fprintf(fp,"s_output_response=%d\n", s_output_response_item->value);
+  fprintf(fp,"s_response_mode=%d\n", s_response_mode_item->value);
+  fprintf(fp,"s_level_mapping=%d\n", s_level_mapping_item->value);
   fprintf(fp,"s_input_gamma=%d\n", s_input_gamma_item->value);
   fprintf(fp,"s_output_gamma=%d\n", s_output_gamma_item->value);
+  fprintf(fp,"s_response_saturation=%d\n", s_response_saturation_item->value);
+  fprintf(fp,"s_black_level=%d\n", s_black_level_item->value);
+  fprintf(fp,"s_white_clip=%d\n", s_white_clip_item->value);
 
   emux_save_additional_settings(fp);
 
@@ -4467,6 +4713,17 @@ static int load_sound_output_priority_setting(const char *path) {
   return 0;
 }
 
+static int quick_access_setting_slot(const char *name) {
+  int slot;
+  char expected[24];
+  if (name == NULL) return -1;
+  for (slot = 0; slot < MENU_QUICK_ACCESS_SLOT_COUNT; ++slot) {
+    snprintf(expected, sizeof expected, "quick_slot_%d", slot + 1);
+    if (strcmp(name, expected) == 0) return slot;
+  }
+  return -1;
+}
+
 // Make joydev reflect menu choice
 static void ui_set_joy_devs() {
   if (port_1_menu_item) {
@@ -4486,7 +4743,7 @@ static void ui_set_joy_devs() {
   }
 }
 
-static void load_settings() {
+static int load_settings() {
 
   int tmp_value;
   int sound_output_priority_loaded = 0;
@@ -4540,7 +4797,7 @@ static void load_settings() {
     break;
   default:
     printf("ERROR: Unhandled machine\n");
-    return;
+    return 0;
   }
 
   if (fp == NULL) {
@@ -4550,7 +4807,7 @@ static void load_settings() {
       load_sound_output_priority_setting("/settings.txt");
     }
     emux_load_settings_done();
-    return;
+    return 0;
   }
 
   char name_value[256];
@@ -4578,6 +4835,23 @@ static void load_settings() {
        strlen(name) == 0 ||
           strlen(value_str) == 0) {
        continue;
+    }
+
+    {
+      int quick_slot = quick_access_setting_slot(name);
+      if (quick_slot >= 0) {
+        int quick_id;
+        struct menu_item *target = NULL;
+        if (menu_quick_access_id_from_name(value_str, &quick_id)) {
+          target = menu_quick_access_find(ui_menu_root(), quick_id,
+                                          MENU_SUB_NONE, 0);
+        }
+        if (target != NULL) {
+          menu_quick_access_set(&quick_access_state, quick_slot, quick_id,
+                                MENU_SUB_NONE);
+        }
+        continue;
+      }
     }
 
     value = atoi(value_str);
@@ -4797,9 +5071,49 @@ static void load_settings() {
       s_curvature_x_item->value = value;
     } else if (strcmp(name, "s_curvature_y") == 0) {
       s_curvature_y_item->value = value;
+    } else if (strcmp(name, "s_skew_x") == 0) {
+      s_skew_x_item->value = value;
+    } else if (strcmp(name, "s_skew_y") == 0) {
+      s_skew_y_item->value = value;
+    } else if (strcmp(name, "s_trapezoid") == 0) {
+      s_trapezoid_item->value = value;
+    } else if (strcmp(name, "s_rotation") == 0) {
+      s_rotation_item->value = value;
+    } else if (strcmp(name, "s_overscan") == 0) {
+      s_overscan_item->value = value;
+    } else if (strcmp(name, "s_convergence") == 0) {
+      s_convergence_item->value = value;
+    } else if (strcmp(name, "s_red_offset_x") == 0) {
+      s_red_offset_x_item->value = value;
+    } else if (strcmp(name, "s_red_offset_y") == 0) {
+      s_red_offset_y_item->value = value;
+    } else if (strcmp(name, "s_blue_offset_x") == 0) {
+      s_blue_offset_x_item->value = value;
+    } else if (strcmp(name, "s_blue_offset_y") == 0) {
+      s_blue_offset_y_item->value = value;
+    } else if (strcmp(name, "s_convergence_radial_strength") == 0) {
+      s_convergence_radial_strength_item->value = value;
+    } else if (strcmp(name, "s_horizontal_filtering") == 0) {
+      s_horizontal_filtering_item->value = value;
+    } else if (strcmp(name, "s_sigma_x") == 0) {
+      s_sigma_x_item->value = value;
+    } else if (strcmp(name, "s_edge_blur") == 0) {
+      s_edge_blur_item->value = value;
+    } else if (strcmp(name, "s_edge_blur_strength") == 0) {
+      s_edge_blur_strength_item->value = value;
+    } else if (strcmp(name, "s_edge_blur_radius") == 0) {
+      s_edge_blur_radius_item->value = value;
     } else if (strcmp(name, "s_sharper") == 0) {
-      s_sharper_item->value = value;
+      s_horizontal_filtering_item->value = 1;
+      s_sigma_x_item->value = value ? 20 : 50;
     } else if (strcmp(name, "s_mask") == 0) {
+      s_mask_enable_item->value = value != 0;
+      if (value > 0) {
+        s_mask_item->value = value - 1;
+      }
+    } else if (strcmp(name, "s_mask_enable") == 0) {
+      s_mask_enable_item->value = value;
+    } else if (strcmp(name, "s_mask_type") == 0) {
       s_mask_item->value = value;
     } else if (strcmp(name, "s_mask_brightness") == 0) {
       s_mask_brightness_item->value = value;
@@ -4811,14 +5125,89 @@ static void load_settings() {
       s_scanline_weight_item->value = value;
     } else if (strcmp(name, "s_scanline_gap_brightness") == 0) {
       s_scanline_gap_brightness_item->value = value;
+    } else if (strcmp(name, "s_bloom") == 0) {
+      s_bloom_item->value = value;
     } else if (strcmp(name, "s_bloom_factor") == 0) {
       s_bloom_factor_item->value = value;
+    } else if (strcmp(name, "s_vignette") == 0) {
+      s_vignette_item->value = value;
+    } else if (strcmp(name, "s_vignette_strength") == 0) {
+      s_vignette_strength_item->value = value;
+    } else if (strcmp(name, "s_vignette_scale") == 0) {
+      s_vignette_scale_item->value = value;
+    } else if (strcmp(name, "s_vignette_softness") == 0) {
+      s_vignette_softness_item->value = value;
+    } else if (strcmp(name, "s_uneven_illumination") == 0) {
+      s_uneven_illumination_item->value = value;
+    } else if (strcmp(name, "s_uneven_illumination_strength") == 0) {
+      s_uneven_illumination_strength_item->value = value;
+    } else if (strcmp(name, "s_uneven_illumination_scale") == 0) {
+      s_uneven_illumination_scale_item->value = value;
+    } else if (strcmp(name, "s_horizontal_jitter") == 0) {
+      s_horizontal_jitter_item->value = value;
+    } else if (strcmp(name, "s_horizontal_jitter_strength") == 0) {
+      s_horizontal_jitter_strength_item->value = value;
+    } else if (strcmp(name, "s_horizontal_jitter_frequency") == 0) {
+      s_horizontal_jitter_frequency_item->value = value;
+    } else if (strcmp(name, "s_horizontal_jitter_speed") == 0) {
+      s_horizontal_jitter_speed_item->value = value;
+    } else if (strcmp(name, "s_composite_artifacts") == 0) {
+      s_composite_artifacts_item->value = value;
+    } else if (strcmp(name, "s_composite_chroma_blur") == 0) {
+      s_composite_chroma_blur_item->value = value;
+    } else if (strcmp(name, "s_composite_luma_sharpen") == 0) {
+      s_composite_luma_sharpen_item->value = value;
+    } else if (strcmp(name, "s_composite_color_bleed") == 0) {
+      s_composite_color_bleed_item->value = value;
+    } else if (strcmp(name, "s_glass_reflection") == 0) {
+      s_glass_reflection_item->value = value;
+    } else if (strcmp(name, "s_glass_reflection_angle") == 0) {
+      s_glass_reflection_angle_item->value = value;
+    } else if (strcmp(name, "s_glass_reflection_width") == 0) {
+      s_glass_reflection_width_item->value = value;
+    } else if (strcmp(name, "s_glass_reflection_position") == 0) {
+      s_glass_reflection_position_item->value = value;
+    } else if (strcmp(name, "s_rounded_screen_mask") == 0) {
+      s_rounded_screen_mask_item->value = value;
+    } else if (strcmp(name, "s_rounded_corner_radius") == 0) {
+      s_rounded_corner_radius_item->value = value;
+    } else if (strcmp(name, "s_rounded_border_softness") == 0) {
+      s_rounded_border_softness_item->value = value;
+    } else if (strcmp(name, "s_edge_glow") == 0) {
+      s_edge_glow_item->value = value;
+    } else if (strcmp(name, "s_edge_glow_strength") == 0) {
+      s_edge_glow_strength_item->value = value;
+    } else if (strcmp(name, "s_edge_glow_width") == 0) {
+      s_edge_glow_width_item->value = value;
+    } else if (strcmp(name, "s_noise") == 0) {
+      s_noise_item->value = value;
+    } else if (strcmp(name, "s_luminance_noise") == 0) {
+      s_luminance_noise_item->value = value;
+    } else if (strcmp(name, "s_chroma_noise") == 0) {
+      s_chroma_noise_item->value = value;
+    } else if (strcmp(name, "s_noise_speed") == 0) {
+      s_noise_speed_item->value = value;
     } else if (strcmp(name, "s_gamma") == 0) {
-      s_gamma_item->value = value;
+      s_output_response_item->value = value != 0;
+      if (value > 0) {
+        s_response_mode_item->value = value == 2 ? 1 : 0;
+      }
+    } else if (strcmp(name, "s_output_response") == 0) {
+      s_output_response_item->value = value;
+    } else if (strcmp(name, "s_response_mode") == 0) {
+      s_response_mode_item->value = value;
+    } else if (strcmp(name, "s_level_mapping") == 0) {
+      s_level_mapping_item->value = value;
     } else if (strcmp(name, "s_input_gamma") == 0) {
       s_input_gamma_item->value = value;
     } else if (strcmp(name, "s_output_gamma") == 0) {
       s_output_gamma_item->value = value;
+    } else if (strcmp(name, "s_response_saturation") == 0) {
+      s_response_saturation_item->value = value;
+    } else if (strcmp(name, "s_black_level") == 0) {
+      s_black_level_item->value = value;
+    } else if (strcmp(name, "s_white_clip") == 0) {
+      s_white_clip_item->value = value;
     } else if (strcmp(name, "custom_gpio") == 0) {
       char* token = strtok (value_str, ",");
       if (token != NULL) {
@@ -4865,6 +5254,8 @@ static void load_settings() {
   }
   fclose(fp);
 
+  quick_access_refresh_slot_items();
+
   menu_usb_mapping_finish_load(usb_mapping_mode_loaded,
                                usb_mapping_loaded_mode,
                                usb_mapping_value_loaded);
@@ -4880,6 +5271,7 @@ static void load_settings() {
   if (emux_machine_class == BMC64_MACHINE_CLASS_C128) {
     emux_video_color_setting_changed(1);
   }
+  return 1;
 }
 
 // Swap ports 1 & 2
@@ -5781,6 +6173,7 @@ static void menu_sync_c128_active_display_to_column_key(void) {
     vic_enabled = 0;
     do_video_settings(FB_LAYER_VDC);
   }
+  refresh_crt_shader_runtime();
 }
 
 static void menu_machine_reset(int type, int pop) {
@@ -5801,157 +6194,660 @@ static void reset_shader_params() {
   s_curvature_item->value = 0;
   s_curvature_x_item->value = 10;
   s_curvature_y_item->value = 15;
-  s_sharper_item->value = 0;
+  s_skew_x_item->value = 0;
+  s_skew_y_item->value = 0;
+  s_trapezoid_item->value = 0;
+  s_rotation_item->value = 0;
+  s_overscan_item->value = 0;
+  s_convergence_item->value = 0;
+  s_red_offset_x_item->value = 25;
+  s_red_offset_y_item->value = 0;
+  s_blue_offset_x_item->value = -25;
+  s_blue_offset_y_item->value = 0;
+  s_convergence_radial_strength_item->value = 25;
+  s_horizontal_filtering_item->value = 1;
+  s_sigma_x_item->value = 50;
+  s_edge_blur_item->value = 0;
+  s_edge_blur_strength_item->value = 30;
+  s_edge_blur_radius_item->value = 70;
+  s_mask_enable_item->value = 0;
   s_mask_item->value = 0;
   s_mask_brightness_item->value = 70;
   s_scanlines_item->value = 1;
   s_multisample_item->value = 1;
   s_scanline_weight_item->value = 60;
   s_scanline_gap_brightness_item->value = 12;
+  s_bloom_item->value = 1;
   s_bloom_factor_item->value = 150;
-  s_gamma_item->value = 2;
+  s_vignette_item->value = 0;
+  s_vignette_strength_item->value = 25;
+  s_vignette_scale_item->value = 75;
+  s_vignette_softness_item->value = 45;
+  s_uneven_illumination_item->value = 0;
+  s_uneven_illumination_strength_item->value = 15;
+  s_uneven_illumination_scale_item->value = 25;
+  s_horizontal_jitter_item->value = 0;
+  s_horizontal_jitter_strength_item->value = 10;
+  s_horizontal_jitter_frequency_item->value = 18;
+  s_horizontal_jitter_speed_item->value = 0;
+  s_composite_artifacts_item->value = 0;
+  s_composite_chroma_blur_item->value = 25;
+  s_composite_luma_sharpen_item->value = 10;
+  s_composite_color_bleed_item->value = 15;
+  s_glass_reflection_item->value = 0;
+  s_glass_reflection_angle_item->value = -20;
+  s_glass_reflection_width_item->value = 25;
+  s_glass_reflection_position_item->value = 35;
+  s_rounded_screen_mask_item->value = 0;
+  s_rounded_corner_radius_item->value = 20;
+  s_rounded_border_softness_item->value = 15;
+  s_edge_glow_item->value = 0;
+  s_edge_glow_strength_item->value = 15;
+  s_edge_glow_width_item->value = 20;
+  s_noise_item->value = 0;
+  s_luminance_noise_item->value = 10;
+  s_chroma_noise_item->value = 8;
+  s_noise_speed_item->value = 0;
+  s_output_response_item->value = 1;
+  s_response_mode_item->value = 1;
+  s_level_mapping_item->value = BMX_OUTPUT_LEVEL_MAPPING_CUBIC;
   s_input_gamma_item->value = 240;
   s_output_gamma_item->value = 220;
+  s_response_saturation_item->value = 100;
+  s_black_level_item->value = 0;
+  s_white_clip_item->value = 100;
 }
 
-static int allow_shader_autostart() {
-  return allow_shader() && circle_get_model() < 4;
+static void set_shader_items_disabled(struct menu_item **items,
+                                      unsigned int count,
+                                      int disabled) {
+  for (unsigned int i = 0; i < count; ++i) {
+    items[i]->disabled = disabled;
+  }
 }
 
-static void sanity_check_shader_params(int itemid) {
-    // All shader items should be disabled if shader is off
-    s_curvature_item->disabled = 0;
-    s_curvature_x_item->disabled = 0;
-    s_curvature_y_item->disabled = 0;
-    s_mask_item->disabled = 0;
-    s_mask_brightness_item->disabled = 0;
-    s_gamma_item->disabled = 0;
-    s_scanlines_item->disabled = 0;
-    s_multisample_item->disabled = 0;
-    s_scanline_weight_item->disabled = 0;
-    s_scanline_gap_brightness_item->disabled = 0;
-    s_bloom_factor_item->disabled = 0;
-    s_input_gamma_item->disabled = 0;
-    s_output_gamma_item->disabled = 0;
-    s_sharper_item->disabled = 0;
-    if (!s_enable_shader_item->value) {
-       s_curvature_item->disabled = 1;
-       s_curvature_x_item->disabled = 1;
-       s_curvature_y_item->disabled = 1;
-       s_mask_item->disabled = 1;
-       s_mask_brightness_item->disabled = 1;
-       s_gamma_item->disabled = 1;
-       s_scanlines_item->disabled = 1;
-       s_multisample_item->disabled = 1;
-       s_scanline_weight_item->disabled = 1;
-       s_scanline_gap_brightness_item->disabled = 1;
-       s_bloom_factor_item->disabled = 1;
-       s_input_gamma_item->disabled = 1;
-       s_output_gamma_item->disabled = 1;
-       s_sharper_item->disabled = 1;
-    }
+static int crt_shader_preview_layer(void) {
+  if (emux_machine_class != BMC64_MACHINE_CLASS_C128 ||
+      active_display_item == NULL) {
+    return FB_LAYER_VIC;
+  }
 
-    if (itemid == MENU_SHADER_SCANLINES &&
-       s_scanlines_item->value &&
-         s_mask_item->value == 2) {
-       // Turn off Trinitron if user selects scanlines
-       s_mask_item->value = 0;
-    } else if (itemid == MENU_SHADER_MASK &&
-       s_mask_item->value == 2 &&
-         s_scanlines_item->value) {
-       // Turn off Scanlines if user selects Trinitron mask
-       s_scanlines_item->value = 0;
-    }
+  if (active_display_item->value == MENU_ACTIVE_DISPLAY_VDC ||
+      (active_display_item->value == MENU_ACTIVE_DISPLAY_PIP &&
+       pip_swapped_item != NULL && pip_swapped_item->value != 0)) {
+    return FB_LAYER_VDC;
+  }
+  return FB_LAYER_VIC;
+}
 
-    // If curvature is off, disable x and y too
-    if (!s_curvature_item->value) {
-       s_curvature_x_item->disabled = 1;
-       s_curvature_y_item->disabled = 1;
-    }
+static int crt_shader_display_mode_supported(void) {
+  if (emux_machine_class != BMC64_MACHINE_CLASS_C128 ||
+      active_display_item == NULL ||
+      active_display_item->value == MENU_ACTIVE_DISPLAY_VICII) {
+    return 1;
+  }
 
-    // If scanlines are off, gamma is disabled.
-    // If scanlines are off, weight and gap brightness disabled
-    // If scanlines are off, bloom factor is disabled
-    if (!s_scanlines_item->value) {
-       s_multisample_item->disabled = 1;
-       s_gamma_item->disabled = 1;
-       s_scanline_weight_item->disabled = 1;
-       s_scanline_gap_brightness_item->disabled = 1;
-       s_bloom_factor_item->disabled = 1;
-    }
+  if (active_display_item->value == MENU_ACTIVE_DISPLAY_VDC) {
+    // Legacy EGL applies shader state only to the VIC layer. Board-specific
+    // backends advertise support for this specific C128 base layer.
+    return circle_shader_backend_available_for_layer(FB_LAYER_VDC);
+  }
+  return 0;
+}
 
-    // If gamma is disabled, off or fake, input/output is disabled.
-    if (s_gamma_item->disabled || s_gamma_item->value == 0 || s_gamma_item->value == 2) {
-       s_input_gamma_item->disabled = 1;
-       s_output_gamma_item->disabled = 1;
-    }
+static void reveal_crt_shader_preview(void) {
+  ui_canvas_preview_temp(crt_shader_preview_layer(),
+                         UI_CANVAS_PREVIEW_CONTENT);
+}
 
-    // If mask is off, mask brightness is disabled
-    if (!s_mask_item->value) {
-       s_mask_brightness_item->disabled = 1;
-    }
+static void mark_crt_shader_preview_hidden(void) {
+  if (crt_shader_preview_layer() == FB_LAYER_VDC) {
+    vdc_showing = 0;
+  } else {
+    vic_showing = 0;
+  }
+}
+
+static void sanity_check_shader_params(void) {
+  if (s_response_saturation_item->value < 0) {
+    s_response_saturation_item->value = 0;
+  } else if (s_response_saturation_item->value > 100) {
+    s_response_saturation_item->value = 100;
+  }
+  if (s_level_mapping_item->value < BMX_OUTPUT_LEVEL_MAPPING_LINEAR ||
+      s_level_mapping_item->value > BMX_OUTPUT_LEVEL_MAPPING_TOE_SHOULDER) {
+    s_level_mapping_item->value = BMX_OUTPUT_LEVEL_MAPPING_CUBIC;
+  }
+
+  struct menu_item *all_items[] = {
+    s_curvature_item, s_curvature_x_item, s_curvature_y_item,
+    s_skew_x_item, s_skew_y_item, s_trapezoid_item, s_rotation_item,
+    s_overscan_item, s_convergence_item, s_red_offset_x_item,
+    s_red_offset_y_item, s_blue_offset_x_item, s_blue_offset_y_item,
+    s_convergence_radial_strength_item, s_horizontal_filtering_item,
+    s_sigma_x_item, s_edge_blur_item, s_edge_blur_strength_item,
+    s_edge_blur_radius_item, s_scanlines_item, s_multisample_item,
+    s_scanline_weight_item, s_scanline_gap_brightness_item,
+    s_mask_enable_item, s_mask_item, s_mask_brightness_item,
+    s_bloom_item, s_bloom_factor_item, s_vignette_item,
+    s_vignette_strength_item, s_vignette_scale_item,
+    s_vignette_softness_item, s_uneven_illumination_item,
+    s_uneven_illumination_strength_item, s_uneven_illumination_scale_item,
+    s_horizontal_jitter_item, s_horizontal_jitter_strength_item,
+    s_horizontal_jitter_frequency_item, s_horizontal_jitter_speed_item,
+    s_composite_artifacts_item,
+    s_composite_chroma_blur_item, s_composite_luma_sharpen_item,
+    s_composite_color_bleed_item, s_glass_reflection_item,
+    s_glass_reflection_angle_item, s_glass_reflection_width_item,
+    s_glass_reflection_position_item, s_rounded_screen_mask_item,
+    s_rounded_corner_radius_item, s_rounded_border_softness_item,
+    s_edge_glow_item, s_edge_glow_strength_item, s_edge_glow_width_item,
+    s_noise_item, s_luminance_noise_item, s_chroma_noise_item,
+    s_noise_speed_item,
+    s_output_response_item, s_response_mode_item, s_level_mapping_item,
+    s_input_gamma_item,
+    s_output_gamma_item, s_response_saturation_item, s_black_level_item,
+    s_white_clip_item
+  };
+  set_shader_items_disabled(all_items,
+      sizeof all_items / sizeof all_items[0], 0);
+
+  if (!s_enable_shader_item->value ||
+      !crt_shader_display_mode_supported()) {
+    set_shader_items_disabled(all_items,
+        sizeof all_items / sizeof all_items[0], 1);
+    return;
+  }
+
+#define DISABLE_GROUP_IF_OFF(toggle, ...) do { \
+  struct menu_item *group_items[] = {__VA_ARGS__}; \
+  if (!(toggle)->value) { \
+    set_shader_items_disabled(group_items, \
+        sizeof group_items / sizeof group_items[0], 1); \
+  } \
+} while (0)
+
+  DISABLE_GROUP_IF_OFF(s_curvature_item,
+      s_curvature_x_item, s_curvature_y_item, s_skew_x_item, s_skew_y_item,
+      s_trapezoid_item, s_rotation_item, s_overscan_item);
+  DISABLE_GROUP_IF_OFF(s_convergence_item,
+      s_red_offset_x_item, s_red_offset_y_item, s_blue_offset_x_item,
+      s_blue_offset_y_item, s_convergence_radial_strength_item);
+  DISABLE_GROUP_IF_OFF(s_horizontal_filtering_item, s_sigma_x_item);
+  DISABLE_GROUP_IF_OFF(s_edge_blur_item,
+      s_edge_blur_strength_item, s_edge_blur_radius_item);
+  DISABLE_GROUP_IF_OFF(s_scanlines_item,
+      s_multisample_item, s_scanline_weight_item,
+      s_scanline_gap_brightness_item);
+  DISABLE_GROUP_IF_OFF(s_mask_enable_item,
+      s_mask_item, s_mask_brightness_item);
+  DISABLE_GROUP_IF_OFF(s_bloom_item, s_bloom_factor_item);
+  DISABLE_GROUP_IF_OFF(s_vignette_item,
+      s_vignette_strength_item, s_vignette_scale_item,
+      s_vignette_softness_item);
+  DISABLE_GROUP_IF_OFF(s_uneven_illumination_item,
+      s_uneven_illumination_strength_item, s_uneven_illumination_scale_item);
+  DISABLE_GROUP_IF_OFF(s_horizontal_jitter_item,
+      s_horizontal_jitter_strength_item, s_horizontal_jitter_frequency_item,
+      s_horizontal_jitter_speed_item);
+  DISABLE_GROUP_IF_OFF(s_composite_artifacts_item,
+      s_composite_chroma_blur_item, s_composite_luma_sharpen_item,
+      s_composite_color_bleed_item);
+  DISABLE_GROUP_IF_OFF(s_glass_reflection_item,
+      s_glass_reflection_angle_item, s_glass_reflection_width_item,
+      s_glass_reflection_position_item);
+  DISABLE_GROUP_IF_OFF(s_rounded_screen_mask_item,
+      s_rounded_corner_radius_item, s_rounded_border_softness_item);
+  DISABLE_GROUP_IF_OFF(s_edge_glow_item,
+      s_edge_glow_strength_item, s_edge_glow_width_item);
+  DISABLE_GROUP_IF_OFF(s_noise_item,
+      s_luminance_noise_item, s_chroma_noise_item, s_noise_speed_item);
+  DISABLE_GROUP_IF_OFF(s_output_response_item,
+      s_response_mode_item, s_level_mapping_item, s_input_gamma_item,
+      s_output_gamma_item,
+      s_response_saturation_item, s_black_level_item, s_white_clip_item);
+
+#undef DISABLE_GROUP_IF_OFF
+
+  if (s_response_mode_item->disabled || s_response_mode_item->value == 1) {
+    s_input_gamma_item->disabled = 1;
+    s_output_gamma_item->disabled = 1;
+  }
+}
+
+static void update_crt_shader_availability(void) {
+  int available = allow_shader() && crt_shader_display_mode_supported();
+  s_enable_shader_item->disabled = !available;
+  strcpy(s_enable_shader_item->custom_toggle_label[0],
+         available ? "No" : "Disabled");
+  strcpy(s_enable_shader_item->custom_toggle_label[1],
+         available ? "Yes" : "Disabled");
+  s_crt_preset_item->disabled =
+      !available || s_crt_preset_item->num_choices == 1;
+}
+
+static int apply_crt_shader_runtime(void) {
+  int enabled = allow_shader() && crt_shader_display_mode_supported() &&
+                s_enable_shader_item->value;
+  return circle_realloc_fbl(crt_shader_preview_layer(), enabled);
+}
+
+static void refresh_crt_shader_runtime(void) {
+  update_crt_shader_availability();
+  sanity_check_shader_params();
+  int status = apply_crt_shader_runtime();
+  if (status == 0) {
+    return;
+  }
+
+  printf("menu: shader enable failed with %d; disabling\r\n", status);
+  s_enable_shader_item->value = 0;
+  emux_set_int(Setting_VideoFilter, MENU_VIDEO_FILTER_NONE);
+  circle_realloc_fbl(crt_shader_preview_layer(), 0);
+  update_crt_shader_availability();
+  sanity_check_shader_params();
 }
 
 static void handle_shader_param_change() {
-  int curvature;
-  float curvature_x;
-  float curvature_y;
-  int mask;
-  float mask_brightness;
-  int gamma;
-  int fake_gamma;
-  int scanlines;
-  int multisample;
-  float scanline_weight;
-  float scanline_gap_brightness;
-  float bloom_factor;
-  float input_gamma;
-  float output_gamma;
-  int sharper;
-  int bilinear_interpolation;
+  struct bmx_crt_effect_params params = {0};
 
-  curvature = s_curvature_item->value;
-  curvature_x = (float)s_curvature_x_item->value / 100.0f;
-  curvature_y = (float)s_curvature_y_item->value / 100.0f;
-  mask = s_mask_item->value;
-  mask_brightness = (float)s_mask_brightness_item->value / 100.0f;
-  gamma = s_gamma_item->value > 0;
-  fake_gamma = s_gamma_item->value == 2;
-  scanlines = s_scanlines_item->value;
-  multisample = s_multisample_item->value;
-  scanline_weight = (float)s_scanline_weight_item->value / 10.0f;
-  scanline_gap_brightness = (float)s_scanline_gap_brightness_item->value / 100.0f;
-  bloom_factor = (float)s_bloom_factor_item->value / 100.0f;
-  input_gamma = (float)s_input_gamma_item->value / 100.0f;
-  output_gamma = (float)s_output_gamma_item->value / 100.0f;
-  sharper = s_sharper_item->value;
-  bilinear_interpolation = scaling_interp_item->value;
+  params.geometry_enabled = s_curvature_item->value;
+  params.curvature_x = (float)s_curvature_x_item->value / 600.0f;
+  params.curvature_y = (float)s_curvature_y_item->value / 600.0f;
+  params.skew_x = (float)s_skew_x_item->value * 0.0008f;
+  params.skew_y = (float)s_skew_y_item->value * 0.0008f;
+  params.trapezoid = (float)s_trapezoid_item->value * 0.0015f;
+  params.rotation_degrees = (float)s_rotation_item->value * 0.03f;
+  params.overscan_scale = 1.0f + (float)s_overscan_item->value * 0.002f;
 
-  circle_set_shader_params(curvature,
-                        curvature_x,
-                        curvature_y,
-                        mask,
-                        mask_brightness,
-                        gamma,
-                        fake_gamma,
-                        scanlines,
-                        multisample,
-                        scanline_weight,
-                        scanline_gap_brightness,
-                        bloom_factor,
-                        input_gamma,
-                        output_gamma,
-                        sharper,
-                        bilinear_interpolation);
+  params.convergence_enabled = s_convergence_item->value;
+  params.red_offset_x = (float)s_red_offset_x_item->value / 100.0f;
+  params.red_offset_y = (float)s_red_offset_y_item->value / 100.0f;
+  params.blue_offset_x = (float)s_blue_offset_x_item->value / 100.0f;
+  params.blue_offset_y = (float)s_blue_offset_y_item->value / 100.0f;
+  params.convergence_radial_strength =
+      (float)s_convergence_radial_strength_item->value * 0.02f;
+
+  params.horizontal_filtering_enabled = s_horizontal_filtering_item->value;
+  params.horizontal_sigma_x = (float)s_sigma_x_item->value / 100.0f;
+
+  params.edge_blur_enabled = s_edge_blur_item->value;
+  params.edge_blur_strength =
+      (float)s_edge_blur_strength_item->value / 100.0f;
+  params.edge_blur_radius =
+      0.2f + (float)s_edge_blur_radius_item->value * 0.008f;
+
+  params.scanlines_enabled = s_scanlines_item->value;
+  params.scanline_multisample = s_multisample_item->value;
+  params.scanline_weight = (float)s_scanline_weight_item->value / 10.0f;
+  params.scanline_gap_brightness =
+      (float)s_scanline_gap_brightness_item->value / 100.0f;
+
+  params.phosphor_mask_enabled = s_mask_enable_item->value;
+  params.phosphor_mask_type = s_mask_item->value + 1;
+  params.phosphor_mask_brightness =
+      (float)s_mask_brightness_item->value / 100.0f;
+
+  params.bloom_enabled = s_bloom_item->value;
+  params.bloom_factor = (float)s_bloom_factor_item->value / 100.0f;
+
+  params.vignette_enabled = s_vignette_item->value;
+  params.vignette_strength = (float)s_vignette_strength_item->value / 100.0f;
+  params.vignette_scale = 0.2f + (float)s_vignette_scale_item->value * 0.008f;
+  params.vignette_softness =
+      0.02f + (float)s_vignette_softness_item->value * 0.0098f;
+
+  params.uneven_illumination_enabled = s_uneven_illumination_item->value;
+  params.uneven_illumination_strength =
+      (float)s_uneven_illumination_strength_item->value * 0.0035f;
+  params.uneven_illumination_scale =
+      0.02f + (float)s_uneven_illumination_scale_item->value * 0.0023f;
+
+  params.horizontal_jitter_enabled = s_horizontal_jitter_item->value;
+  params.horizontal_jitter_strength =
+      (float)s_horizontal_jitter_strength_item->value * 0.06f;
+  params.horizontal_jitter_frequency =
+      0.01f + (float)s_horizontal_jitter_frequency_item->value * 0.0039f;
+  params.horizontal_jitter_speed =
+      (float)s_horizontal_jitter_speed_item->value / 100.0f;
+
+  params.composite_artifacts_enabled = s_composite_artifacts_item->value;
+  params.composite_chroma_blur =
+      (float)s_composite_chroma_blur_item->value * 0.02f;
+  params.composite_luma_sharpen =
+      (float)s_composite_luma_sharpen_item->value / 100.0f;
+  params.composite_color_bleed =
+      (float)s_composite_color_bleed_item->value * 0.006f;
+
+  params.glass_reflection_enabled = s_glass_reflection_item->value;
+  params.glass_reflection_angle =
+      (float)s_glass_reflection_angle_item->value;
+  params.glass_reflection_width =
+      0.02f + (float)s_glass_reflection_width_item->value * 0.0058f;
+  params.glass_reflection_position =
+      (float)s_glass_reflection_position_item->value / 100.0f;
+
+  params.rounded_screen_mask_enabled = s_rounded_screen_mask_item->value;
+  params.rounded_corner_radius =
+      (float)s_rounded_corner_radius_item->value * 0.002f;
+  params.rounded_border_softness =
+      (float)s_rounded_border_softness_item->value * 0.0008f;
+
+  params.edge_glow_enabled = s_edge_glow_item->value;
+  params.edge_glow_strength =
+      (float)s_edge_glow_strength_item->value * 0.0035f;
+  params.edge_glow_width =
+      0.01f + (float)s_edge_glow_width_item->value * 0.0034f;
+
+  params.noise_enabled = s_noise_item->value;
+  params.luminance_noise = (float)s_luminance_noise_item->value * 0.001f;
+  params.chroma_noise = (float)s_chroma_noise_item->value * 0.0008f;
+  params.noise_speed = (float)s_noise_speed_item->value / 100.0f;
+
+  params.output_response_enabled = s_output_response_item->value;
+  params.output_response_fast =
+      s_output_response_item->value && s_response_mode_item->value == 1;
+  params.output_level_mapping = s_level_mapping_item->value;
+  params.input_gamma = (float)s_input_gamma_item->value / 100.0f;
+  params.output_gamma = (float)s_output_gamma_item->value / 100.0f;
+  params.output_saturation =
+      (float)s_response_saturation_item->value / 100.0f;
+  params.black_level = (float)s_black_level_item->value / 100.0f;
+  params.white_clip = (float)s_white_clip_item->value / 100.0f;
+  params.bilinear_interpolation = scaling_interp_item->value;
+
+  circle_set_shader_params(&params);
 
   // Setting shader params hides the layer.
-  vic_showing = 0;
+  mark_crt_shader_preview_hidden();
+}
+
+static int crt_preset_ascii_compare(const char *left, const char *right) {
+  while (*left != '\0' && *right != '\0') {
+    int left_char = tolower((unsigned char)*left);
+    int right_char = tolower((unsigned char)*right);
+    if (left_char != right_char) {
+      return left_char - right_char;
+    }
+    ++left;
+    ++right;
+  }
+  return (unsigned char)*left - (unsigned char)*right;
+}
+
+static int crt_preset_name_compare(const char *left, const char *right) {
+  int left_default = crt_preset_ascii_compare(left, "Default") == 0;
+  int right_default = crt_preset_ascii_compare(right, "Default") == 0;
+  if (left_default != right_default) {
+    return left_default ? -1 : 1;
+  }
+  return crt_preset_ascii_compare(left, right);
+}
+
+static int crt_preset_has_extension(const char *name) {
+  size_t name_length = strlen(name);
+  size_t extension_length = strlen(CRT_PRESET_EXTENSION);
+  return name_length > extension_length &&
+         crt_preset_ascii_compare(name + name_length - extension_length,
+                                  CRT_PRESET_EXTENSION) == 0;
+}
+
+static int find_crt_preset_choice(const char *name) {
+  if (s_crt_preset_item == NULL) {
+    return -1;
+  }
+  for (int i = 1; i < s_crt_preset_item->num_choices; ++i) {
+    if (crt_preset_ascii_compare(s_crt_preset_item->choices[i], name) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static void swap_crt_preset_choices(int left, int right) {
+  char name[MAX_MENU_STR];
+  char path[MAX_STR_VAL_LEN];
+
+  strcpy(name, s_crt_preset_item->choices[left]);
+  strcpy(s_crt_preset_item->choices[left],
+         s_crt_preset_item->choices[right]);
+  strcpy(s_crt_preset_item->choices[right], name);
+
+  strcpy(path, s_crt_preset_paths[left]);
+  strcpy(s_crt_preset_paths[left], s_crt_preset_paths[right]);
+  strcpy(s_crt_preset_paths[right], path);
+}
+
+static void populate_crt_preset_menu(void) {
+  memset(s_crt_preset_paths, 0, sizeof(s_crt_preset_paths));
+  s_crt_preset_item->num_choices = 1;
+  s_crt_preset_item->value = CRT_PRESET_CURRENT_CHOICE;
+  strcpy(s_crt_preset_item->choices[CRT_PRESET_CURRENT_CHOICE],
+         "Current Settings");
+  s_crt_preset_applied_choice = CRT_PRESET_CURRENT_CHOICE;
+
+  DIR *directory = opendir(CRT_PRESET_DIR);
+  if (directory == NULL) {
+    s_crt_preset_item->disabled = 1;
+    printf("boot: crt preset directory missing path=%s\n", CRT_PRESET_DIR);
+    return;
+  }
+
+  struct dirent *entry;
+  while ((entry = readdir(directory)) != NULL) {
+    if (!crt_preset_has_extension(entry->d_name)) {
+      continue;
+    }
+    if (s_crt_preset_item->num_choices >= MAX_CHOICES) {
+      printf("boot: crt preset limit reached max=%u\n",
+             (unsigned int)(MAX_CHOICES - 1));
+      break;
+    }
+
+    size_t name_length = strlen(entry->d_name) - strlen(CRT_PRESET_EXTENSION);
+    if (name_length == 0 || name_length >= MAX_MENU_STR) {
+      printf("boot: crt preset filename skipped name=%s\n", entry->d_name);
+      continue;
+    }
+
+    char display_name[MAX_MENU_STR];
+    memcpy(display_name, entry->d_name, name_length);
+    display_name[name_length] = '\0';
+    if (find_crt_preset_choice(display_name) >= 0) {
+      printf("boot: crt preset duplicate name skipped name=%s\n",
+             display_name);
+      continue;
+    }
+
+    char path[MAX_STR_VAL_LEN];
+    int path_length = snprintf(path, sizeof(path), "%s/%s",
+                               CRT_PRESET_DIR, entry->d_name);
+    if (path_length < 0 || (size_t)path_length >= sizeof(path)) {
+      printf("boot: crt preset path skipped name=%s\n", entry->d_name);
+      continue;
+    }
+    struct stat file_info;
+    if (stat(path, &file_info) != 0 || S_ISDIR(file_info.st_mode)) {
+      continue;
+    }
+
+    int choice = s_crt_preset_item->num_choices++;
+    strcpy(s_crt_preset_item->choices[choice], display_name);
+    strcpy(s_crt_preset_paths[choice], path);
+  }
+  closedir(directory);
+
+  for (int i = 2; i < s_crt_preset_item->num_choices; ++i) {
+    int current = i;
+    while (current > 1 &&
+           crt_preset_name_compare(s_crt_preset_item->choices[current],
+                                   s_crt_preset_item->choices[current - 1]) < 0) {
+      swap_crt_preset_choices(current, current - 1);
+      --current;
+    }
+  }
+
+  s_crt_preset_item->disabled = s_crt_preset_item->num_choices == 1;
+  printf("boot: crt presets found=%u default=%s\n",
+         (unsigned int)(s_crt_preset_item->num_choices - 1),
+         find_crt_preset_choice("Default") > 0 ? "yes" : "no");
+}
+
+static int crt_preset_item_bounds(const struct menu_item *item,
+                                  int *min_value,
+                                  int *max_value) {
+  switch (item->type) {
+    case TOGGLE:
+    case CHECKBOX:
+      *min_value = 0;
+      *max_value = 1;
+      return 1;
+    case RANGE:
+      *min_value = item->min;
+      *max_value = item->max;
+      return 1;
+    case MULTIPLE_CHOICE:
+      if (item->num_choices <= 0) {
+        return 0;
+      }
+      *min_value = 0;
+      *max_value = item->num_choices - 1;
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static int load_crt_preset_choice(int choice) {
+  if (choice == CRT_PRESET_CURRENT_CHOICE) {
+    s_crt_preset_applied_choice = CRT_PRESET_CURRENT_CHOICE;
+    return 1;
+  }
+  if (s_crt_preset_item == NULL || choice < 1 ||
+      choice >= s_crt_preset_item->num_choices) {
+    return 0;
+  }
+
+  struct crt_preset_field fields[CRT_PRESET_FIELD_COUNT];
+  int values[CRT_PRESET_FIELD_COUNT];
+  for (size_t i = 0; i < CRT_PRESET_FIELD_COUNT; ++i) {
+    struct menu_item *bound_item = *s_crt_preset_bindings[i].item;
+    fields[i].key = s_crt_preset_bindings[i].key;
+    if (bound_item == NULL ||
+        !crt_preset_item_bounds(bound_item, &fields[i].min, &fields[i].max)) {
+      printf("boot: crt preset schema error key=%s\n", fields[i].key);
+      return 0;
+    }
+  }
+
+  FILE *fp = fopen(s_crt_preset_paths[choice], "r");
+  if (fp == NULL) {
+    printf("boot: crt preset invalid name=%s status=io-error path=%s\n",
+           s_crt_preset_item->choices[choice], s_crt_preset_paths[choice]);
+    return 0;
+  }
+
+  struct crt_preset_result result;
+  enum crt_preset_status status =
+      crt_preset_parse(fp, fields, CRT_PRESET_FIELD_COUNT, values, &result);
+  fclose(fp);
+  if (status != CRT_PRESET_OK) {
+    printf("boot: crt preset invalid name=%s status=%s line=%u key=%s\n",
+           s_crt_preset_item->choices[choice],
+           crt_preset_status_name(status), result.line,
+           result.key[0] != '\0' ? result.key : "-");
+    return 0;
+  }
+
+  for (size_t i = 0; i < CRT_PRESET_FIELD_COUNT; ++i) {
+    (*s_crt_preset_bindings[i].item)->value = values[i];
+  }
+  sanity_check_shader_params();
+  s_crt_preset_item->value = choice;
+  s_crt_preset_applied_choice = choice;
+
+  printf("boot: crt preset loaded name=%s clamped=%u unknown=%u",
+         s_crt_preset_item->choices[choice], result.clamped_count,
+         result.unknown_count);
+  if (result.clamped_count > 0) {
+    printf(" first_clamped=%s", result.first_clamped_key);
+  }
+  printf("\n");
+  return 1;
+}
+
+static void mark_crt_preset_modified(void) {
+  if (s_crt_preset_item != NULL) {
+    s_crt_preset_item->value = CRT_PRESET_CURRENT_CHOICE;
+  }
+  s_crt_preset_applied_choice = CRT_PRESET_CURRENT_CHOICE;
+}
+
+static void disable_all_crt_effects(void) {
+  static const char suffix[] = ".enabled";
+  for (size_t i = 0; i < CRT_PRESET_FIELD_COUNT; ++i) {
+    const char *key = s_crt_preset_bindings[i].key;
+    size_t key_length = strlen(key);
+    size_t suffix_length = sizeof(suffix) - 1;
+    if (key_length >= suffix_length &&
+        strcmp(key + key_length - suffix_length, suffix) == 0) {
+      (*s_crt_preset_bindings[i].item)->value = 0;
+    }
+  }
+  mark_crt_preset_modified();
+}
+
+static void apply_startup_crt_preset(int settings_loaded) {
+  int default_choice = find_crt_preset_choice("Default");
+  if (default_choice > 0 && load_crt_preset_choice(default_choice)) {
+    return;
+  }
+
+  if (!settings_loaded) {
+    disable_all_crt_effects();
+    printf("boot: crt preset fallback=effects-off\n");
+  } else {
+    mark_crt_preset_modified();
+    printf("boot: crt preset fallback=saved-settings\n");
+  }
 }
 
 // Interpret what menu item changed and make the change to vice
 static void menu_value_changed(struct menu_item *item) {
-  int status = 0;
   int p;
+  int quick_slot = menu_quick_access_slot_from_menu_id(item->id);
+
+  if (quick_slot >= 0) {
+    if (item->sub_id == MENU_SUB_QUICK_ACCESS_ASSIGN) {
+      struct menu_item *target = menu_quick_access_find(
+          ui_menu_root(), quick_access_pending_target.id,
+          quick_access_pending_target.sub_id, 0);
+      if (target != NULL && !target->hidden && !target->disabled) {
+        menu_quick_access_set(&quick_access_state, quick_slot,
+                              quick_access_pending_target.id,
+                              quick_access_pending_target.sub_id);
+        quick_access_refresh_slot_items();
+      }
+      quick_access_pending_target.id = MENU_ID_DO_NOTHING;
+      quick_access_pending_target.sub_id = MENU_SUB_NONE;
+      ui_pop_menu();
+      return;
+    }
+
+    if (item == quick_access_slot_items[quick_slot]) {
+      const struct menu_quick_access_slot *assignment =
+          menu_quick_access_get(&quick_access_state, quick_slot);
+      struct menu_item *target = assignment != NULL
+          ? menu_quick_access_find(ui_menu_root(), assignment->id,
+                                   assignment->sub_id, 1)
+          : NULL;
+      if (target != NULL && !target->hidden && !target->disabled) {
+        quick_access_folder_item->is_expanded = 0;
+        ui_focus_item(target);
+      }
+      return;
+    }
+  }
 
   if (item == network_folder_item) {
     refresh_dhcp_network_fields();
@@ -6005,13 +6901,13 @@ static void menu_value_changed(struct menu_item *item) {
     }
     return;
   case MENU_COLOR_PALETTE_0:
-    ui_canvas_reveal_temp(FB_LAYER_VIC);
+    ui_canvas_preview_temp(FB_LAYER_VIC, UI_CANVAS_PREVIEW_CONTENT);
     if (emux_change_palette(0, item->value) != 0) {
       ui_error("Palette could not be loaded");
     }
     return;
   case MENU_COLOR_PALETTE_1:
-    ui_canvas_reveal_temp(FB_LAYER_VDC);
+    ui_canvas_preview_temp(FB_LAYER_VDC, UI_CANVAS_PREVIEW_CONTENT);
     if (emux_change_palette(1, item->value) != 0) {
       ui_error("Palette could not be loaded");
     }
@@ -6412,6 +7308,7 @@ static void menu_value_changed(struct menu_item *item) {
     }
     // Ensure GPIO pins are correct for new mode.
     circle_reset_gpio(emu_get_gpio_config());
+    update_pending_action_state();
     return;
   case MENU_GPIO_OUTPUTS:
     if (gpio_config_item != NULL && gpio_userport_machine_supported()) {
@@ -6419,6 +7316,7 @@ static void menu_value_changed(struct menu_item *item) {
              item->value ? "#4 (Userport+Joy)"
                          : "#4 (N/A: Outputs Disabled)");
     }
+    update_pending_action_state();
     return;
   case MENU_WARP_MODE:
     toggle_warp(item->value);
@@ -6427,21 +7325,14 @@ static void menu_value_changed(struct menu_item *item) {
     raspi_demo_mode = item->value;
     demo_reset();
     return;
-  case MENU_NETWORK_SAVE:
-    perform_system_action(SYSTEM_ACTION_REBOOT, 1, -1, NULL, 0U, -1, NULL);
-    return;
   case MENU_SYSTEM_DEVELOPER_STATUS:
   case MENU_SYSTEM_DEVELOPER_PASSWORD:
   case MENU_SYSTEM_DEVELOPER_BUFFER_SIZE:
-    return;
-  case MENU_SYSTEM_DEVELOPER_APPLY:
-    show_developer_settings_confirm();
+    update_pending_action_state();
     return;
   case MENU_SYSTEM_API_STATUS:
   case MENU_SYSTEM_API_PASSWORD:
-    return;
-  case MENU_SYSTEM_API_APPLY:
-    show_api_settings_confirm();
+    update_pending_action_state();
     return;
   case MENU_OVERCLOCK_ARM_FREQ:
   case MENU_OVERCLOCK_VOLTAGE_DELTA:
@@ -6453,7 +7344,7 @@ static void menu_value_changed(struct menu_item *item) {
   case MENU_OVERCLOCK_RESTORE_DEFAULTS:
     overclock_restore_defaults();
     return;
-  case MENU_OVERCLOCK_APPLY:
+  case MENU_SYSTEM_APPLY:
     show_system_action_confirm(SYSTEM_ACTION_REBOOT);
     return;
   case MENU_OVERCLOCK_CONFIG_ERROR:
@@ -6479,6 +7370,7 @@ static void menu_value_changed(struct menu_item *item) {
   case MENU_NETWORK_DHCP:
     update_network_address_field_state();
     refresh_dhcp_network_fields();
+    update_pending_action_state();
     return;
   case MENU_RS232NET_ENABLE:
   case MENU_RS232NET_TARGET:
@@ -6512,27 +7404,27 @@ static void menu_value_changed(struct menu_item *item) {
     emux_set_int(Setting_DriveSoundEmulationVolume, item->value);
     return;
   case MENU_COLOR_BRIGHTNESS_0:
-    ui_canvas_reveal_temp(FB_LAYER_VIC);
+    ui_canvas_preview_temp(FB_LAYER_VIC, UI_CANVAS_PREVIEW_CONTENT);
     emux_set_color_brightness(0, item->value);
     emux_video_color_setting_changed(0);
     return;
   case MENU_COLOR_CONTRAST_0:
-    ui_canvas_reveal_temp(FB_LAYER_VIC);
+    ui_canvas_preview_temp(FB_LAYER_VIC, UI_CANVAS_PREVIEW_CONTENT);
     emux_set_color_contrast(0, item->value);
     emux_video_color_setting_changed(0);
     return;
   case MENU_COLOR_GAMMA_0:
-    ui_canvas_reveal_temp(FB_LAYER_VIC);
+    ui_canvas_preview_temp(FB_LAYER_VIC, UI_CANVAS_PREVIEW_CONTENT);
     emux_set_color_gamma(0, item->value);
     emux_video_color_setting_changed(0);
     return;
   case MENU_COLOR_TINT_0:
-    ui_canvas_reveal_temp(FB_LAYER_VIC);
+    ui_canvas_preview_temp(FB_LAYER_VIC, UI_CANVAS_PREVIEW_CONTENT);
     emux_set_color_tint(0, item->value);
     emux_video_color_setting_changed(0);
     return;
   case MENU_COLOR_SATURATION_0:
-    ui_canvas_reveal_temp(FB_LAYER_VIC);
+    ui_canvas_preview_temp(FB_LAYER_VIC, UI_CANVAS_PREVIEW_CONTENT);
     emux_set_color_saturation(0, item->value);
     emux_video_color_setting_changed(0);
     return;
@@ -6552,27 +7444,27 @@ static void menu_value_changed(struct menu_item *item) {
     emux_video_color_setting_changed(0);
     return;
   case MENU_COLOR_BRIGHTNESS_1:
-    ui_canvas_reveal_temp(FB_LAYER_VDC);
+    ui_canvas_preview_temp(FB_LAYER_VDC, UI_CANVAS_PREVIEW_CONTENT);
     emux_set_color_brightness(1, item->value);
     emux_video_color_setting_changed(1);
     return;
   case MENU_COLOR_CONTRAST_1:
-    ui_canvas_reveal_temp(FB_LAYER_VDC);
+    ui_canvas_preview_temp(FB_LAYER_VDC, UI_CANVAS_PREVIEW_CONTENT);
     emux_set_color_contrast(1, item->value);
     emux_video_color_setting_changed(1);
     return;
   case MENU_COLOR_GAMMA_1:
-    ui_canvas_reveal_temp(FB_LAYER_VDC);
+    ui_canvas_preview_temp(FB_LAYER_VDC, UI_CANVAS_PREVIEW_CONTENT);
     emux_set_color_gamma(1, item->value);
     emux_video_color_setting_changed(1);
     return;
   case MENU_COLOR_TINT_1:
-    ui_canvas_reveal_temp(FB_LAYER_VDC);
+    ui_canvas_preview_temp(FB_LAYER_VDC, UI_CANVAS_PREVIEW_CONTENT);
     emux_set_color_tint(1, item->value);
     emux_video_color_setting_changed(1);
     return;
   case MENU_COLOR_SATURATION_1:
-    ui_canvas_reveal_temp(FB_LAYER_VDC);
+    ui_canvas_preview_temp(FB_LAYER_VDC, UI_CANVAS_PREVIEW_CONTENT);
     emux_set_color_saturation(1, item->value);
     emux_video_color_setting_changed(1);
     return;
@@ -6715,25 +7607,26 @@ static void menu_value_changed(struct menu_item *item) {
        do_video_settings(FB_LAYER_VIC);
        do_video_settings(FB_LAYER_VDC);
     }
+    refresh_crt_shader_runtime();
     break;
   case MENU_INTEGER_SCALE_W_0:
     next_integer_scaling(FB_LAYER_VIC, VIC_INDEX, 0);
-    ui_canvas_reveal_temp(FB_LAYER_VIC);
+    ui_canvas_preview_temp(FB_LAYER_VIC, UI_CANVAS_PREVIEW_GEOMETRY);
     do_video_settings(FB_LAYER_VIC);
     break;
   case MENU_INTEGER_SCALE_H_0:
     next_integer_scaling(FB_LAYER_VIC, VIC_INDEX, 1);
-    ui_canvas_reveal_temp(FB_LAYER_VIC);
+    ui_canvas_preview_temp(FB_LAYER_VIC, UI_CANVAS_PREVIEW_GEOMETRY);
     do_video_settings(FB_LAYER_VIC);
     break;
   case MENU_INTEGER_SCALE_W_1:
     next_integer_scaling(FB_LAYER_VDC, VDC_INDEX, 0);
-    ui_canvas_reveal_temp(FB_LAYER_VDC);
+    ui_canvas_preview_temp(FB_LAYER_VDC, UI_CANVAS_PREVIEW_GEOMETRY);
     do_video_settings(FB_LAYER_VDC);
     break;
   case MENU_INTEGER_SCALE_H_1:
     next_integer_scaling(FB_LAYER_VDC, VDC_INDEX, 1);
-    ui_canvas_reveal_temp(FB_LAYER_VDC);
+    ui_canvas_preview_temp(FB_LAYER_VDC, UI_CANVAS_PREVIEW_GEOMETRY);
     do_video_settings(FB_LAYER_VDC);
     break;
   case MENU_H_CENTER_0:
@@ -6751,7 +7644,7 @@ static void menu_value_changed(struct menu_item *item) {
        use_v_integer_stretch[0] = 0;
        use_scaling_params_item[0]->value = 0;
     }
-    ui_canvas_reveal_temp(FB_LAYER_VIC);
+    ui_canvas_preview_temp(FB_LAYER_VIC, UI_CANVAS_PREVIEW_GEOMETRY);
     do_video_settings(FB_LAYER_VIC);
     break;
   case MENU_H_CENTER_1:
@@ -6769,7 +7662,7 @@ static void menu_value_changed(struct menu_item *item) {
        use_v_integer_stretch[1] = 0;
        use_scaling_params_item[1]->value = 0;
     }
-    ui_canvas_reveal_temp(FB_LAYER_VDC);
+    ui_canvas_preview_temp(FB_LAYER_VDC, UI_CANVAS_PREVIEW_GEOMETRY);
     do_video_settings(FB_LAYER_VDC);
     break;
   case MENU_OVERLAY:
@@ -6824,18 +7717,11 @@ static void menu_value_changed(struct menu_item *item) {
         ui_error("%s", error);
       }
     } else if (confirm_sub_id == MENU_PENDING_REBOOT) {
-      perform_system_action(SYSTEM_ACTION_REBOOT, 0, -1, NULL, 0U, -1, NULL);
-    } else if (confirm_sub_id == MENU_CONFIRM_SYSTEM_DEVELOPER) {
-      perform_system_action(SYSTEM_ACTION_REBOOT, 0, developer_mode_target,
-                            developer_password_target,
-                            developer_buffer_size_target, -1, NULL);
-    } else if (confirm_sub_id == MENU_CONFIRM_SYSTEM_API) {
-      perform_system_action(SYSTEM_ACTION_REBOOT, 0, -1, NULL, 0U,
-                            api_mode_target, api_password_target);
+      perform_system_action(SYSTEM_ACTION_REBOOT);
     } else if (confirm_sub_id == MENU_CONFIRM_SYSTEM_REBOOT) {
-      perform_system_action(SYSTEM_ACTION_REBOOT, 0, -1, NULL, 0U, -1, NULL);
+      perform_system_action(SYSTEM_ACTION_REBOOT);
     } else if (confirm_sub_id == MENU_CONFIRM_SYSTEM_POWER_OFF) {
-      perform_system_action(SYSTEM_ACTION_POWER_OFF, 0, -1, NULL, 0U, -1, NULL);
+      perform_system_action(SYSTEM_ACTION_POWER_OFF);
     } else {
       menu_update_confirm_ok(confirm_sub_id);
     }
@@ -6865,48 +7751,108 @@ static void menu_value_changed(struct menu_item *item) {
     set_current_dir_names();
     break;
   case MENU_SHADER_ENABLE:
-    sanity_check_shader_params(item->id);
-    ui_canvas_reveal_temp(FB_LAYER_VIC);
+    reveal_crt_shader_preview();
     // Despite what the menu says, don't allow this to enable the shader
     // when conditions apply.
-    status = circle_realloc_fbl(FB_LAYER_VIC, allow_shader() ? item->value : 0);
-    if (status != 0) {
-      printf("menu: shader enable failed with %d; disabling\r\n", status);
-      item->value = 0;
-      s_enable_shader_item->value = 0;
-    }
+    refresh_crt_shader_runtime();
     emux_set_int(Setting_VideoFilter, item->value ? MENU_VIDEO_FILTER_CRT : MENU_VIDEO_FILTER_NONE);
     handle_shader_param_change();
-    vic_showing = 0;
+    break;
+  case MENU_SHADER_PRESET:
+    if (item->value == CRT_PRESET_CURRENT_CHOICE) {
+      s_crt_preset_applied_choice = CRT_PRESET_CURRENT_CHOICE;
+      break;
+    }
+    reveal_crt_shader_preview();
+    if (load_crt_preset_choice(item->value)) {
+      handle_shader_param_change();
+    } else {
+      item->value = s_crt_preset_applied_choice;
+      ui_error("Invalid CRT preset");
+    }
     break;
   case MENU_SHADER_CURVATURE:
   case MENU_SHADER_CURVATURE_X:
   case MENU_SHADER_CURVATURE_Y:
+  case MENU_SHADER_SKEW_X:
+  case MENU_SHADER_SKEW_Y:
+  case MENU_SHADER_TRAPEZOID:
+  case MENU_SHADER_ROTATION:
+  case MENU_SHADER_OVERSCAN:
+  case MENU_SHADER_CONVERGENCE_ENABLE:
+  case MENU_SHADER_RED_OFFSET_X:
+  case MENU_SHADER_RED_OFFSET_Y:
+  case MENU_SHADER_BLUE_OFFSET_X:
+  case MENU_SHADER_BLUE_OFFSET_Y:
+  case MENU_SHADER_CONVERGENCE_RADIAL_STRENGTH:
+  case MENU_SHADER_HORIZONTAL_FILTERING:
+  case MENU_SHADER_SIGMA_X:
+  case MENU_SHADER_EDGE_BLUR_ENABLE:
+  case MENU_SHADER_EDGE_BLUR_STRENGTH:
+  case MENU_SHADER_EDGE_BLUR_RADIUS:
   case MENU_SHADER_SCANLINES:
   case MENU_SHADER_MULTISAMPLE:
   case MENU_SHADER_SCANLINE_WEIGHT:
   case MENU_SHADER_SCANLINE_GAP_BRIGHTNESS:
+  case MENU_SHADER_MASK_ENABLE:
   case MENU_SHADER_MASK:
   case MENU_SHADER_MASK_BRIGHTNESS:
+  case MENU_SHADER_BLOOM_ENABLE:
   case MENU_SHADER_BLOOM:
+  case MENU_SHADER_VIGNETTE_ENABLE:
+  case MENU_SHADER_VIGNETTE_STRENGTH:
+  case MENU_SHADER_VIGNETTE_SCALE:
+  case MENU_SHADER_VIGNETTE_SOFTNESS:
+  case MENU_SHADER_UNEVEN_ILLUMINATION_ENABLE:
+  case MENU_SHADER_UNEVEN_ILLUMINATION_STRENGTH:
+  case MENU_SHADER_UNEVEN_ILLUMINATION_SCALE:
+  case MENU_SHADER_HORIZONTAL_JITTER_ENABLE:
+  case MENU_SHADER_HORIZONTAL_JITTER_STRENGTH:
+  case MENU_SHADER_HORIZONTAL_JITTER_FREQUENCY:
+  case MENU_SHADER_HORIZONTAL_JITTER_SPEED:
+  case MENU_SHADER_COMPOSITE_ARTIFACTS_ENABLE:
+  case MENU_SHADER_COMPOSITE_CHROMA_BLUR:
+  case MENU_SHADER_COMPOSITE_LUMA_SHARPEN:
+  case MENU_SHADER_COMPOSITE_COLOR_BLEED:
+  case MENU_SHADER_GLASS_REFLECTION_ENABLE:
+  case MENU_SHADER_GLASS_REFLECTION_ANGLE:
+  case MENU_SHADER_GLASS_REFLECTION_WIDTH:
+  case MENU_SHADER_GLASS_REFLECTION_POSITION:
+  case MENU_SHADER_ROUNDED_SCREEN_MASK_ENABLE:
+  case MENU_SHADER_ROUNDED_CORNER_RADIUS:
+  case MENU_SHADER_ROUNDED_BORDER_SOFTNESS:
+  case MENU_SHADER_EDGE_GLOW_ENABLE:
+  case MENU_SHADER_EDGE_GLOW_STRENGTH:
+  case MENU_SHADER_EDGE_GLOW_WIDTH:
+  case MENU_SHADER_NOISE_ENABLE:
+  case MENU_SHADER_LUMINANCE_NOISE:
+  case MENU_SHADER_CHROMA_NOISE:
+  case MENU_SHADER_NOISE_SPEED:
+  case MENU_SHADER_OUTPUT_RESPONSE:
   case MENU_SHADER_GAMMA:
+  case MENU_SHADER_LEVEL_MAPPING:
   case MENU_SHADER_INPUT_GAMMA:
   case MENU_SHADER_OUTPUT_GAMMA:
-  case MENU_SHADER_SHARPER:
-    sanity_check_shader_params(item->id);
-    ui_canvas_reveal_temp(FB_LAYER_VIC);
+  case MENU_SHADER_SATURATION:
+  case MENU_SHADER_BLACK_LEVEL:
+  case MENU_SHADER_WHITE_CLIP:
+    mark_crt_preset_modified();
+    sanity_check_shader_params();
+    reveal_crt_shader_preview();
     handle_shader_param_change();
     break;
   case MENU_SHADER_RESET_ALL:
-    ui_canvas_reveal_temp(FB_LAYER_VIC);
+    reveal_crt_shader_preview();
     reset_shader_params();
-    sanity_check_shader_params(item->id);
+    mark_crt_preset_modified();
+    sanity_check_shader_params();
     handle_shader_param_change();
     break;
   case MENU_USE_SCALING_PARAMS_0:
     if (item->value) {
        if (do_use_int_scaling(FB_LAYER_VIC, 0 /* not silent */)) {
-          ui_canvas_reveal_temp(FB_LAYER_VIC);
+          ui_canvas_preview_temp(FB_LAYER_VIC,
+                                 UI_CANVAS_PREVIEW_GEOMETRY);
           do_video_settings(FB_LAYER_VIC);
        } else {
           use_scaling_params_item[VIC_INDEX]->value = 0;
@@ -6916,7 +7862,8 @@ static void menu_value_changed(struct menu_item *item) {
   case MENU_USE_SCALING_PARAMS_1:
     if (item->value) {
        if (do_use_int_scaling(FB_LAYER_VDC, 0 /* not silent */)) {
-          ui_canvas_reveal_temp(FB_LAYER_VDC);
+          ui_canvas_preview_temp(FB_LAYER_VDC,
+                                 UI_CANVAS_PREVIEW_GEOMETRY);
           do_video_settings(FB_LAYER_VDC);
        } else {
           use_scaling_params_item[VDC_INDEX]->value = 0;
@@ -6924,10 +7871,10 @@ static void menu_value_changed(struct menu_item *item) {
     }
     break;
   case MENU_SCALING_INTERPOLATION:
-    ui_canvas_reveal_temp(FB_LAYER_VIC);
+    reveal_crt_shader_preview();
     circle_set_interpolation(item->value); // dispmanx interpolation
     if (s_enable_shader_item->value) {
-       sanity_check_shader_params(item->id);
+       sanity_check_shader_params();
        handle_shader_param_change();
     }
     break;
@@ -7394,6 +8341,7 @@ static void machine_selection_changed(struct menu_item *item) {
     default:
       break;
   }
+  update_pending_action_state();
 }
 
 static void menu_build_machine_switch(struct menu_item* parent) {
@@ -7560,9 +8508,7 @@ static void overclock_update_menu_state(void) {
   if (overclock_restore_item != NULL) {
     overclock_restore_item->disabled = overclock_state.present == 0;
   }
-  if (overclock_apply_item != NULL) {
-    overclock_apply_item->disabled = !overclock_change_pending();
-  }
+  update_pending_action_state();
 }
 
 static void overclock_set_field_from_item(struct menu_item *item,
@@ -7670,7 +8616,6 @@ static void build_overclock_menu(struct menu_item *parent) {
   overclock_current_arm_item = NULL;
   overclock_current_temp_item = NULL;
   overclock_restore_item = NULL;
-  overclock_apply_item = NULL;
   memset(&overclock_state, 0, sizeof overclock_state);
   memset(&overclock_saved_state, 0, sizeof overclock_saved_state);
   overclock_load_status = switch_read_overclock_config(&overclock_state);
@@ -7736,8 +8681,6 @@ static void build_overclock_menu(struct menu_item *parent) {
   overclock_restore_item = ui_menu_add_button(
       MENU_OVERCLOCK_RESTORE_DEFAULTS, overclock_folder_item,
       "Restore Defaults");
-  overclock_apply_item = ui_menu_add_button(
-      MENU_OVERCLOCK_APPLY, overclock_folder_item, "Apply & Reboot...");
   overclock_update_menu_state();
 }
 
@@ -7885,6 +8828,18 @@ void build_menu(struct menu_item *root) {
   default_disk_image_item = NULL;
   default_disk_drive_item = NULL;
   default_disk_reset();
+  developer_status_item = NULL;
+  developer_password_item = NULL;
+  developer_buffer_size_item = NULL;
+  api_status_item = NULL;
+  api_password_item = NULL;
+  system_apply_item = NULL;
+  system_reboot_item = NULL;
+  quick_access_folder_item = NULL;
+  memset(quick_access_slot_items, 0, sizeof quick_access_slot_items);
+  menu_quick_access_init(&quick_access_state);
+  quick_access_pending_target.id = MENU_ID_DO_NOTHING;
+  quick_access_pending_target.sub_id = MENU_SUB_NONE;
 
   for (int k = 0; k < MAX_USB_DEVICES; k++) {
      sprintf (usb_btn_name[k], "usb_btn_%d", k);
@@ -8020,6 +8975,8 @@ void build_menu(struct menu_item *root) {
   ui_menu_add_button(MENU_LICENSE, root, "Licenses...");
 
   ui_menu_add_divider(root);
+  build_quick_access_menu(root);
+  ui_menu_add_divider(root);
 
   switch (emux_machine_class) {
     case BMC64_MACHINE_CLASS_PLUS4EMU:
@@ -8152,15 +9109,15 @@ void build_menu(struct menu_item *root) {
 
      pip_swapped_item =
         ui_menu_add_toggle(MENU_PIP_SWAPPED, parent, "Swap PIP", 0);
-
-     parent = ui_menu_add_folder(video_parent, "VICII");
   }
 
-  use_scaling_params_item[0] = ui_menu_add_toggle_labels(
-     MENU_USE_SCALING_PARAMS_0, parent, "Apply scaling params at boot", 1,
-        "No","Yes");
+  if (emux_machine_class != BMC64_MACHINE_CLASS_C128) {
+     use_scaling_params_item[0] = ui_menu_add_toggle_labels(
+        MENU_USE_SCALING_PARAMS_0, parent, "Apply scaling params at boot", 1,
+           "No","Yes");
+  }
 
-  struct menu_item *shader = ui_menu_add_folder(parent, "CRT Shader");
+  struct menu_item *shader = ui_menu_add_folder(video_parent, "CRT Shader");
 
      int crt_filter;
      emux_get_int(Setting_VideoFilter, &crt_filter);
@@ -8175,68 +9132,270 @@ void build_menu(struct menu_item *root) {
         strcpy (s_enable_shader_item->custom_toggle_label[1], "Disabled");
      }
 
+     s_crt_preset_item = ui_menu_add_multiple_choice(
+        MENU_SHADER_PRESET, shader, "Preset");
+     populate_crt_preset_menu();
+     if (!allow_shader()) {
+        s_crt_preset_item->disabled = 1;
+     }
+
+     struct menu_item *geometry = ui_menu_add_folder(shader, "Geometry");
+     struct menu_item *convergence = ui_menu_add_folder(shader, "Convergence");
+     struct menu_item *scanlines = ui_menu_add_folder(shader, "Scanlines");
+     struct menu_item *horizontal_filtering =
+        ui_menu_add_folder(shader, "Horizontal Filtering");
+     struct menu_item *edge_blur = ui_menu_add_folder(shader, "Edge Blur");
+     struct menu_item *phosphor_mask = ui_menu_add_folder(shader, "Phosphor Mask");
+     struct menu_item *bloom = ui_menu_add_folder(shader, "Bloom");
+     struct menu_item *vignette = ui_menu_add_folder(shader, "Vignette");
+     struct menu_item *uneven_illumination =
+        ui_menu_add_folder(shader, "Uneven Illumination");
+     struct menu_item *horizontal_jitter =
+        ui_menu_add_folder(shader, "Horizontal Jitter");
+     struct menu_item *composite_artifacts =
+        ui_menu_add_folder(shader, "Composite Artifacts");
+     struct menu_item *glass_reflection =
+        ui_menu_add_folder(shader, "Glass Reflection");
+     struct menu_item *rounded_screen_mask =
+        ui_menu_add_folder(shader, "Rounded Screen Mask");
+     struct menu_item *edge_glow = ui_menu_add_folder(shader, "Edge Glow");
+     struct menu_item *noise = ui_menu_add_folder(shader, "Noise");
+     struct menu_item *output_response =
+        ui_menu_add_folder(shader, "Output Response");
+
      s_curvature_item =
-       ui_menu_add_toggle(MENU_SHADER_CURVATURE, shader, "Curvature", 0);
+       ui_menu_add_toggle(MENU_SHADER_CURVATURE, geometry, "Geometry", 0);
 
      s_curvature_x_item =
-       ui_menu_add_range(MENU_SHADER_CURVATURE_X, shader, "H Curvature Amount",
-          0, 30, 1, 10);
+       ui_menu_add_range(MENU_SHADER_CURVATURE_X, geometry, "Horizontal Curvature",
+          0, 100, 1, 10);
 
      s_curvature_y_item =
-       ui_menu_add_range(MENU_SHADER_CURVATURE_Y, shader, "V Curvature Amount",
-          0, 30, 1, 15);
+       ui_menu_add_range(MENU_SHADER_CURVATURE_Y, geometry, "Vertical Curvature",
+          0, 100, 1, 15);
 
-     s_sharper_item = ui_menu_add_toggle(
-        MENU_SHADER_SHARPER, shader, "Sharper Horizontal Blend", 0);
+     s_skew_x_item = ui_menu_add_range(
+        MENU_SHADER_SKEW_X, geometry, "Skew X", -100, 100, 1, 0);
+     s_skew_y_item = ui_menu_add_range(
+        MENU_SHADER_SKEW_Y, geometry, "Skew Y", -100, 100, 1, 0);
+     s_trapezoid_item = ui_menu_add_range(
+        MENU_SHADER_TRAPEZOID, geometry, "Trapezoid", -100, 100, 1, 0);
+     s_rotation_item = ui_menu_add_range(
+        MENU_SHADER_ROTATION, geometry, "Rotation", -100, 100, 1, 0);
+     s_overscan_item = ui_menu_add_range(
+        MENU_SHADER_OVERSCAN, geometry, "Overscan", 0, 100, 1, 0);
 
-     s_mask_item = ui_menu_add_multiple_choice(
-        MENU_SHADER_MASK, shader, "Mask Type");
-     s_mask_item->num_choices = 3;
-     s_mask_item->value = 0;
-     strcpy(s_mask_item->choices[0], "None");
-     strcpy(s_mask_item->choices[1], "Green/Magenta");
-     strcpy(s_mask_item->choices[2], "Trinitron");
-
-     s_mask_brightness_item = ui_menu_add_range(
-        MENU_SHADER_MASK_BRIGHTNESS, shader, "Mask Brightness",
-           0, 100, 1, 70);
+     s_convergence_item = ui_menu_add_toggle(
+        MENU_SHADER_CONVERGENCE_ENABLE, convergence, "Convergence", 0);
+     s_red_offset_x_item = ui_menu_add_range(
+        MENU_SHADER_RED_OFFSET_X, convergence, "Red Offset X",
+        -100, 100, 1, 25);
+     s_red_offset_y_item = ui_menu_add_range(
+        MENU_SHADER_RED_OFFSET_Y, convergence, "Red Offset Y",
+        -100, 100, 1, 0);
+     s_blue_offset_x_item = ui_menu_add_range(
+        MENU_SHADER_BLUE_OFFSET_X, convergence, "Blue Offset X",
+        -100, 100, 1, -25);
+     s_blue_offset_y_item = ui_menu_add_range(
+        MENU_SHADER_BLUE_OFFSET_Y, convergence, "Blue Offset Y",
+        -100, 100, 1, 0);
+     s_convergence_radial_strength_item = ui_menu_add_range(
+        MENU_SHADER_CONVERGENCE_RADIAL_STRENGTH, convergence,
+        "Radial Strength", 0, 100, 1, 25);
 
      s_scanlines_item =
-        ui_menu_add_toggle(MENU_SHADER_SCANLINES, shader, "Scanlines", 1);
+        ui_menu_add_toggle(MENU_SHADER_SCANLINES, scanlines, "Scanlines", 1);
 
      s_scanline_weight_item =
         ui_menu_add_range(
-           MENU_SHADER_SCANLINE_WEIGHT, shader, "Scanline Weight",
+           MENU_SHADER_SCANLINE_WEIGHT, scanlines, "Scanline Weight",
               0, 150, 1, 60);
 
      s_scanline_gap_brightness_item = ui_menu_add_range(
-        MENU_SHADER_SCANLINE_GAP_BRIGHTNESS, shader, "Scanline Gap Brightness",
+        MENU_SHADER_SCANLINE_GAP_BRIGHTNESS, scanlines, "Scanline Gap Brightness",
            0, 100, 1, 12);
 
      s_multisample_item =
-        ui_menu_add_toggle(MENU_SHADER_MULTISAMPLE, shader, "Multisample", 1);
+        ui_menu_add_toggle(MENU_SHADER_MULTISAMPLE, scanlines, "Multisample", 1);
+
+     s_horizontal_filtering_item = ui_menu_add_toggle(
+        MENU_SHADER_HORIZONTAL_FILTERING, horizontal_filtering,
+        "Horizontal Filtering", 1);
+
+     s_sigma_x_item = ui_menu_add_range(
+        MENU_SHADER_SIGMA_X, horizontal_filtering, "Sigma X",
+           0, 100, 1, 50);
+
+     s_edge_blur_item = ui_menu_add_toggle(
+        MENU_SHADER_EDGE_BLUR_ENABLE, edge_blur, "Edge Blur", 0);
+     s_edge_blur_strength_item = ui_menu_add_range(
+        MENU_SHADER_EDGE_BLUR_STRENGTH, edge_blur, "Strength",
+        0, 100, 1, 30);
+     s_edge_blur_radius_item = ui_menu_add_range(
+        MENU_SHADER_EDGE_BLUR_RADIUS, edge_blur, "Radius",
+        0, 100, 1, 70);
+
+     s_mask_enable_item =
+        ui_menu_add_toggle(MENU_SHADER_MASK_ENABLE, phosphor_mask,
+           "Phosphor Mask", 0);
+
+     s_mask_item = ui_menu_add_multiple_choice(
+        MENU_SHADER_MASK, phosphor_mask, "Mask Type");
+     s_mask_item->num_choices = 2;
+     s_mask_item->value = 0;
+     strcpy(s_mask_item->choices[0], "Green/Magenta");
+     strcpy(s_mask_item->choices[1], "Trinitron");
+
+     s_mask_brightness_item = ui_menu_add_range(
+        MENU_SHADER_MASK_BRIGHTNESS, phosphor_mask, "Mask Brightness",
+           0, 100, 1, 70);
+
+     s_bloom_item =
+        ui_menu_add_toggle(MENU_SHADER_BLOOM_ENABLE, bloom, "Bloom", 1);
 
      s_bloom_factor_item = ui_menu_add_range(
-        MENU_SHADER_BLOOM, shader, "Bloom Factor",
+        MENU_SHADER_BLOOM, bloom, "Bloom Factor",
            0, 500, 10, 150);
 
-     s_gamma_item =
-        ui_menu_add_multiple_choice(MENU_SHADER_GAMMA, shader, "Gamma Correction");
-     s_gamma_item->num_choices = 3;
-     s_gamma_item->value = 2;
-     strcpy(s_gamma_item->choices[0], "Off");
-     strcpy(s_gamma_item->choices[1], "On");
-     strcpy(s_gamma_item->choices[2], "Fake (Fast)");
+     s_vignette_item = ui_menu_add_toggle(
+        MENU_SHADER_VIGNETTE_ENABLE, vignette, "Vignette", 0);
+     s_vignette_strength_item = ui_menu_add_range(
+        MENU_SHADER_VIGNETTE_STRENGTH, vignette, "Strength",
+        0, 100, 1, 25);
+     s_vignette_scale_item = ui_menu_add_range(
+        MENU_SHADER_VIGNETTE_SCALE, vignette, "Scale", 0, 100, 1, 75);
+     s_vignette_softness_item = ui_menu_add_range(
+        MENU_SHADER_VIGNETTE_SOFTNESS, vignette, "Softness",
+        0, 100, 1, 45);
+
+     s_uneven_illumination_item = ui_menu_add_toggle(
+        MENU_SHADER_UNEVEN_ILLUMINATION_ENABLE, uneven_illumination,
+        "Uneven Illumination", 0);
+     s_uneven_illumination_strength_item = ui_menu_add_range(
+        MENU_SHADER_UNEVEN_ILLUMINATION_STRENGTH, uneven_illumination,
+        "Strength", 0, 100, 1, 15);
+     s_uneven_illumination_scale_item = ui_menu_add_range(
+        MENU_SHADER_UNEVEN_ILLUMINATION_SCALE, uneven_illumination,
+        "Scale", 0, 100, 1, 25);
+
+     s_horizontal_jitter_item = ui_menu_add_toggle(
+        MENU_SHADER_HORIZONTAL_JITTER_ENABLE, horizontal_jitter,
+        "Horizontal Jitter", 0);
+     s_horizontal_jitter_strength_item = ui_menu_add_range(
+        MENU_SHADER_HORIZONTAL_JITTER_STRENGTH, horizontal_jitter,
+        "Strength", 0, 100, 1, 10);
+     s_horizontal_jitter_frequency_item = ui_menu_add_range(
+        MENU_SHADER_HORIZONTAL_JITTER_FREQUENCY, horizontal_jitter,
+        "Frequency", 0, 100, 1, 18);
+     s_horizontal_jitter_speed_item = ui_menu_add_range(
+        MENU_SHADER_HORIZONTAL_JITTER_SPEED, horizontal_jitter,
+        "Speed", 0, 100, 1, 0);
+
+     s_composite_artifacts_item = ui_menu_add_toggle(
+        MENU_SHADER_COMPOSITE_ARTIFACTS_ENABLE, composite_artifacts,
+        "Composite Artifacts", 0);
+     s_composite_chroma_blur_item = ui_menu_add_range(
+        MENU_SHADER_COMPOSITE_CHROMA_BLUR, composite_artifacts,
+        "Chroma Blur", 0, 100, 1, 25);
+     s_composite_luma_sharpen_item = ui_menu_add_range(
+        MENU_SHADER_COMPOSITE_LUMA_SHARPEN, composite_artifacts,
+        "Luma Sharpen", 0, 100, 1, 10);
+     s_composite_color_bleed_item = ui_menu_add_range(
+        MENU_SHADER_COMPOSITE_COLOR_BLEED, composite_artifacts,
+        "Color Bleed", 0, 100, 1, 15);
+
+     s_glass_reflection_item = ui_menu_add_toggle(
+        MENU_SHADER_GLASS_REFLECTION_ENABLE, glass_reflection,
+        "Glass Reflection", 0);
+     s_glass_reflection_angle_item = ui_menu_add_range(
+        MENU_SHADER_GLASS_REFLECTION_ANGLE, glass_reflection,
+        "Angle", -60, 60, 1, -20);
+     s_glass_reflection_width_item = ui_menu_add_range(
+        MENU_SHADER_GLASS_REFLECTION_WIDTH, glass_reflection,
+        "Width", 0, 100, 1, 25);
+     s_glass_reflection_position_item = ui_menu_add_range(
+        MENU_SHADER_GLASS_REFLECTION_POSITION, glass_reflection,
+        "Position", 0, 100, 1, 35);
+
+     s_rounded_screen_mask_item = ui_menu_add_toggle(
+        MENU_SHADER_ROUNDED_SCREEN_MASK_ENABLE, rounded_screen_mask,
+        "Rounded Screen Mask", 0);
+     s_rounded_corner_radius_item = ui_menu_add_range(
+        MENU_SHADER_ROUNDED_CORNER_RADIUS, rounded_screen_mask,
+        "Corner Radius", 0, 100, 1, 20);
+     s_rounded_border_softness_item = ui_menu_add_range(
+        MENU_SHADER_ROUNDED_BORDER_SOFTNESS, rounded_screen_mask,
+        "Border Softness", 0, 100, 1, 15);
+
+     s_edge_glow_item = ui_menu_add_toggle(
+        MENU_SHADER_EDGE_GLOW_ENABLE, edge_glow, "Edge Glow", 0);
+     s_edge_glow_strength_item = ui_menu_add_range(
+        MENU_SHADER_EDGE_GLOW_STRENGTH, edge_glow, "Strength",
+        0, 100, 1, 15);
+     s_edge_glow_width_item = ui_menu_add_range(
+        MENU_SHADER_EDGE_GLOW_WIDTH, edge_glow, "Width",
+        0, 100, 1, 20);
+
+     s_noise_item = ui_menu_add_toggle(
+        MENU_SHADER_NOISE_ENABLE, noise, "Noise", 0);
+     s_luminance_noise_item = ui_menu_add_range(
+        MENU_SHADER_LUMINANCE_NOISE, noise, "Luminance Noise",
+        0, 100, 1, 10);
+     s_chroma_noise_item = ui_menu_add_range(
+        MENU_SHADER_CHROMA_NOISE, noise, "Chroma Noise",
+        0, 100, 1, 8);
+     s_noise_speed_item = ui_menu_add_range(
+        MENU_SHADER_NOISE_SPEED, noise, "Speed", 0, 100, 1, 0);
+
+     s_output_response_item =
+        ui_menu_add_toggle(MENU_SHADER_OUTPUT_RESPONSE, output_response,
+           "Output Response", 1);
+
+     s_response_mode_item =
+        ui_menu_add_multiple_choice(MENU_SHADER_GAMMA, output_response,
+           "Response Mode");
+     s_response_mode_item->num_choices = 2;
+     s_response_mode_item->value = 1;
+     strcpy(s_response_mode_item->choices[0], "Accurate");
+     strcpy(s_response_mode_item->choices[1], "Fast");
+
+     s_level_mapping_item =
+        ui_menu_add_multiple_choice(MENU_SHADER_LEVEL_MAPPING, output_response,
+           "Level Mapping");
+     s_level_mapping_item->num_choices = 3;
+     s_level_mapping_item->value = BMX_OUTPUT_LEVEL_MAPPING_CUBIC;
+     strcpy(s_level_mapping_item->choices[0], "Linear");
+     strcpy(s_level_mapping_item->choices[1], "Cubic");
+     strcpy(s_level_mapping_item->choices[2], "Toe / Shoulder");
 
      s_input_gamma_item = ui_menu_add_range(
-        MENU_SHADER_INPUT_GAMMA, shader, "Input Gamma",
+        MENU_SHADER_INPUT_GAMMA, output_response, "Input Gamma",
            0, 500, 10, 240);
 
      s_output_gamma_item = ui_menu_add_range(
-        MENU_SHADER_OUTPUT_GAMMA, shader, "Output Gamma",
+        MENU_SHADER_OUTPUT_GAMMA, output_response, "Output Gamma",
            0, 500, 10, 220);
 
+     s_response_saturation_item = ui_menu_add_range(
+        MENU_SHADER_SATURATION, output_response, "Saturation",
+           0, 100, 1, 100);
+
+     s_black_level_item = ui_menu_add_range(
+        MENU_SHADER_BLACK_LEVEL, output_response, "Black Level",
+           0, 100, 1, 0);
+
+     s_white_clip_item = ui_menu_add_range(
+        MENU_SHADER_WHITE_CLIP, output_response, "White Clip",
+           0, 100, 1, 100);
+
      ui_menu_add_button(MENU_SHADER_RESET_ALL, shader, "Reset");
+
+  if (emux_machine_class == BMC64_MACHINE_CLASS_C128) {
+     parent = ui_menu_add_folder(video_parent, "VICII");
+     use_scaling_params_item[0] = ui_menu_add_toggle_labels(
+        MENU_USE_SCALING_PARAMS_0, parent, "Apply scaling params at boot", 1,
+           "No","Yes");
+  }
 
   palette_item[0] = emux_add_palette_options(MENU_COLOR_PALETTE_0, parent);
 
@@ -8713,8 +9872,11 @@ void build_menu(struct menu_item *root) {
         BMX_DEVELOPER_LOG_BUFFER_MIN_KB, BMX_DEVELOPER_LOG_BUFFER_MAX_KB,
         BMX_DEVELOPER_LOG_BUFFER_STEP_KB,
         (int)emux_get_developer_log_buffer_kb());
-    ui_menu_add_button(MENU_SYSTEM_DEVELOPER_APPLY, developer,
-                       "Apply and Reboot...");
+    developer_mode_saved = developer_status_item->value;
+    snprintf(developer_password_saved, sizeof developer_password_saved, "%s",
+             developer_password_item->str_value);
+    developer_buffer_size_saved =
+        (unsigned)developer_buffer_size_item->value;
   }
   {
     char api_password[BMX_API_PASSWORD_MAX_LEN + 1] = "";
@@ -8730,17 +9892,23 @@ void build_menu(struct menu_item *root) {
         MENU_SYSTEM_API_PASSWORD, api, "Password",
         api_password, BMX_API_PASSWORD_MAX_LEN);
     ui_menu_set_text_field_display(api_password_item, 20, 1);
-    ui_menu_add_button(MENU_SYSTEM_API_APPLY, api,
-                       "Apply and Reboot...");
+    api_mode_saved = api_status_item->value;
+    snprintf(api_password_saved, sizeof api_password_saved, "%s",
+             api_password_item->str_value);
   }
   build_overclock_menu(parent);
-  ui_menu_add_button(MENU_SYSTEM_REBOOT, parent, "Reboot...");
+  system_apply_item = ui_menu_add_button(
+      MENU_SYSTEM_APPLY, parent, "Apply & Reboot...");
+  system_reboot_item =
+      ui_menu_add_button(MENU_SYSTEM_REBOOT, parent, "Reboot...");
   ui_menu_add_button(MENU_SYSTEM_POWER_OFF, parent, "Power Off...");
+  update_pending_action_state();
 
   ui_set_on_value_changed_callback(menu_value_changed);
   ui_set_on_text_field_return_callback(menu_text_field_return);
 
-  load_settings();
+  int settings_loaded = load_settings();
+  apply_startup_crt_preset(settings_loaded);
 
   if (use_scaling_params_item[0]->value) {
      if (!do_use_int_scaling(FB_LAYER_VIC, 1 /* silent */)) {
@@ -8755,12 +9923,11 @@ void build_menu(struct menu_item *root) {
   }
 
   // Apply shader params
-  if (!allow_shader_autostart()) {
+  if (!allow_shader()) {
     s_enable_shader_item->value = 0;
     emux_set_int(Setting_VideoFilter, MENU_VIDEO_FILTER_NONE);
   }
-  sanity_check_shader_params(s_enable_shader_item->id);
-  circle_realloc_fbl(FB_LAYER_VIC, allow_shader() ? s_enable_shader_item->value : 0);
+  sanity_check_shader_params();
   handle_shader_param_change();
 
   set_current_dir_names();
@@ -8795,6 +9962,7 @@ void build_menu(struct menu_item *root) {
   if (emux_machine_class == BMC64_MACHINE_CLASS_C128) {
      do_video_settings(FB_LAYER_VDC);
   }
+  refresh_crt_shader_runtime();
   overlay_init(statusbar_padding_item->value,
                c40_80_column_item->value,
                vkbd_transparency_item->value);

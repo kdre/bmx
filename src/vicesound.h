@@ -26,6 +26,10 @@
 
 #include <stdint.h>
 
+#ifndef BMX_SID_DIAGNOSTICS
+#define BMX_SID_DIAGNOSTICS 0
+#endif
+
 // This is the fragment size we give to vice.
 #define FRAG_SIZE 256
 
@@ -34,6 +38,52 @@
 
 // 16 bit sound means this many bytes per sample.
 #define BYTES_PER_SAMPLE 2
+
+struct ViceSoundDiagnostics {
+  uint32_t enabled;
+  uint32_t write_calls;
+  uint32_t write_frames;
+  uint32_t write_gap_max_us;
+  uint32_t write_gap_over_10ms;
+  uint32_t write_gap_over_20ms;
+  uint32_t write_gap_over_40ms;
+  uint32_t write_last_gap_over_10ms_ms;
+  uint32_t write_duration_max_us;
+  uint32_t write_blocked_calls;
+  uint32_t write_blocked_max_us;
+  uint32_t write_short_calls;
+  uint32_t write_last_us;
+  uint32_t hdmi_armed;
+  uint32_t hdmi_chunk_frames;
+  uint32_t hdmi_chunk_expected_us;
+  uint32_t hdmi_chunk_calls;
+  uint32_t hdmi_chunk_gap_max_us;
+  uint32_t hdmi_chunk_late_calls;
+  uint32_t hdmi_chunk_last_late_ms;
+  uint32_t hdmi_refill_max_us;
+  uint32_t hdmi_queue_fill_frames;
+  uint32_t hdmi_queue_margin_min_frames;
+  uint32_t hdmi_underrun_chunks;
+  uint32_t hdmi_underrun_frames;
+  uint32_t hdmi_last_underrun_ms;
+  uint32_t hdmi_underrun_interval_min_us;
+  uint32_t hdmi_underrun_interval_max_us;
+  uint32_t pcm_frames;
+  uint32_t pcm_delta_max_ch0;
+  uint32_t pcm_delta_max_ch1;
+  uint32_t pcm_delta_over_4096_ch0;
+  uint32_t pcm_delta_over_4096_ch1;
+  uint32_t pcm_delta_over_8192_ch0;
+  uint32_t pcm_delta_over_8192_ch1;
+  uint32_t pcm_zero_frames;
+  uint32_t pcm_zero_run_max;
+  uint32_t pcm_zero_samples_ch0;
+  uint32_t pcm_zero_samples_ch1;
+  uint32_t pcm_zero_run_max_ch0;
+  uint32_t pcm_zero_run_max_ch1;
+  uint32_t pcm_constant_run_max_ch0;
+  uint32_t pcm_constant_run_max_ch1;
+};
 
 class ViceSound {
 public:
@@ -64,6 +114,7 @@ public:
   unsigned QueueFillFrames(void) const { return mQueueFillFrames; }
   unsigned QueueMinimumFillFrames(void) const { return mQueueMinimumFillFrames; }
   uint64_t WriteWaitCount(void) const { return mWriteWaitCount; }
+  void GetDiagnostics(ViceSoundDiagnostics *diagnostics) const;
 
 private:
   enum OutputDevice {
@@ -83,9 +134,16 @@ private:
   unsigned mNumChannels;
   unsigned mQueueFillFrames;
   unsigned mQueueMinimumFillFrames;
+  boolean mQueueDiagnosticsArmed;
   uint64_t mWriteWaitCount;
   int mVolumePercent;
   CSpinLock mControlLock;
+  ViceSoundDiagnostics mDiagnostics;
+  s16 mDiagnosticsLastSample[2];
+  boolean mDiagnosticsLastSampleValid[2];
+  uint32_t mDiagnosticsZeroRun;
+  uint32_t mDiagnosticsChannelZeroRun[2];
+  uint32_t mDiagnosticsConstantRun[2];
 };
 
 #endif // VICE_SOUND_H

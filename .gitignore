@@ -28,7 +28,7 @@ kernel_2712.map
 *.a
 *.log
 __pycache__/
-*.pyc
+*.py[cod]
 build/
 .build/
 dist/
@@ -47,7 +47,9 @@ third_party/vice-3.10/src/resid-dtv/siddtvdefs.h
 .toolchains/
 pi4-debug-test/
 pi4-test/
+pi4-v3d-m0-test/
 pi5-test/
+pi5-v3d-test/
 third_party/circle-stdlib-pi4/
 third_party/circle-stdlib-pi5/
 third_party/source-cache/*.tar.gz

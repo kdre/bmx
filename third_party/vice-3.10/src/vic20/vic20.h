@@ -31,7 +31,12 @@
 
 #include "vic.h"
 
+#ifdef RASPI_COMPILE
+extern int circle_cycles_per_sec(void);
+#define VIC20_PAL_CYCLES_PER_SEC        (circle_cycles_per_sec())
+#else
 #define VIC20_PAL_CYCLES_PER_SEC        1108405
+#endif
 #define VIC20_PAL_CYCLES_PER_LINE       71
 #define VIC20_PAL_SCREEN_LINES          312
 #define VIC20_PAL_CYCLE_OFFSET          0
@@ -39,7 +44,11 @@
 #define VIC20_PAL_CYCLES_PER_RFSH (VIC20_PAL_SCREEN_LINES * VIC20_PAL_CYCLES_PER_LINE)
 #define VIC20_PAL_RFSH_PER_SEC    (1.0 / ((double)VIC20_PAL_CYCLES_PER_RFSH / (double)VIC20_PAL_CYCLES_PER_SEC))
 
+#ifdef RASPI_COMPILE
+#define VIC20_NTSC_CYCLES_PER_SEC       (circle_cycles_per_sec())
+#else
 #define VIC20_NTSC_CYCLES_PER_SEC       1022727
+#endif
 #define VIC20_NTSC_CYCLES_PER_LINE      65
 
 /* non interlaced */

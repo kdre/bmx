@@ -444,7 +444,8 @@ static sound_device_t raspi_device =
     raspi_suspend,
     raspi_resume,
     1,
-    2
+    2,
+    true
 };
 
 int sound_init_raspi_device(void)

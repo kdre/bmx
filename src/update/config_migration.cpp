@@ -536,7 +536,7 @@ bool IsKnownConfigManagedKey(const Slice &key)
 bool IsKnownMachineCmdlineKey(const Slice &key)
 {
     static const char *const keys[] = {
-        "fast", "pi5kms", "framebuffer_depth", "bmx_video_mode",
+        "fast", "pi4kms", "pi5kms", "framebuffer_depth", "bmx_video_mode",
         "cycles_per_refresh", "cycles_per_second", "machine_timing",
         "audio_out", "enable_dpi", "hdmi_group", "hdmi_mode",
         "pi5kms_timings", "scaling_params", "scaling_params2",

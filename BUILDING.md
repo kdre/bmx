@@ -30,17 +30,22 @@ Build Circle, VICE and all currently enabled machine kernels:
 tools/pi4/build_pi4.sh
 ```
 
+The default is the AArch64 native-KMS build. Its build, SD and update image
+names are `kernel8.img.*`, matching the Raspberry Pi firmware convention for
+64-bit kernels. Use `--aarch32` for the explicit legacy/DispmanX-capable
+fallback, which continues to use `kernel7l.img.*`.
+
 Kernel outputs:
 
 ```text
-build/pi4/vice310-images/kernel7l.img
-build/pi4/vice310-images/kernel7l.img.c64
-build/pi4/vice310-images/kernel7l.img.c64sc
-build/pi4/vice310-images/kernel7l.img.scpu64
-build/pi4/vice310-images/kernel7l.img.c128
-build/pi4/vice310-images/kernel7l.img.vic20
-build/pi4/vice310-images/kernel7l.img.plus4
-build/pi4/vice310-images/kernel7l.img.pet
+build/pi4/vice310-images/kernel8.img
+build/pi4/vice310-images/kernel8.img.c64
+build/pi4/vice310-images/kernel8.img.c64sc
+build/pi4/vice310-images/kernel8.img.scpu64
+build/pi4/vice310-images/kernel8.img.c128
+build/pi4/vice310-images/kernel8.img.vic20
+build/pi4/vice310-images/kernel8.img.plus4
+build/pi4/vice310-images/kernel8.img.pet
 ```
 
 Stage a boot partition tree:
@@ -50,6 +55,10 @@ tools/pi4/stage_pi4_sd.sh
 ```
 
 By default, Pi4 staging writes to `pi4-test/sdcard`.
+It stages only `armstub8-rpi4.bin` and selects it together with `arm_64bit=1`
+and `kernel_address=0x80000` for the default AArch64 build. An explicit
+`--aarch32` stage instead contains and selects only `armstub7-rpi4.bin` with
+`arm_64bit=0`.
 
 Public source exports do not contain ROM files. In that case staging still
 copies kernels, boot files, keymaps, menus and the SD skeleton, then writes
@@ -63,10 +72,10 @@ tools/install_sd.sh pi4 /path/to/mounted/boot
 ```
 
 The install target must be the exact mounted FAT/vfat boot partition, not a
-directory below it. The script checks that the stage contains `cmdline.txt`,
-`config.txt` and `kernel7l.img.c64`, refuses targets on the current system disk,
-then clears the top level of the target partition before copying the staged
-tree.
+directory below it. The script resolves the selected Pi4 kernel from
+`bmx-active-kernel.txt`, accepts only `kernel8.img.c64` or the explicit
+AArch32 `kernel7l.img.c64`, refuses targets on the current system disk, then
+clears the top level of the target partition before copying the staged tree.
 
 ## Pi5 / Pi500
 
@@ -113,6 +122,12 @@ directory below it. The script checks that the stage contains `cmdline.txt`,
 `config.txt` and `kernel_2712.img.c64`, refuses targets on the current system disk,
 then clears the top level of the target partition before copying the staged
 tree.
+
+Pi4/Pi400 staging enables the direct Pi4KMS path by default through
+`pi4kms=1` in `cmdline.txt`. Set `pi4kms=0` or remove the option to retain the
+firmware/DispmanX presentation path. The direct path currently requires the
+Pi4 V3D output-resolution backend; an unavailable direct path leaves the
+DispmanX path active.
 
 Pi5/Pi500 staging enables Pi5KMS by default through `pi5kms=1` in
 `cmdline.txt`. If a monitor or capture device does not work with Pi5KMS, set

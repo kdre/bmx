@@ -109,7 +109,13 @@ ViceOptions::ViceOptions(void)
       m_audioOut(VCHIQSoundDestinationAuto), m_bDPIEnabled(false),
       m_nFramebufferWidth(0), m_nFramebufferHeight(0),
       m_nFramebufferDepth(16),
-      m_bPi5KmsEnabled(false), m_nHdmiGroup(0), m_nHdmiMode(0),
+      m_bPi4KmsEnabled(false), m_bPi5KmsEnabled(false),
+      m_bV3DCrtEnabled(false),
+      m_bV3DCrtFragmentProbeWaitVblank(true),
+      m_bV3DCrtScanlineWeightOverride(false),
+      m_bV3DCrtScanlineGapBrightnessOverride(false),
+      m_v3dCrtScanlineWeight(0.0f), m_v3dCrtScanlineGapBrightness(0.0f),
+      m_nHdmiGroup(0), m_nHdmiMode(0),
       m_scaling_param_fbw{0,0}, m_scaling_param_fbh{0,0},
       m_scaling_param_sx{0,0}, m_scaling_param_sy{0,0},
       m_raster_skip(false), m_raster_skip2(false),
@@ -125,6 +131,10 @@ ViceOptions::ViceOptions(void)
   s_pThis = this;
   m_pi5KmsTimings[0] = '\0';
   m_pi5KmsMode[0] = '\0';
+  strcpy(m_v3dCrtShader, "off");
+  strcpy(m_v3dCrtTest, "off");
+  strcpy(m_v3dCrtFragmentPackage, "default");
+  strcpy(m_v3dCrtRenderResolution, "source");
   m_networkTestHost[0] = '\0';
   m_networkWifiSSID[0] = '\0';
   m_networkWifiPSK[0] = '\0';
@@ -217,11 +227,69 @@ ViceOptions::ViceOptions(void)
       } else {
         m_bDPIEnabled = false;
       }
+    } else if (strcmp(pOption, "pi4kms") == 0) {
+      if (strcmp(pValue, "true") == 0 || strcmp(pValue, "1") == 0) {
+        m_bPi4KmsEnabled = true;
+      } else {
+        m_bPi4KmsEnabled = false;
+      }
     } else if (strcmp(pOption, "pi5kms") == 0) {
       if (strcmp(pValue, "true") == 0 || strcmp(pValue, "1") == 0) {
         m_bPi5KmsEnabled = true;
       } else {
         m_bPi5KmsEnabled = false;
+      }
+    } else if (strcmp(pOption, "v3dcrt") == 0 ||
+               strcmp(pOption, "pi5v3d") == 0) {
+      if (strcmp(pValue, "true") == 0 || strcmp(pValue, "1") == 0) {
+        m_bV3DCrtEnabled = true;
+      } else {
+        m_bV3DCrtEnabled = false;
+      }
+    } else if (strcmp(pOption, "v3dcrt_shader") == 0 ||
+               strcmp(pOption, "pi5v3d_shader") == 0) {
+      strncpy(m_v3dCrtShader, pValue, sizeof m_v3dCrtShader - 1);
+      m_v3dCrtShader[sizeof m_v3dCrtShader - 1] = '\0';
+    } else if (strcmp(pOption, "v3dcrt_test") == 0 ||
+               strcmp(pOption, "pi5v3d_test") == 0) {
+      strncpy(m_v3dCrtTest, pValue, sizeof m_v3dCrtTest - 1);
+      m_v3dCrtTest[sizeof m_v3dCrtTest - 1] = '\0';
+#ifdef BMC64_DEBUG_PROFILE
+    } else if (strcmp(pOption, "v3dcrt_fragment_package") == 0 ||
+               strcmp(pOption, "pi5v3d_fragment_package") == 0) {
+      strncpy(m_v3dCrtFragmentPackage, pValue,
+              sizeof m_v3dCrtFragmentPackage - 1);
+      m_v3dCrtFragmentPackage[sizeof m_v3dCrtFragmentPackage - 1] = '\0';
+#endif
+    } else if (strcmp(pOption, "v3dcrt_render_resolution") == 0 ||
+               strcmp(pOption, "pi5v3d_render_resolution") == 0) {
+      strncpy(m_v3dCrtRenderResolution, pValue,
+              sizeof m_v3dCrtRenderResolution - 1);
+      m_v3dCrtRenderResolution[sizeof m_v3dCrtRenderResolution - 1] = '\0';
+    } else if (strcmp(pOption, "v3dcrt_fragment_probe_wait_vblank") == 0 ||
+               strcmp(pOption, "v3dcrt_fragment_probe_vblank") == 0 ||
+               strcmp(pOption, "pi5v3d_fragment_probe_wait_vblank") == 0 ||
+               strcmp(pOption, "pi5v3d_fragment_probe_vblank") == 0) {
+      if (strcmp(pValue, "true") == 0 || strcmp(pValue, "1") == 0) {
+        m_bV3DCrtFragmentProbeWaitVblank = true;
+      } else {
+        m_bV3DCrtFragmentProbeWaitVblank = false;
+      }
+    } else if (strcmp(pOption, "v3dcrt_scanline_weight") == 0 ||
+               strcmp(pOption, "pi5v3d_scanline_weight") == 0) {
+      float value;
+      if (GetFloat(pValue, &value) && value >= 0.0f && value <= 15.0f) {
+        m_bV3DCrtScanlineWeightOverride = true;
+        m_v3dCrtScanlineWeight = value;
+      }
+    } else if (strcmp(pOption, "v3dcrt_scanline_gap_brightness") == 0 ||
+               strcmp(pOption, "v3dcrt_scanline_gap") == 0 ||
+               strcmp(pOption, "pi5v3d_scanline_gap_brightness") == 0 ||
+               strcmp(pOption, "pi5v3d_scanline_gap") == 0) {
+      float value;
+      if (GetFloat(pValue, &value) && value >= 0.0f && value <= 1.0f) {
+        m_bV3DCrtScanlineGapBrightnessOverride = true;
+        m_v3dCrtScanlineGapBrightness = value;
       }
     } else if (strcmp(pOption, "hdmi_group") == 0) {
       unsigned value = GetDecimal(pValue);
@@ -443,7 +511,55 @@ unsigned ViceOptions::GetFramebufferDepth(void) const {
   return m_nFramebufferDepth;
 }
 
+bool ViceOptions::Pi4KmsEnabled(void) const { return m_bPi4KmsEnabled; }
+
 bool ViceOptions::Pi5KmsEnabled(void) const { return m_bPi5KmsEnabled; }
+
+bool ViceOptions::V3DCrtEnabled(void) const { return m_bV3DCrtEnabled; }
+
+const char *ViceOptions::GetV3DCrtShader(void) const {
+  return m_v3dCrtShader;
+}
+
+const char *ViceOptions::GetV3DCrtTest(void) const {
+  return m_v3dCrtTest;
+}
+
+const char *ViceOptions::GetV3DCrtFragmentPackage(void) const {
+  return m_v3dCrtFragmentPackage;
+}
+
+const char *ViceOptions::GetV3DCrtRenderResolution(void) const {
+  return m_v3dCrtRenderResolution;
+}
+
+bool ViceOptions::GetV3DCrtFragmentProbeWaitVblank(void) const {
+  return m_bV3DCrtFragmentProbeWaitVblank;
+}
+
+bool ViceOptions::GetV3DCrtScanlineWeight(float *value) const {
+  if (value != 0) {
+    *value = m_v3dCrtScanlineWeight;
+  }
+  return m_bV3DCrtScanlineWeightOverride;
+}
+
+bool ViceOptions::GetV3DCrtScanlineGapBrightness(float *value) const {
+  if (value != 0) {
+    *value = m_v3dCrtScanlineGapBrightness;
+  }
+  return m_bV3DCrtScanlineGapBrightnessOverride;
+}
+
+bool ViceOptions::Pi5V3DEnabled(void) const { return V3DCrtEnabled(); }
+
+const char *ViceOptions::GetPi5V3DShader(void) const {
+  return GetV3DCrtShader();
+}
+
+const char *ViceOptions::GetPi5V3DTest(void) const {
+  return GetV3DCrtTest();
+}
 
 unsigned ViceOptions::GetHdmiGroup(void) const { return m_nHdmiGroup; }
 
@@ -625,6 +741,57 @@ unsigned ViceOptions::GetDecimal(char *pString) {
   }
 
   return nResult;
+}
+
+bool ViceOptions::GetFloat(char *pString, float *pValue) {
+  if (pString == 0 || pValue == 0 || *pString == '\0') {
+    return false;
+  }
+
+  unsigned whole = 0;
+  unsigned fraction = 0;
+  unsigned divisor = 1;
+  bool after_decimal = false;
+  bool seen_digit = false;
+
+  char chChar;
+  while ((chChar = *pString++) != '\0') {
+    if (chChar == '.') {
+      if (after_decimal) {
+        return false;
+      }
+      after_decimal = true;
+      continue;
+    }
+
+    if (!('0' <= chChar && chChar <= '9')) {
+      return false;
+    }
+
+    seen_digit = true;
+    const unsigned digit = (unsigned)(chChar - '0');
+    if (after_decimal) {
+      if (divisor <= 1000000U) {
+        fraction = fraction * 10 + digit;
+        divisor *= 10;
+      }
+    } else {
+      if (whole > 1000000U) {
+        return false;
+      }
+      whole = whole * 10 + digit;
+    }
+  }
+
+  if (!seen_digit) {
+    return false;
+  }
+
+  *pValue = (float)whole;
+  if (divisor > 1) {
+    *pValue += (float)fraction / (float)divisor;
+  }
+  return true;
 }
 
 bool ViceOptions::ParseIPv4(char *pString, u8 out[4]) {

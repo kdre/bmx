@@ -12,6 +12,8 @@ BUILD_MACHINES=()
 BUILD_JOBS="${BMX_BUILD_JOBS:-$(nproc)}"
 GENERATE_LISTING="${BMX_GENERATE_LISTING:-0}"
 CLEAN_BUILD=0
+PI4_AARCH64=1
+PI4_ARCH_OPTION=""
 
 usage() {
   cat <<EOF
@@ -29,6 +31,8 @@ Options:
   --listing      generate full kernel disassembly listings
   --no-listing   skip disassembly listings (default)
   --clean        discard the selected configuration cache before building
+  --aarch64      build native-KMS-only 64-bit Pi4 kernels (default)
+  --aarch32      build legacy-capable 32-bit Pi4 kernels
 EOF
 }
 
@@ -87,6 +91,24 @@ while (($# > 0)); do
       CLEAN_BUILD=1
       shift
       ;;
+    --aarch64)
+      if [ -n "$PI4_ARCH_OPTION" ]; then
+        echo "--aarch64 and --aarch32 may be specified only once" >&2
+        exit 1
+      fi
+      PI4_ARCH_OPTION=aarch64
+      PI4_AARCH64=1
+      shift
+      ;;
+    --aarch32)
+      if [ -n "$PI4_ARCH_OPTION" ]; then
+        echo "--aarch64 and --aarch32 may be specified only once" >&2
+        exit 1
+      fi
+      PI4_ARCH_OPTION=aarch32
+      PI4_AARCH64=0
+      shift
+      ;;
     --stage-dir)
       if [ -z "${2:-}" ]; then
         echo "--stage-dir requires a directory" >&2
@@ -124,12 +146,23 @@ export BMC64_BUILD_PROFILE="$BUILD_PROFILE"
 export BMX_BUILD_JOBS="$BUILD_JOBS"
 export BMX_GENERATE_LISTING="$GENERATE_LISTING"
 export BMX_BUILD_CLEAN="$CLEAN_BUILD"
+export BMX_PI4_AARCH64="$PI4_AARCH64"
 
-cat <<'EOF'
-Building Pi4/Pi400 VICE 3.10 kernels with pinned Mbed TLS support.
+if [ "$PI4_AARCH64" -eq 1 ]; then
+  STAGE_ARGS+=("--aarch64")
+  cat <<'EOF'
+Building Pi4/Pi400 AArch64 native-KMS VICE 3.10 kernels with pinned Mbed TLS support.
 
 Currently wired VICE 3.10 machines: C64 (x64/x64sc), SCPU64, C128, VIC20, Plus/4, PET.
 EOF
+else
+  STAGE_ARGS+=("--aarch32")
+  cat <<'EOF'
+Building Pi4/Pi400 AArch32 legacy-capable VICE 3.10 kernels with pinned Mbed TLS support.
+
+Currently wired VICE 3.10 machines: C64 (x64/x64sc), SCPU64, C128, VIC20, Plus/4, PET.
+EOF
+fi
 
 . "$SRC_DIR/tools/pi4/vice310_build_common.sh"
 
@@ -152,5 +185,6 @@ if [ "${#BUILD_MACHINES[@]}" -gt 0 ]; then
 fi
 build_vice310_machines "${BMX_PI4_MACHINES[@]}"
 if [ "$BUILD_ONLY" -eq 0 ]; then
-  "$SRC_DIR/tools/pi4/stage_pi4_sd.sh" "${STAGE_ARGS[@]}"
+  "$SRC_DIR/tools/pi4/stage_pi4_sd.sh" \
+    --kernel-dir "$BMX_VARIANT_ROOT/images" "${STAGE_ARGS[@]}"
 fi

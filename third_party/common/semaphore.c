@@ -1,60 +1,46 @@
 #include "semaphore.h"
 
-void sem_dec(uint32_t* semaphore) {
-#if AARCH == 64
-    for (;;) {
-      uint32_t value = __atomic_load_n(semaphore, __ATOMIC_ACQUIRE);
-      if (value == 0) {
-        __asm__ volatile ("wfe" ::: "memory");
-        continue;
-      }
+_Static_assert(__atomic_always_lock_free(sizeof(uint32_t), 0),
+               "uint32_t atomics must be lock-free");
 
-      if (__atomic_compare_exchange_n(semaphore, &value, value - 1, 0,
-                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        return;
-      }
-    }
+static inline void sem_wait_for_event(void) {
+#if defined(__arm__) || defined(__aarch64__)
+    __asm__ volatile ("wfe" ::: "memory");
 #else
-    asm volatile (
-      "1:  LDREX    r1, [r0]\n"
-      "    CMP	    r1, #0\n"
-      "    BEQ     2f             \n"
-      "    SUB     r1, #1        \n"
-      "    STREX   r2, r1, [r0]  \n"
-      "    CMP     r2, #0        \n"
-      "    BNE     1b            \n"
-      "    DMB                   \n"
-      "    B       3f\n"
-      "2: \n" 
-      "    wfe \n"
-      "    B       1b\n"
-      "3:\n"
-    );
+    /* Host tests use a portable spin-wait when WFE is unavailable. */
+    __atomic_signal_fence(__ATOMIC_ACQUIRE);
 #endif
 }
 
-void sem_inc(uint32_t* semaphore) {
-#if AARCH == 64
-    uint32_t old = __atomic_fetch_add(semaphore, 1, __ATOMIC_ACQ_REL);
-    if (old == 0) {
-      __asm__ volatile ("dmb ishst" ::: "memory");
-      __asm__ volatile ("sev" ::: "memory");
-    }
-#else
-    asm volatile (
-      "1:   LDREX   r1, [r0]\n"
-      "     ADD     r1, #1\n"
-      "     STREX   r2, r1, [r0]\n"
-      "     CMP     r2, #0\n"
-      "     BNE     1b\n"
-      "     CMP     r0, #1\n"
-      "     DMB\n"
-      "     BGE     2f\n"
-      "     B       3f\n"
-      "2:\n"
-      "     DSB\n"
-      "     SEV\n"
-      "3:\n"
-    );
+static inline void sem_send_event(void) {
+#if defined(__arm__) || defined(__aarch64__)
+    __asm__ volatile ("sev" ::: "memory");
 #endif
+}
+
+void sem_dec(uint32_t* semaphore) {
+    uint32_t value = __atomic_load_n(semaphore, __ATOMIC_RELAXED);
+
+    for (;;) {
+        while (value != 0) {
+            if (__atomic_compare_exchange_n(semaphore, &value, value - 1, 0,
+                                            __ATOMIC_ACQUIRE,
+                                            __ATOMIC_RELAXED)) {
+                return;
+            }
+        }
+
+        sem_wait_for_event();
+        value = __atomic_load_n(semaphore, __ATOMIC_RELAXED);
+    }
+}
+
+void sem_inc(uint32_t* semaphore) {
+    uint32_t old = __atomic_fetch_add(semaphore, 1, __ATOMIC_RELEASE);
+
+    if (old == 0) {
+        /* Publish the 0 -> 1 transition before waking sleeping cores. */
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        sem_send_event();
+    }
 }

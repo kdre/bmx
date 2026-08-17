@@ -1292,6 +1292,16 @@ int RunNetworkUpdateJob(bmx::update::UpdateServiceOperation operation,
         const bmx::NetworkJobPollStatus status =
             bmx::PollNetworkUpdateJob(token, &snapshot);
         if (status == bmx::NetworkJobPollStatus::Complete) {
+            if (operation != bmx::update::UpdateServiceOperation::Cancel &&
+                snapshot.progress_valid) {
+                ui_update_progress_present(
+                    static_cast<unsigned>(snapshot.progress.phase),
+                    static_cast<unsigned>(snapshot.progress.progress_per_mille),
+                    snapshot.progress.determinate ? 1 : 0,
+                    snapshot.progress.cancel_enabled ? 1 : 0,
+                    snapshot.progress.cancel_pending ? 1 : 0);
+                (void) ui_update_progress_pump();
+            }
             snprintf(message, message_size, "%s", snapshot.message);
             message[message_size - 1U] = '\0';
             if (snapshot.result == bmx::update::kUpdateServiceRebootReady) {

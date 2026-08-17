@@ -6,9 +6,15 @@
 #include "remote/file_response_stream.h"
 #include "update/fatfs_update_filesystem.h"
 #include "viceemulatorcore.h"
+#if BMX_V3D_RENDER_TEST_KERNEL
+#include "v3dtest/network_render_test.h"
+#endif
 
 #include <circle/logger.h>
 #include <circle/bcmrandom.h>
+#ifdef BMC64_USE_EMU_MULTICORE
+#include <circle/multicore.h>
+#endif
 #include <circle/sched/scheduler.h>
 #include <circle/timer.h>
 
@@ -236,6 +242,14 @@ void RemoteService::Run()
 
 void RemoteService::Stop()
 {
+    const unsigned long stop_started_us = CTimer::GetClockTicks();
+#ifdef BMC64_USE_EMU_MULTICORE
+    const unsigned stop_core = CMultiCoreSupport::ThisCore();
+#else
+    const unsigned stop_core = 0U;
+#endif
+    printf("developer: reboot phase=remote-stop-begin core=%u running=%u\r\n",
+           stop_core, running() ? 1U : 0U);
     __atomic_store_n(&stop_requested_, true, __ATOMIC_RELEASE);
     if (task_ != 0) {
         // A task which exited on a listener error may already have been
@@ -244,10 +258,20 @@ void RemoteService::Stop()
         // state, so there is nothing left to wait for or dereference.
         if (running()) {
 #ifdef BMC64_USE_EMU_MULTICORE
-            // Core 0 owns and continuously drives the scheduler. Waiting here
-            // must not enter that scheduler from the VICE core.
-            while (running()) {
-                CTimer::SimpleusDelay(100U);
+            if (stop_core == 0U) {
+                // A shutdown explicitly initiated on the scheduler owner
+                // must wait cooperatively so the HTTP task can observe the
+                // stop request and exit.
+                printf("developer: reboot phase=remote-stop-scheduler-wait\r\n");
+                task_->WaitForTermination();
+            } else {
+                // Pi4 and Pi5 normally shut down from the VICE core.  They
+                // must leave the Core-0 scheduler independent.
+                printf("developer: reboot phase=remote-stop-foreign-wait "
+                       "core=%u\r\n", stop_core);
+                while (running()) {
+                    CTimer::SimpleusDelay(100U);
+                }
             }
 #else
             task_->WaitForTermination();
@@ -268,6 +292,8 @@ void RemoteService::Stop()
     server_ = 0;
     delete listener_;
     listener_ = 0;
+    printf("developer: reboot phase=remote-stop-done core=%u elapsed_us=%lu\r\n",
+           stop_core, CTimer::GetClockTicks() - stop_started_us);
 }
 
 bool RemoteService::TakeCommand(RemoteCommand *command)
@@ -305,6 +331,7 @@ bool RemoteService::ReadStatus(DeveloperStatusSnapshot *status)
     status->machine = bmc64::CurrentMachine().display_name;
     status->uptime_ms = CTimer::GetClockTicks64() / 1000U;
     status->network_ready = network_enabled && network_ready;
+    (void)ReadV3dTestStatus(&status->v3d_test);
     status->ram_total_kb = diagnostics.ram_total_kb;
     status->heap_free_kb = diagnostics.heap_free_kb;
     status->heap_low_free_kb = diagnostics.heap_low_free_kb;
@@ -446,7 +473,7 @@ DeveloperMemoryStatus RemoteService::ReadMemory(
     if (status != BmxApiExchangeStatus::Ok ||
         response.status != MENU_CONTROL_OK || response.binary.data == 0 ||
         response.binary.size != size) {
-        free(response.binary.data);
+        ReleaseBinaryPayload(&response.binary);
         return DeveloperMemoryStatus::Unavailable;
     }
     *data = response.binary.data;
@@ -555,6 +582,24 @@ UsbDiagnosticRequestStatus RemoteService::StopUsbDiagnostic()
                : UsbDiagnosticRequestStatus::Unavailable;
 }
 
+V3dTestReviewRequestStatus RemoteService::RequestV3dTestReview(
+    V3dTestReviewAction action, uint32_t index)
+{
+    return bmx::remote::RequestV3dTestReview(action, index);
+}
+
+bool RemoteService::CaptureV3dTestReviewScreenshot(
+    uint32_t maximum_width, BmxBinaryPayload *payload)
+{
+#if BMX_V3D_RENDER_TEST_KERNEL
+    return bmx_v3d_test::CaptureReviewScreenshot(maximum_width, payload);
+#else
+    (void) maximum_width;
+    (void) payload;
+    return false;
+#endif
+}
+
 void RemoteService::Yield()
 {
     if (server_ != 0) {
@@ -627,7 +672,7 @@ BmxApiExchangeStatus RemoteService::ExchangeControl(
             BmxApiResponse abandoned = BmxApiResponse();
             if (mailbox_.CancelControl(token, &abandoned) &&
                 abandoned.binary.data != 0) {
-                free(abandoned.binary.data);
+                ReleaseBinaryPayload(&abandoned.binary);
             }
             if (request.operation == BmxApiOperation::Audio ||
                 request.operation == BmxApiOperation::AudioWav) {

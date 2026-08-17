@@ -336,7 +336,16 @@ int is_composite() {
       timing == MACHINE_TIMING_PAL_COMPOSITE;
 }
 
-// Disable shader for composite or models newer than Pi3.
+// Legacy GLES shaders run only on Pi <= 3. Newer boards must expose a
+// board-specific shader backend before the shared CRT menu can enable them.
 int allow_shader() {
-  return circle_get_model() <= 3 && !is_composite();
+  if (is_composite()) {
+    return 0;
+  }
+
+  if (circle_get_model() <= 3) {
+    return 1;
+  }
+
+  return circle_shader_backend_available();
 }

@@ -10,6 +10,7 @@ destination from an empty directory using only declarations in sd-layout.toml.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -75,9 +76,11 @@ class StageError(ValueError):
 class StageContext:
     board: str
     profile: str
+    pi4_aarch64: bool
     developer_mode: bool
     api_mode: bool
     omit_roms: bool
+    cmdline_options: tuple[str, ...]
     kernel_dir: Path
     stage_dir: Path
     layout_path: Path
@@ -91,13 +94,66 @@ class KernelContract:
     machines: tuple[str, ...]
 
 
+def load_stage_layout(context: StageContext):
+    """Load the canonical layout and derive the selected Pi4 architecture.
+
+    The repository policy describes the release-default AArch64 Pi4 tree.
+    A local AArch32 stage keeps the old kernel7l names without changing that
+    signed/update-facing policy.  Each stage contains only the armstub selected
+    by its generated config.txt; the canonical policy retains both names so a
+    signed AArch64 update can remove the obsolete AArch32 armstub.
+    """
+
+    try:
+        from sd_layout import SdLayoutError, load_sd_layout
+    except ImportError as exc:
+        raise StageError("tools/sd_layout.py is unavailable") from exc
+    try:
+        layout = load_sd_layout(context.layout_path)
+    except SdLayoutError as exc:
+        raise StageError(str(exc)) from exc
+    if context.board != "pi4":
+        return layout
+
+    current_base = "kernel8.img"
+    legacy_base = "kernel7l.img"
+    rules = []
+    for rule in layout.rules:
+        changed = rule
+        is_pi4_rule = rule.scope in {"both", "pi4"}
+        if (
+            context.pi4_aarch64
+            and is_pi4_rule
+            and rule.target == "armstub7-rpi4.bin"
+        ):
+            changed = dataclasses.replace(changed, enabled=False)
+        if not context.pi4_aarch64 and is_pi4_rule and rule.mode == "kernel":
+            target = rule.target
+            source = rule.source
+            if target == current_base or target.startswith(current_base + "."):
+                target = legacy_base + target[len(current_base):]
+            if source is not None:
+                prefix = f"kernels/{current_base}"
+                if source == prefix or source.startswith(prefix + "."):
+                    source = f"kernels/{legacy_base}" + source[len(prefix):]
+            changed = dataclasses.replace(changed, target=target, source=source)
+        if (
+            not context.pi4_aarch64
+            and is_pi4_rule
+            and rule.target == "armstub8-rpi4.bin"
+        ):
+            changed = dataclasses.replace(changed, enabled=False)
+        rules.append(changed)
+    return dataclasses.replace(layout, rules=tuple(rules))
+
+
 def load_kernel_contract(context: StageContext) -> KernelContract:
     try:
         from sd_layout import SdLayoutError, kernel_targets
     except ImportError as exc:
         raise StageError("tools/sd_layout.py is unavailable") from exc
     try:
-        targets = kernel_targets(context.layout_path, context.board)
+        targets = kernel_targets(load_stage_layout(context), context.board)
     except SdLayoutError as exc:
         raise StageError(str(exc)) from exc
     bases: set[str] = set()
@@ -190,6 +246,11 @@ def validate_kernel_inputs(context: StageContext, contract: KernelContract) -> N
             context.kernel_dir / f"{base}.{machine}",
             f"{context.board} {machine} kernel",
         )
+    if context.board == "pi4" and context.pi4_aarch64:
+        _require_regular(
+            context.kernel_dir / "armstub8-rpi4.bin",
+            "Pi4 AArch64 armstub",
+        )
 
 
 def _insert_managed_lines(raw: str, lines: Sequence[str], *, pi4: bool) -> str:
@@ -234,6 +295,14 @@ def _append_first_line_option(raw: str, option: str) -> str:
     return first + " " + option + separator + rest
 
 
+def _first_line_has_option(raw: str, *keys: str) -> bool:
+    first = raw.partition("\n")[0]
+    return any(
+        token.partition("=")[0] in keys and "=" in token
+        for token in first.split()
+    )
+
+
 def _set_first_line_option(raw: str, key: str, value: str | None) -> str:
     first, separator, rest = raw.partition("\n")
     if not separator:
@@ -263,7 +332,26 @@ def render_config_and_cmdline(
             (f"kernel={kernel_name}", "hdmi_group:0=1", "hdmi_mode:0=19"),
             pi4=True,
         )
-        cmdline = re.sub(r"pi5kms=[^ ]* *", "", cmdline, count=1)
+        cmdline = _set_first_line_option(cmdline, "pi5kms", None)
+        if not _first_line_has_option(cmdline, "pi4kms"):
+            cmdline = _append_first_line_option(cmdline, "pi4kms=1")
+        if context.pi4_aarch64:
+            if not _first_line_has_option(cmdline, "v3dcrt", "pi4v3d"):
+                cmdline = _append_first_line_option(cmdline, "v3dcrt=1")
+            if not _first_line_has_option(
+                cmdline, "v3dcrt_shader", "pi4v3d_shader"
+            ):
+                cmdline = _append_first_line_option(
+                    cmdline, "v3dcrt_shader=crt"
+                )
+            if not _first_line_has_option(
+                cmdline,
+                "v3dcrt_render_resolution",
+                "pi4v3d_render_resolution",
+            ):
+                cmdline = _append_first_line_option(
+                    cmdline, "v3dcrt_render_resolution=output"
+                )
         if context.profile == "debug" and "enable_uart=1\n" not in config:
             config += (
                 "\nenable_uart=1\n"
@@ -276,19 +364,45 @@ def render_config_and_cmdline(
             config += "init_uart_baud=115200\n"
         if context.profile == "debug" and "init_uart_clock=" not in config:
             config += "init_uart_clock=48000000\n"
-        config += (
-            "\narm_64bit=0\n"
-            "initial_turbo=0\n"
-            "\n[pi4]\n"
-            "armstub=armstub7-rpi4.bin\n"
-            "max_framebuffers=2\n"
-            "\n[cm4]\n"
-            "otg_mode=1\n"
-        )
+        if context.pi4_aarch64:
+            config += (
+                "\narm_64bit=1\n"
+                "kernel_address=0x80000\n"
+                "initial_turbo=0\n"
+                "\n[pi4]\n"
+                "armstub=armstub8-rpi4.bin\n"
+                "max_framebuffers=2\n"
+                "\n[cm4]\n"
+                "otg_mode=1\n"
+            )
+        else:
+            config += (
+                "\narm_64bit=0\n"
+                "initial_turbo=0\n"
+                "\n[pi4]\n"
+                "armstub=armstub7-rpi4.bin\n"
+                "max_framebuffers=2\n"
+                "\n[cm4]\n"
+                "otg_mode=1\n"
+            )
     else:
         config = _insert_managed_lines(config, (f"kernel={kernel_name}",), pi4=False)
         if "gpiofanpin=" not in cmdline:
             cmdline = _append_first_line_option(cmdline, "gpiofanpin=45")
+        if not _first_line_has_option(cmdline, "v3dcrt", "pi5v3d"):
+            cmdline = _append_first_line_option(cmdline, "v3dcrt=1")
+        if not _first_line_has_option(
+            cmdline, "v3dcrt_shader", "pi5v3d_shader"
+        ):
+            cmdline = _append_first_line_option(cmdline, "v3dcrt_shader=crt")
+        if not _first_line_has_option(
+            cmdline,
+            "v3dcrt_render_resolution",
+            "pi5v3d_render_resolution",
+        ):
+            cmdline = _append_first_line_option(
+                cmdline, "v3dcrt_render_resolution=output"
+            )
         if context.profile == "debug" and "enable_uart=1\n" not in config:
             config += "\nenable_uart=1\nuart_2ndstage=1\ndtoverlay=uart0-pi5\n"
         config += "\ninitial_turbo=0\n\n[pi5]\narm_64bit=1\n"
@@ -301,6 +415,10 @@ def render_config_and_cmdline(
     cmdline = _set_first_line_option(
         cmdline, "api_mode", "1" if context.api_mode else None,
     )
+
+    for assignment in context.cmdline_options:
+        key, _, value = assignment.partition("=")
+        cmdline = _set_first_line_option(cmdline, key, value)
 
     active = _replace_kernel_with_selector(config, kernel_name, "bmx-active-kernel.txt")
     selector = f"# BMX-KERNEL-SELECTOR-V2\nkernel={kernel_name}\n"
@@ -318,10 +436,23 @@ def prepare_utils(generated: Path) -> None:
 
 
 def prepare_profile_files(context: StageContext, generated: Path) -> None:
-    _write_text(
-        generated / "BUILD-PROFILE.txt",
-        BUILD_PROFILE_TEXT.format(profile=context.profile),
-    )
+    profile_text = BUILD_PROFILE_TEXT.format(profile=context.profile)
+    if context.board == "pi4":
+        profile_text += (
+            "\nPi 4 / Pi 400:\n"
+            + (
+                "- AArch64 native-KMS build with armstub8-rpi4.bin\n"
+                if context.pi4_aarch64
+                else "- AArch32 legacy-capable build with armstub7-rpi4.bin\n"
+            )
+        )
+    else:
+        profile_text += (
+            "\nPi 5 / Pi 500:\n"
+            "- release and debug staging enable the V3D CRT backend; "
+            "the BMX master switch controls rendering\n"
+        )
+    _write_text(generated / "BUILD-PROFILE.txt", profile_text)
     if context.profile == "debug":
         _write_text(generated / "UART-DEBUG.txt", UART_DEBUG_TEXT)
 
@@ -380,14 +511,13 @@ def persist_source_inventory(
     try:
         from sd_layout import (
             SdLayoutError,
-            load_sd_layout,
             save_source_inventory,
             scan_source_inventory,
         )
     except ImportError as exc:
         raise StageError("tools/sd_layout.py is unavailable") from exc
     try:
-        layout = load_sd_layout(context.layout_path)
+        layout = load_stage_layout(context)
         inventory = scan_source_inventory(
             layout,
             context.board,
@@ -416,9 +546,10 @@ def assemble(context: StageContext, generated: Path) -> tuple[str, ...]:
 
     overrides = source_overrides(context, generated)
     features = () if context.omit_roms else ("roms",)
+    layout = load_stage_layout(context)
     try:
         reportable_roms = feature_targets(
-            context.layout_path,
+            layout,
             "roms",
             context.board,
             context.profile,
@@ -427,7 +558,7 @@ def assemble(context: StageContext, generated: Path) -> tuple[str, ...]:
             missing_roms = reportable_roms
         else:
             plan = plan_stage(
-                context.layout_path,
+                layout,
                 board=context.board,
                 source_overrides=overrides,
                 profile=context.profile,
@@ -444,7 +575,7 @@ def assemble(context: StageContext, generated: Path) -> tuple[str, ...]:
         # so inventory only after that final generated-source mutation.
         persist_source_inventory(context, generated)
         assemble_stage(
-            context.layout_path,
+            layout,
             board=context.board,
             source_overrides=overrides,
             destination=context.stage_dir,
@@ -476,6 +607,23 @@ def parse_args(argv: Sequence[str] | None = None) -> StageContext:
     parser.add_argument("--board", choices=BOARDS, required=True)
     parser.add_argument("--profile", choices=("release", "debug"))
     parser.add_argument("--debug-uart", action="store_true")
+    pi4_architecture = parser.add_mutually_exclusive_group()
+    pi4_architecture.add_argument(
+        "--aarch64", dest="pi4_aarch64", action="store_true",
+        help="stage a Pi4 AArch64/native-KMS boot configuration (default)",
+    )
+    pi4_architecture.add_argument(
+        "--aarch32", dest="pi4_aarch64", action="store_false",
+        help="stage a Pi4 AArch32/legacy-capable boot configuration",
+    )
+    parser.set_defaults(pi4_aarch64=None)
+    parser.add_argument(
+        "--cmdline-option",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="set or override one staged cmdline.txt option; may be repeated",
+    )
     developer_mode = parser.add_mutually_exclusive_group()
     developer_mode.add_argument(
         "--developer-mode", dest="developer_mode", action="store_true",
@@ -508,11 +656,19 @@ def parse_args(argv: Sequence[str] | None = None) -> StageContext:
     )
     args = parser.parse_args(argv)
 
+    if args.board != "pi4" and args.pi4_aarch64 is not None:
+        parser.error("--aarch64/--aarch32 are Pi4-only staging options")
+    pi4_aarch64 = args.pi4_aarch64 is not False
+
     profile = args.profile or os.environ.get("BMC64_BUILD_PROFILE", "release")
     if args.debug_uart:
         profile = "debug"
     if profile not in ("release", "debug"):
         parser.error(f"unsupported build profile: {profile}")
+    for assignment in args.cmdline_option:
+        key, separator, _ = assignment.partition("=")
+        if not separator or not key:
+            parser.error("--cmdline-option requires KEY=VALUE")
     kernel_dir = (args.kernel_dir or _default_kernel_dir(args.board)).resolve()
     stage_dir = (args.stage_dir or _default_stage(args.board)).resolve()
     layout_path = args.layout.resolve()
@@ -524,9 +680,11 @@ def parse_args(argv: Sequence[str] | None = None) -> StageContext:
     return StageContext(
         board=args.board,
         profile=profile,
+        pi4_aarch64=pi4_aarch64,
         developer_mode=args.developer_mode,
         api_mode=args.api_mode,
         omit_roms=args.omit_roms,
+        cmdline_options=tuple(args.cmdline_option),
         kernel_dir=kernel_dir,
         stage_dir=stage_dir,
         layout_path=layout_path,

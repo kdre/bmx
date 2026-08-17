@@ -25,7 +25,11 @@ extern "C" {
 #include "third_party/common/circle.h"
 }
 
-#if defined(ARM_ALLOW_MULTI_CORE) && RASPPI != 4
+#ifndef BMX_EMU_MULTICORE
+#define BMX_EMU_MULTICORE 0
+#endif
+
+#if defined(ARM_ALLOW_MULTI_CORE) && BMX_EMU_MULTICORE
 #define BMC64_USE_EMU_MULTICORE 1
 #endif
 
@@ -61,6 +65,7 @@ private:
   ViceOptions *m_options;
 
   void RunMainVice(bool wait);
+  void WaitForLaunch();
   void ComputeResidFilter(int model);
 };
 

@@ -29,6 +29,8 @@ Options:
   --listing      generate full kernel disassembly listings
   --no-listing   skip disassembly listings (default)
   --clean        discard the selected configuration cache before building
+  --cmdline-option
+                 set or override one staged cmdline.txt option; may be passed multiple times
 EOF
 }
 
@@ -96,6 +98,14 @@ while (($# > 0)); do
       STAGE_DIR_SET=1
       shift 2
       ;;
+    --cmdline-option)
+      if [ -z "${2:-}" ] || [[ "$2" != *=* ]] || [[ "$2" == =* ]]; then
+        echo "--cmdline-option requires KEY=VALUE" >&2
+        exit 1
+      fi
+      STAGE_ARGS+=("--cmdline-option" "$2")
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -152,5 +162,6 @@ if [ "${#BUILD_MACHINES[@]}" -gt 0 ]; then
 fi
 build_vice310_machines "${BMX_PI5_MACHINES[@]}"
 if [ "$BUILD_ONLY" -eq 0 ]; then
-  "$SRC_DIR/tools/pi5/stage_pi5_sd.sh" "${STAGE_ARGS[@]}"
+  "$SRC_DIR/tools/pi5/stage_pi5_sd.sh" \
+    --kernel-dir "$BMX_VARIANT_ROOT/images" "${STAGE_ARGS[@]}"
 fi

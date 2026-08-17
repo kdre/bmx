@@ -567,6 +567,24 @@ from = "sdcard/modem/hayes_long_connect.wav"
 to = "modem/hayes_long_connect.wav"
 mode = "replace"
 
+# CRT presets are runtime inputs, not optional documentation.  Without this
+# directory the V3D backend deliberately falls back to effects-off and disables
+# the complete CRT control surface.
+[[both.file]]
+from = "sdcard/crt/Default.crt"
+to = "crt/Default.crt"
+mode = "replace"
+
+[[both.file]]
+from = "sdcard/crt/All on.crt"
+to = "crt/All on.crt"
+mode = "replace"
+
+[[both.file]]
+from = "sdcard/crt/README.txt"
+to = "crt/README.txt"
+mode = "replace"
+
 # The developer browser client is stored once on the SD card and shared by
 # every machine kernel. The kernel only contains its fixed HTTP router.
 [[both.file]]
@@ -646,7 +664,7 @@ from = "firmware_boot/COPYING.linux"
 to = "licenses/linux.txt"
 mode = "metadata"
 
-# Pi 4/Pi 400 boot files and stable machine kernels.
+# Pi 4/Pi 400 boot files and AArch64 machine kernels.
 [[pi4.file]]
 from = "pi4_boot/start4.elf"
 to = "start4.elf"
@@ -661,6 +679,12 @@ mode = "replace"
 from = "pi4_boot/armstub7-rpi4.bin"
 to = "armstub7-rpi4.bin"
 mode = "replace"
+
+[[pi4.file]]
+from = "kernels/armstub8-rpi4.bin"
+to = "armstub8-rpi4.bin"
+mode = "replace"
+optional = true
 
 [[pi4.file]]
 from = "pi4_boot/bcm2711-rpi-4-b.dtb"
@@ -678,47 +702,47 @@ to = "bcm2711-rpi-cm4.dtb"
 mode = "replace"
 
 [[pi4.file]]
-from = "kernels/kernel7l.img.c64"
-to = "kernel7l.img.c64"
+from = "kernels/kernel8.img.c64"
+to = "kernel8.img.c64"
 mode = "kernel"
 
 [[pi4.file]]
-from = "kernels/kernel7l.img.c64sc"
-to = "kernel7l.img.c64sc"
+from = "kernels/kernel8.img.c64sc"
+to = "kernel8.img.c64sc"
 mode = "kernel"
 
 [[pi4.file]]
-from = "kernels/kernel7l.img.scpu64"
-to = "kernel7l.img.scpu64"
+from = "kernels/kernel8.img.scpu64"
+to = "kernel8.img.scpu64"
 mode = "kernel"
 
 [[pi4.file]]
-from = "kernels/kernel7l.img.c128"
-to = "kernel7l.img.c128"
+from = "kernels/kernel8.img.c128"
+to = "kernel8.img.c128"
 mode = "kernel"
 
 [[pi4.file]]
-from = "kernels/kernel7l.img.vic20"
-to = "kernel7l.img.vic20"
+from = "kernels/kernel8.img.vic20"
+to = "kernel8.img.vic20"
 mode = "kernel"
 
 [[pi4.file]]
-from = "kernels/kernel7l.img.plus4"
-to = "kernel7l.img.plus4"
+from = "kernels/kernel8.img.plus4"
+to = "kernel8.img.plus4"
 mode = "kernel"
 
 [[pi4.file]]
-from = "kernels/kernel7l.img.pet"
-to = "kernel7l.img.pet"
+from = "kernels/kernel8.img.pet"
+to = "kernel8.img.pet"
 mode = "kernel"
 
 [[pi4.file]]
-to = "kernel7l.img.updater"
+to = "kernel8.img.updater"
 mode = "kernel"
 optional = true
 
 [[pi4.file]]
-to = "kernel7l.img.intro"
+to = "kernel8.img.intro"
 mode = "kernel"
 optional = true
 
@@ -1007,6 +1031,13 @@ report_missing = false
 [[both.file]]
 from = "roms/PET/kernal-4.901465-22.bin"
 to = "pet/kernal-4.901465-22.bin"
+mode = "keep"
+features = ["roms"]
+optional = true
+
+[[both.file]]
+from = "roms/PET/edit-4-40-n-50Hz.901498-01.bin"
+to = "pet/edit-4-40-n-50Hz.901498-01.bin"
 mode = "keep"
 features = ["roms"]
 optional = true

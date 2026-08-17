@@ -1,0 +1,101 @@
+# BMX CRT preset format. All effect groups are enabled.
+# Values use the same ranges shown in the BMX menu and are clamped on load.
+version=1
+
+# Geometry
+geometry.enabled=1
+geometry.curvature_x=10
+geometry.curvature_y=15
+geometry.skew_x=0
+geometry.skew_y=0
+geometry.trapezoid=0
+geometry.rotation=0
+geometry.overscan=0
+
+# Convergence
+convergence.enabled=1
+convergence.red_offset_x=25
+convergence.red_offset_y=0
+convergence.blue_offset_x=-25
+convergence.blue_offset_y=0
+convergence.radial_strength=25
+
+# Scanlines
+scanlines.enabled=1
+scanlines.multisample=1
+scanlines.weight=60
+scanlines.gap_brightness=12
+
+# Horizontal filtering
+horizontal_filtering.enabled=1
+horizontal_filtering.sigma_x=50
+
+# Edge blur
+edge_blur.enabled=1
+edge_blur.strength=30
+edge_blur.radius=70
+
+# Phosphor mask: type 0 = Green/Magenta, 1 = Trinitron
+phosphor_mask.enabled=1
+phosphor_mask.type=0
+phosphor_mask.brightness=70
+
+# Bloom
+bloom.enabled=1
+bloom.factor=150
+
+# Vignette
+vignette.enabled=1
+vignette.strength=25
+vignette.scale=75
+vignette.softness=45
+
+# Uneven illumination
+uneven_illumination.enabled=1
+uneven_illumination.strength=15
+uneven_illumination.scale=25
+
+# Horizontal jitter
+horizontal_jitter.enabled=1
+horizontal_jitter.strength=10
+horizontal_jitter.frequency=18
+horizontal_jitter.speed=0
+
+# Composite artifacts
+composite_artifacts.enabled=1
+composite_artifacts.chroma_blur=25
+composite_artifacts.luma_sharpen=10
+composite_artifacts.color_bleed=15
+
+# Glass reflection
+glass_reflection.enabled=1
+glass_reflection.angle=-20
+glass_reflection.width=25
+glass_reflection.position=35
+
+# Rounded screen mask
+rounded_screen_mask.enabled=1
+rounded_screen_mask.corner_radius=20
+rounded_screen_mask.border_softness=15
+
+# Edge glow
+edge_glow.enabled=1
+edge_glow.strength=15
+edge_glow.width=20
+
+# Noise
+noise.enabled=1
+noise.luminance=10
+noise.chroma=8
+noise.speed=0
+
+# Output response: mode 0 = Accurate, 1 = Fast
+# Level mapping: 0 = Linear, 1 = Cubic, 2 = Toe / Shoulder
+output_response.enabled=1
+output_response.mode=1
+output_response.level_mapping=1
+output_response.input_gamma=240
+output_response.output_gamma=220
+output_response.saturation=100
+output_response.black_level=0
+output_response.white_clip=100

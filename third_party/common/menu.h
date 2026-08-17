@@ -55,6 +55,7 @@ typedef enum {
    MENU_SUB_SELECT_VOLUME,
    MENU_SUB_IMAGE_CONTENTS,
    MENU_SUB_TEXT_CONTENTS,
+   MENU_SUB_QUICK_ACCESS_ASSIGN,
 } MenuSubID;
 
 // Used as indices
@@ -226,6 +227,9 @@ void menu_about_to_deactivate(void);
 
 void menu_quick_func(int button_assignment);
 const char* function_to_string(int);
+
+// Opens the five-slot chooser when item is a supported main-menu option.
+void menu_quick_access_try_assign(struct menu_item *item);
 
 // Default disk settings consumed by the emulator after settings are loaded.
 const char *menu_default_disk_image(void);

@@ -207,10 +207,51 @@ def pet_preamble():
         "F1 2 0 8",
         "F2 8 0 8",
         "Page_Down 7 6 8",
-        "Control_L -1 -1 0",
-        "Control_R -1 -1 0",
+        "!UNDEF Control_L",
+        "!UNDEF Control_R",
         "",
     ]
+
+
+def generate_pet_graphics_de(repo, output):
+    symbol_map = parse_symbol_map(
+        repo, "third_party/vice-3.10/data/PET/gtk3_grus_sym.vkm"
+    )
+    by_host = {}
+    for host, symbol, host_shift in DE_LAYOUT:
+        by_host.setdefault(host, []).append((symbol, host_shift))
+
+    lines = [
+        "# BMC64 PET graphics keyboard mapping for a German PC keyboard",
+        "# The included base map is staged from rpi_grus_sym.vkm.",
+        "",
+        "!INCLUDE gtk3_grus_pos.vkm",
+        "",
+        "# Generated from C64 positional DE reference.",
+    ]
+    for host, entries in by_host.items():
+        valid_entries = [
+            (symbol, shift)
+            for symbol, shift in entries
+            if symbol in symbol_map
+        ]
+        for index, (symbol, shift) in enumerate(valid_entries):
+            rendered = line_for(
+                host,
+                symbol,
+                shift,
+                symbol_map,
+                index < len(valid_entries) - 1,
+                deshift_host_shift=True,
+            )
+            if rendered:
+                lines.append(f"{rendered}  # {symbol}")
+
+    out_dir = output / "pet"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "rpi_graphics_pos_de.vkm").write_text(
+        "\n".join(lines).rstrip() + "\n", encoding="utf-8"
+    )
 
 
 def line_for(host, symbol, host_shift, symbol_map, continuation, deshift_host_shift=False):
@@ -280,6 +321,8 @@ def main():
     for machine in machines:
         for layout in ("us", "de"):
             generate(args.repo, args.output, machine, layout)
+        if machine == "pet":
+            generate_pet_graphics_de(args.repo, args.output)
 
 
 if __name__ == "__main__":

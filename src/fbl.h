@@ -18,14 +18,30 @@
 
 #include <cstdint>
 
-#if RASPPI == 5
+struct bmx_crt_effect_params;
+
+#ifndef BMX_PI4_LEGACY_DISPLAY
+#define BMX_PI4_LEGACY_DISPLAY 0
+#endif
+
+#if RASPPI == 5 || (RASPPI == 4 && !BMX_PI4_LEGACY_DISPLAY)
 #include <circle/bcmframebuffer.h>
+#if RASPPI == 4
+#include "pi4kms/pi4_native_kms.h"
+namespace pi5kms = pi4nativekms;
+#else
+#include "pi5kms/pi5_kms.h"
+#endif
 #else
 #include "bcm_host.h"
 #include "GLES2/gl2.h"
 #include "GLES2/gl2ext.h"
 #include "EGL/egl.h"
 #include "EGL/eglext.h"
+#if RASPPI == 4
+#include "pi4kms/pi4_kms.h"
+#include "pi4v3d/pi4_v3d.h"
+#endif
 #endif
 
 // A wrapper that manages a single dispmanx layer and
@@ -118,7 +134,10 @@ public:
 
   // initializes the bcm_host interface
   static bool Initialize();
+  static void Shutdown();
   static bool OGLInit();
+  static bool ShaderBackendAvailable();
+  static bool ShaderBackendAvailableForLayer(int logical_layer);
 
   bool UsesShader();
 
@@ -128,23 +147,7 @@ public:
 
   // NOTE: This will implicitly Hide the layer since the shader must be
   // destroyed and recompiled.
-  void SetShaderParams(
-		    bool curvature,
-			float curvature_x,
-			float curvature_y,
-			int mask,
-			float mask_brightness,
-			bool gamma,
-			bool fake_gamma,
-			bool scanlines,
-			bool multisample,
-			float scanline_weight,
-			float scanline_gap_brightness,
-			float bloom_factor,
-			float input_gamma,
-			float output_gamma,
-			bool sharper,
-			bool bilinear_interpolation);
+  void SetShaderParams(const struct bmx_crt_effect_params &params);
 
   // Make offscreen resources for all ready layers visible.
   static void PresentLayers(bool sync, FrameBufferLayer *layers, uint32_t ready_mask);
@@ -161,10 +164,28 @@ public:
 private:
   static void PresentLayerList(bool sync, FrameBufferLayer **layers, unsigned count);
   void FreeInternal(bool keepPixels);
-#if RASPPI != 5
+#if BMX_PI4_LEGACY_DISPLAY
   void Swap(DISPMANX_UPDATE_HANDLE_T& dispman_update);
   void SwapGL(bool sync);
   void RenderGL();
+  bool EnsureDispmanResources();
+#if RASPPI == 4
+  bool CanUsePi4V3d() const;
+  bool AllocatePi4V3dResources(unsigned width, unsigned height);
+  bool EnsurePi4V3dDispmanResources();
+  bool UploadPi4V3dDispmanResource(unsigned resource_index);
+  void FreePi4V3dResources();
+  bool RenderPi4V3dFrame(unsigned resource_index);
+  bool ShouldDeferPi4DispmanResources() const;
+  bool ReleasePi4KmsDispmanResources();
+  bool CanUsePi4KmsOverlay() const;
+  bool AllocatePi4KmsOverlayResources(unsigned width, unsigned height);
+  void FreePi4KmsOverlayResources();
+  bool BuildPi4KmsOverlayPlane(unsigned resource_index,
+                               pi4kms::Plane *plane);
+  static bool TryPi4KmsPresent(bool sync, FrameBufferLayer **layers,
+                               unsigned count);
+#endif
 
   bool ShaderInit();
   void ShaderDestroy();
@@ -197,17 +218,27 @@ private:
   static bool CanUseKmsDirectScanout(FrameBufferLayer *layer,
                                      int screen_w,
                                      int screen_h);
+  static bool BuildKmsLayerPlane(FrameBufferLayer *layer,
+                                 unsigned buffer_index,
+                                 int screen_w,
+                                 int screen_h,
+                                 pi5kms::Plane *plane);
   static bool TryKmsDirectScanout(FrameBufferLayer **layers,
                                   unsigned layer_count,
                                   int screen_w,
                                   int screen_h,
                                   bool wait_for_vblank);
+  static bool TryV3dPostprocess(FrameBufferLayer **layers,
+                                unsigned layer_count,
+                                int screen_w,
+                                int screen_h,
+                                bool wait_for_vblank);
 #endif
 
   // Raw pixel data. Not VC memory.
   uint8_t* pixels_;
 
-#if RASPPI == 5
+#if !BMX_PI4_LEGACY_DISPLAY
   static CBcmFrameBuffer *screen_;
   static uint8_t *screen_pixels_;
   static unsigned screen_pitch_bytes_;
@@ -217,6 +248,25 @@ private:
   static bool egl_initialized_;
   DISPMANX_ELEMENT_HANDLE_T dispman_element_;
   DISPMANX_RESOURCE_HANDLE_T dispman_resource_[2];
+#if RASPPI == 4
+  DISPMANX_RESOURCE_HANDLE_T pi4_v3d_resource_[2];
+  uint8_t *pi4_v3d_allocation_[2];
+  uint8_t *pi4_v3d_pixels_[2];
+  unsigned pi4_v3d_pitch_;
+  unsigned pi4_v3d_width_;
+  unsigned pi4_v3d_height_;
+  bool pi4_v3d_ready_[2];
+  pi4v3d::RenderedFrame pi4_v3d_scanout_[2];
+  VC_RECT_T pi4_v3d_copy_dst_rect_;
+  VC_RECT_T pi4_v3d_src_rect_;
+  uint8_t *pi4_kms_overlay_allocation_[2];
+  uint8_t *pi4_kms_overlay_pixels_[2];
+  unsigned pi4_kms_overlay_pitch_;
+  unsigned pi4_kms_overlay_width_;
+  unsigned pi4_kms_overlay_height_;
+  unsigned pi4_kms_overlay_front_;
+  bool pi4_kms_overlay_front_valid_;
+#endif
 
   static EGLDisplay egl_display_;
   static EGLContext egl_context_;
@@ -237,6 +287,8 @@ private:
   int fb_width_;
   int fb_height_;
   int fb_pitch_;
+  // Stable canvas identity. layer_ is the mutable display/Z order.
+  int logical_layer_;
   int layer_;
   int transparency_;
   double hstretch_;
@@ -283,7 +335,7 @@ private:
   bool showing_;
   bool allocated_;
 
-#if RASPPI == 5
+#if !BMX_PI4_LEGACY_DISPLAY
   int pixelmode_;
 #else
   VC_IMAGE_TYPE_T mode_;
@@ -295,11 +347,13 @@ private:
 
   bool uses_shader_;
 
-#if RASPPI == 5
+#if !BMX_PI4_LEGACY_DISPLAY
   bool dirty_;
+  uint32_t palette_generation_;
+  uint32_t content_generation_;
 #endif
 
-#if RASPPI != 5
+#if BMX_PI4_LEGACY_DISPLAY
   bool shader_init_;
   GLuint vshader_;
   GLuint fshader_;
@@ -338,15 +392,65 @@ private:
   bool curvature_;
   float curvature_x_;
   float curvature_y_;
+  float skew_x_;
+  float skew_y_;
+  float trapezoid_;
+  float rotation_degrees_;
+  float overscan_scale_;
+  bool convergence_;
+  float red_offset_x_;
+  float red_offset_y_;
+  float blue_offset_x_;
+  float blue_offset_y_;
+  float convergence_radial_strength_;
+  bool horizontal_filtering_;
+  float horizontal_sigma_x_;
   int mask_;
   float mask_brightness_;
   bool gamma_;
   bool fake_gamma_;
+  unsigned output_level_mapping_;
+  float output_saturation_;
+  float black_level_;
+  float white_clip_;
   bool scanlines_;
   bool multisample_;
   float scanline_weight_;
   float scanline_gap_brightness_;
+  bool edge_blur_;
+  float edge_blur_strength_;
+  float edge_blur_radius_;
+  bool vignette_;
+  float vignette_strength_;
+  float vignette_scale_;
+  float vignette_softness_;
+  bool uneven_illumination_;
+  float uneven_illumination_strength_;
+  float uneven_illumination_scale_;
+  bool glass_reflection_;
+  float glass_reflection_angle_;
+  float glass_reflection_width_;
+  float glass_reflection_position_;
+  bool rounded_screen_mask_;
+  float rounded_corner_radius_;
+  float rounded_border_softness_;
+  bool edge_glow_;
+  float edge_glow_strength_;
+  float edge_glow_width_;
+  bool bloom_;
   float bloom_factor_;
+  bool horizontal_jitter_;
+  float horizontal_jitter_strength_;
+  float horizontal_jitter_frequency_;
+  float horizontal_jitter_speed_;
+  bool composite_artifacts_;
+  float composite_chroma_blur_;
+  float composite_luma_sharpen_;
+  float composite_color_bleed_;
+  bool noise_;
+  float luminance_noise_;
+  float chroma_noise_;
+  float noise_speed_;
   float input_gamma_;
   float output_gamma_;
   bool sharper_;

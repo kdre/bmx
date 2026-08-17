@@ -40,6 +40,13 @@
 #include "fbl.h"
 #include "usb_keyboard_state.h"
 
+#if BMX_PI4_LEGACY_DISPLAY && defined(BMC64_USE_EMU_MULTICORE)
+#include "core0_mailbox.h"
+#define BMX_PI4_CORE0_DISPATCHER 1
+#else
+#define BMX_PI4_CORE0_DISPATCHER 0
+#endif
+
 extern "C" {
 #include "third_party/common/circle.h"
 #include "third_party/common/keycodes.h"
@@ -63,6 +70,9 @@ public:
 
   void circle_sleep(long delay);
   unsigned long circle_get_ticks();
+  uint64_t circle_get_ticks64();
+  int circle_run_on_platform_core(circle_platform_call_t function,
+                                  void *context);
 
   uint8_t *circle_get_fb1();
   int circle_get_fb1_pitch();
@@ -76,11 +86,15 @@ public:
   int circle_alloc_fbl(int layer, int pixelmode, uint8_t **pixels,
                        int width, int height, int *pitch);
   int circle_realloc_fbl(int layer, int shader);
+  int circle_shader_backend_available();
+  int circle_shader_backend_available_for_layer(int layer);
+  int circle_status_layer_can_coexist_with_ui();
   void circle_free_fbl(int layer);
   void circle_clear_fbl(int layer);
   void circle_show_fbl(int layer);
   void circle_hide_fbl(int layer);
   void circle_present_fbl(uint32_t ready_mask, int sync);
+  int circle_get_last_present_timing(struct circle_present_timing *timing);
   void circle_set_palette_fbl(int layer, uint8_t index, uint16_t rgb565);
   void circle_set_palette32_fbl(int layer, uint8_t index, uint32_t argb);
   void circle_update_palette_fbl(int layer);
@@ -101,6 +115,9 @@ public:
   int circle_sound_resume(void);
   int circle_sound_bufferspace(void);
   void circle_yield(void);
+#if BMX_V3D_RENDER_TEST_KERNEL
+  void circle_v3d_test_poll_remote(void);
+#endif
   void circle_check_gpio();
   void circle_reset_gpio(int gpio_config);
   void circle_lock_acquire();
@@ -125,26 +142,131 @@ public:
                                  int *sx, int *sy);
   void circle_set_interpolation(int enable);
   void circle_set_use_shader(int enable);
-  void circle_set_shader_params(
-		    int curvature,
-			float curvature_x,
-			float curvature_y,
-			int mask,
-			float mask_brightness,
-			int gamma,
-			int fake_gamma,
-			int scanlines,
-			int multisample,
-			float scanline_weight,
-			float scanline_gap_brightness,
-			float bloom_factor,
-			float input_gamma,
-			float output_gamma,
-			int sharper,
-			int bilinear_interpolation);
+  void circle_set_shader_params(const struct bmx_crt_effect_params &params);
 
 private:
   class USBPlugAndPlayTask;
+
+#ifdef BMC64_USE_EMU_MULTICORE
+  void RunCore0Scheduler();
+#endif
+
+#if BMX_PI4_CORE0_DISPATCHER
+  enum class Core0Command {
+    FBLAllocate,
+    FBLReAllocate,
+    FBLFree,
+    FBLClear,
+    FBLShow,
+    FBLHide,
+    FBLPresent,
+    FBLSetPalette16,
+    FBLSetPalette32,
+    FBLUpdatePalette,
+    FBLSetStretch,
+    FBLSetCenterOffset,
+    FBLSetSrcRect,
+    FBLSetVAlign,
+    FBLSetHAlign,
+    FBLSetPadding,
+    FBLSetZLayer,
+    FBLGetZLayer,
+    FBLGetDimensions,
+    FBLSetInterpolation,
+    FBLSetUseShader,
+    FBLSetShaderParams,
+    PlatformCall,
+  };
+
+  struct Core0Request {
+    Core0Command command;
+    int result;
+
+    union {
+      struct {
+        int layer;
+        int pixelmode;
+        uint8_t **pixels;
+        int width;
+        int height;
+        int *pitch;
+      } allocate;
+      struct {
+        int layer;
+        int value;
+      } layerValue;
+      struct {
+        int layer;
+      } layer;
+      struct {
+        uint32_t readyMask;
+        int sync;
+      } present;
+      struct {
+        int layer;
+        uint8_t index;
+        uint16_t rgb565;
+      } palette16;
+      struct {
+        int layer;
+        uint8_t index;
+        uint32_t argb;
+      } palette32;
+      struct {
+        int layer;
+        double hstretch;
+        double vstretch;
+        int hintstr;
+        int vintstr;
+        int useHintstr;
+        int useVintstr;
+      } stretch;
+      struct {
+        int layer;
+        int first;
+        int second;
+      } pair;
+      struct {
+        int layer;
+        int x;
+        int y;
+        int width;
+        int height;
+      } rect;
+      struct {
+        int layer;
+        double left;
+        double right;
+        double top;
+        double bottom;
+      } padding;
+      struct {
+        int layer;
+        int *displayWidth;
+        int *displayHeight;
+        int *fbWidth;
+        int *fbHeight;
+        int *srcWidth;
+        int *srcHeight;
+        int *dstWidth;
+        int *dstHeight;
+      } dimensions;
+      struct bmx_crt_effect_params shader;
+      struct {
+        circle_platform_call_t function;
+        void *context;
+      } platformCall;
+    } args;
+  };
+
+  void SubmitCore0Request(Core0Command command);
+  void ProcessCore0Request();
+  bool ShouldDispatchPi4LegacyDisplayCall() const;
+#endif
+
+  void RefreshDiagnosticsFirmwareCache();
+  void CollectDiagnostics(struct bmx_diagnostics_snapshot *snapshot);
+  void PresentFrameBufferLayers(uint32_t readyMask, int sync);
 
   struct USBKeyboardContext {
     CKernel *kernel;
@@ -218,12 +340,48 @@ private:
   int mNumCoresComplete;
   bool mNeedSoundInit;
   int mNumSoundChannels;
+  bool mDiagnosticsFirmwareValid;
+  unsigned long mDiagnosticsFirmwareTicks;
+  uint32_t mDiagnosticsArmClockHz;
+  uint32_t mDiagnosticsTemperatureC;
+  uint32_t mDiagnosticsThrottleClockHz;
   uint64_t mSchedulerSafePoints;
   uint64_t mSchedulerRounds;
   uint64_t mSchedulerExtraRounds;
   uint64_t mSchedulerPumpUS;
   uint64_t mSchedulerPumpMaxUS;
   uint64_t mSchedulerPumpBudgetStops;
+
+#if BMX_PI4_CORE0_DISPATCHER
+  bmx::Core0Mailbox mCore0Mailbox;
+  Core0Request mCore0Request;
+  bool mCore0FBLLogged;
+  bool mPi4NativeViceCoreLogged;
+#if BMX_SID_DIAGNOSTICS
+  uint32_t mCore0LoopLastUS;
+  uint32_t mCore0LoopGapMaxUS;
+  uint32_t mCore0LoopGapOver10MS;
+  uint32_t mCore0LoopGapOver20MS;
+  uint32_t mCore0LoopGapOver40MS;
+  uint32_t mCore0LastGapOver10MSAtMS;
+  uint32_t mCore0YieldMaxUS;
+  uint32_t mPi4PresentMaxUS;
+  uint32_t mPi4PresentOver20MS;
+  uint32_t mPi4PresentOver40MS;
+  uint32_t mPi4PresentLastOver20MSAtMS;
+  uint32_t mPi4PresentCore;
+  uint32_t mPi4PresentFenceMaxUS;
+  uint32_t mPi4PresentRenderMaxUS;
+  uint32_t mPi4PresentSubmitMaxUS;
+  uint32_t mPi4PresentFenceOver20MS;
+  uint32_t mPi4PresentRenderOver20MS;
+  uint32_t mPi4PresentSubmitOver20MS;
+  uint32_t mPi4PresentLastSlowFenceUS;
+  uint32_t mPi4PresentLastSlowRenderUS;
+  uint32_t mPi4PresentLastSlowSubmitUS;
+  uint32_t mCore0DiagnosticsMaxUS;
+#endif
+#endif
 
   int gpio_debounce_state[NUM_GPIO_PINS];
 

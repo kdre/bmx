@@ -15,6 +15,10 @@
 
 #include "viceapp.h"
 
+extern "C" {
+#include "bmc64_async_network.h"
+}
+
 #include "config/runtime_config.h"
 #include "fbl.h"
 #include "machines/machine_descriptor.h"
@@ -134,7 +138,7 @@ bool ViceScreenApp::Initialize(void) {
   EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
                 "boot: gpio manager ready");
 
-#if RASPPI != 5
+#if BMX_PI4_LEGACY_DISPLAY
   if (!mVCHIQ.Initialize()) {
     return false;
   }
@@ -146,6 +150,12 @@ bool ViceScreenApp::Initialize(void) {
   EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
                 "boot: gpio configured");
 
+#if BMX_V3D_RENDER_TEST_KERNEL
+  // Core 1 owns the complete KMS/V3D matrix. Initializing the emulator
+  // framebuffer here would create a second scanout owner before that run.
+  EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
+                "boot: framebuffer reserved for V3D render test");
+#else
   if (!FrameBufferLayer::Initialize()) {
     EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
                   "boot: framebuffer initialization failed");
@@ -153,6 +163,7 @@ bool ViceScreenApp::Initialize(void) {
   }
   EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
                 "boot: framebuffer initialized");
+#endif
 
   if (mViceOptions.GetNetworkAdapter() != BMX_NETWORK_WIFI &&
       !StartNetwork()) {
@@ -160,6 +171,12 @@ bool ViceScreenApp::Initialize(void) {
   }
 
   return true;
+}
+
+void ViceScreenApp::Cleanup(void) {
+#if !BMX_V3D_RENDER_TEST_KERNEL
+  FrameBufferLayer::Shutdown();
+#endif
 }
 
 bool ViceScreenApp::StartNetwork(void) {
@@ -174,6 +191,9 @@ bool ViceScreenApp::StartNetwork(void) {
   if (!mNetworkService->Initialize(mViceOptions)) {
     return false;
   }
+  // CTask registration must happen on Circle's scheduler core before VICE is
+  // allowed to use the asynchronous network API from a secondary core.
+  bmc64_async_net_initialize();
   EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
                 "boot: network initialized");
   return true;
@@ -531,7 +551,8 @@ bool ViceStdioApp::Initialize(void) {
   snprintf(mTimingOption, sizeof mTimingOption, "%s",
            bmc64::ViceTimingOption(mViceOptions.GetMachineTiming()));
 
-#ifdef BMC64_USE_EMU_MULTICORE
+#if defined(BMC64_USE_EMU_MULTICORE) && \
+    !(BMX_PI4_LEGACY_DISPLAY && BMX_EMU_MULTICORE)
   mEmulatorCore->LaunchEmulator(mTimingOption);
   EmitBootTrace(&mSerial, mViceOptions.SerialEnabled(),
                 "boot: emulator launched");
@@ -548,16 +569,26 @@ bool ViceStdioApp::Initialize(void) {
 
 int ViceStdioApp::PrepareSystemShutdown(void) {
   int status = 0;
+  const unsigned long shutdown_started_us = CTimer::GetClockTicks();
 
+  printf("developer: reboot phase=remote-service-stop-begin\r\n");
   StopRemoteService();
+  printf("developer: reboot phase=remote-service-stop-done elapsed_us=%lu\r\n",
+         CTimer::GetClockTicks() - shutdown_started_us);
 
+  printf("developer: reboot phase=stdio-shutdown-begin\r\n");
   if (CGlueStdioShutdown() != 0) {
     mLogger.Write(GetKernelName(), LogError, "Cannot close all stdio files");
     status = -1;
   }
+  printf("developer: reboot phase=stdio-shutdown-done status=%d "
+         "elapsed_us=%lu\r\n", status,
+         CTimer::GetClockTicks() - shutdown_started_us);
 
   for (int i = 0; i < 3; ++i) {
     static const char *usbVolumes[3] = {"USB:", "USB2:", "USB3:"};
+    printf("developer: reboot phase=unmount volume=%s mounted=%u\r\n",
+           usbVolumes[i], mUSBFileSystemMounted[i] ? 1U : 0U);
     if (mUSBFileSystemMounted[i] && f_mount(0, usbVolumes[i], 0) != FR_OK) {
       mLogger.Write(GetKernelName(), LogError, "Cannot unmount %s",
                     usbVolumes[i]);
@@ -566,24 +597,33 @@ int ViceStdioApp::PrepareSystemShutdown(void) {
       mUSBFileSystemMounted[i] = false;
     }
   }
+  printf("developer: reboot phase=unmount volume=USER: mounted=%u\r\n",
+         mUserFileSystemMounted ? 1U : 0U);
   if (mUserFileSystemMounted && f_mount(0, "USER:", 0) != FR_OK) {
     mLogger.Write(GetKernelName(), LogError, "Cannot unmount USER:");
     status = -1;
   } else {
     mUserFileSystemMounted = false;
   }
+  printf("developer: reboot phase=unmount volume=SD: mounted=%u\r\n",
+         mSDFileSystemMounted ? 1U : 0U);
   if (mSDFileSystemMounted && f_mount(0, "SD:", 0) != FR_OK) {
     mLogger.Write(GetKernelName(), LogError, "Cannot unmount SD:");
     status = -1;
   } else {
     mSDFileSystemMounted = false;
   }
+  printf("developer: reboot phase=unmount volume=SYS: mounted=%u\r\n",
+         mSYSFileSystemMounted ? 1U : 0U);
   if (mSYSFileSystemMounted && f_mount(0, "SYS:", 0) != FR_OK) {
     mLogger.Write(GetKernelName(), LogError, "Cannot unmount SYS:");
     status = -1;
   } else {
     mSYSFileSystemMounted = false;
   }
+  printf("developer: reboot phase=storage-shutdown-done status=%d "
+         "elapsed_us=%lu\r\n", status,
+         CTimer::GetClockTicks() - shutdown_started_us);
   return status;
 }
 

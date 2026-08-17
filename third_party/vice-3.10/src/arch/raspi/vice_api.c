@@ -74,6 +74,7 @@
 #include "keymap_editor.h"
 #include "keyboard_matrix.h"
 #include "mousedrv.h"
+#include "pet/pet-resources.h"
 
 extern int emux_network_is_ready(void);
 
@@ -295,6 +296,11 @@ static int user_pos_keymap_is(const char *expected) {
    return strcmp(name, expected) == 0;
 }
 
+static int pet_uses_graphics_keyboard(void) {
+   return machine_class == VICE_MACHINE_PET &&
+          machine_get_keyboard_type() == KBD_TYPE_GRAPHICS_US;
+}
+
 static int keyboard_host_layout_value(void) {
    if (keyboard_host_layout < 0) {
       int index = KBD_INDEX_USERPOS;
@@ -303,7 +309,8 @@ static int keyboard_host_layout_value(void) {
       resources_get_int("KeyboardMapping", &mapping);
       keyboard_host_layout =
           user_pos_keymap_is("rpi_pos_de.vkm") ||
-              user_pos_keymap_is("user_pos_de.vkm") ||
+          user_pos_keymap_is("user_pos_de.vkm") ||
+          user_pos_keymap_is("raspi_grus_pos_de.vkm") ||
               ((index == KBD_INDEX_SYM || index == KBD_INDEX_POS) &&
                mapping == KBD_MAPPING_DE)
               ? KEYBOARD_HOST_LAYOUT_DE
@@ -319,6 +326,11 @@ static const char *custom_keyboard_mapping_file(void) {
 }
 
 static const char *positional_keyboard_mapping_file(void) {
+   if (pet_uses_graphics_keyboard()) {
+      return keyboard_host_layout_value() == KEYBOARD_HOST_LAYOUT_DE
+                 ? "raspi_grus_pos_de.vkm"
+                 : "raspi_grus_pos.vkm";
+   }
    return keyboard_host_layout_value() == KEYBOARD_HOST_LAYOUT_DE
               ? "rpi_pos_de.vkm"
               : "rpi_pos.vkm";
@@ -385,7 +397,9 @@ static int vice_keymap_index_to_bmc(int value) {
             return KEYBOARD_MAPPING_CUSTOM;
          }
          if (user_pos_keymap_is("rpi_pos.vkm") ||
-             user_pos_keymap_is("rpi_pos_de.vkm")) {
+             user_pos_keymap_is("rpi_pos_de.vkm") ||
+             user_pos_keymap_is("raspi_grus_pos.vkm") ||
+             user_pos_keymap_is("raspi_grus_pos_de.vkm")) {
             return KEYBOARD_MAPPING_BMX;
          }
          return KEYBOARD_MAPPING_MAXI;
@@ -398,6 +412,19 @@ static int vice_keymap_index_to_bmc(int value) {
 
 int emu_ui_uses_german_keyboard_layout(void) {
    return keyboard_host_layout_value() == KEYBOARD_HOST_LAYOUT_DE;
+}
+
+void emux_keyboard_type_changed(void) {
+   if (machine_class != VICE_MACHINE_PET ||
+       keyboard_mapping_item == NULL ||
+       keyboard_mapping_item->value != KEYBOARD_MAPPING_BMX) {
+      return;
+   }
+
+   if (set_pos_keyboard_mapping_file(
+           positional_keyboard_mapping_file()) < 0) {
+      ui_error("PET positional keymap unavailable");
+   }
 }
 
 int emux_keyboard_mapping_lookup(long keycode, unsigned char usb_modifiers,

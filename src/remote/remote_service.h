@@ -52,6 +52,10 @@ public:
     UsbDiagnosticRequestStatus StartUsbDiagnostic(
         UsbDiagnosticMode mode, const UsbDiagnosticTarget &target) override;
     UsbDiagnosticRequestStatus StopUsbDiagnostic() override;
+    V3dTestReviewRequestStatus RequestV3dTestReview(
+        V3dTestReviewAction action, uint32_t index) override;
+    bool CaptureV3dTestReviewScreenshot(
+        uint32_t maximum_width, BmxBinaryPayload *payload) override;
     void Yield() override;
     uint64_t MonotonicMicroseconds() override;
     void RecordUploadWrite(size_t size, uint64_t elapsed_us) override;

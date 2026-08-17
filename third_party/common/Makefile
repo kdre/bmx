@@ -8,7 +8,7 @@ VICE_BUILD_SRC ?= $(VICE_SOURCE_DIR)
 BUILD_DIR ?= .
 LIBRARY ?= $(BUILD_DIR)/libbmc64common.a
 CONFIG_STAMP ?=
-REL_OBJ = demo.o emux_api.o font.o gamepad_defaults.o gpio_layout.o joy.o kbd.o keycodes.o keyboard_matrix.o keymap_editor.o menu.o menu_control.o menu_confirm_osd.o menu_reset_osd.o menu_key_binding.o menu_gpio.o menu_keyset.o menu_switch.o menu_tape_osd.o menu_timing.o menu_usb.o overlay.o raspi_util.o text.o ui.o semaphore.o
+REL_OBJ = crt_preset.o demo.o emux_api.o font.o gamepad_defaults.o gpio_layout.o joy.o kbd.o keycodes.o keyboard_matrix.o keymap_editor.o menu.o menu_control.o menu_quick_access.o menu_confirm_osd.o menu_reset_osd.o menu_key_binding.o menu_gpio.o menu_keyset.o menu_switch.o menu_tape_osd.o menu_timing.o menu_usb.o overlay.o raspi_util.o text.o ui.o semaphore.o
 OBJ = $(addprefix $(BUILD_DIR)/,$(REL_OBJ))
 DEPS = $(OBJ:.o=.d)
 

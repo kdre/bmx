@@ -15,7 +15,6 @@
 #include <circle/net/ipaddress.h>
 #include <circle/net/netconfig.h>
 #include <circle/net/socket.h>
-#include <circle/multicore.h>
 #include <circle/sched/scheduler.h>
 #include <circle/sched/task.h>
 #include <circle/string.h>
@@ -380,10 +379,14 @@ private:
 
 namespace bmx {
 
+// Pi4 AArch64 release discovery reaches deep mbedTLS, entropy and scheduler
+// frames on this task. 32 KiB corrupted the task switch after RNG seeding.
+static constexpr unsigned kNetworkWorkerStackBytes = 128U * 1024U;
+
 class NetworkService::WorkerTask : public CTask {
 public:
   explicit WorkerTask(NetworkService *service)
-      : CTask(32U * 1024U), m_service(service) {
+      : CTask(kNetworkWorkerStackBytes), m_service(service) {
     SetName("network-service");
   }
 
@@ -419,8 +422,7 @@ public:
 
   void Present(const update::UpdateForegroundUiEvent &event) override {
     m_service->m_jobLock.Acquire();
-    m_service->m_updateProgress = event;
-    m_service->m_updateProgressValid = true;
+    m_service->m_updateProgressMailbox.Present(event);
     m_service->m_jobLock.Release();
   }
 
@@ -443,8 +445,8 @@ NetworkService::NetworkService(void)
       m_updateState(JobEmpty),
       m_updateOperation(update::UpdateServiceOperation::Check),
       m_updateDestructiveResetConsent(false),
-      m_updateCancelRequested(false), m_updateProgressValid(false),
-      m_updateProgress(), m_updateResult(0), m_updateToken(0),
+      m_updateCancelRequested(false), m_updateProgressMailbox(),
+      m_updateResult(0), m_updateToken(0),
       m_scanState(JobEmpty), m_scanTimeoutMS(0), m_scanCount(0),
       m_scanRequiresReboot(false), m_scanToken(0), m_nextToken(1),
       m_statusLock(TASK_LEVEL), m_snapshotFeatureEnabled(false),
@@ -632,25 +634,6 @@ bool NetworkService::StartWorkers(bool rs232_enabled) {
   return !rs232_enabled || m_rs232Task != 0;
 }
 
-void NetworkService::RunScheduler(void) {
-#ifdef BMC64_USE_EMU_MULTICORE
-  const unsigned core = CMultiCoreSupport::ThisCore();
-  BMC64_NET_EVENT("scheduler service owner core %u", core);
-  if (core != 0U) {
-    BMC64_NET_EVENT("refusing scheduler service on foreign core %u", core);
-    for (;;) {
-      CTimer::SimpleMsDelay(1000U);
-    }
-  }
-  for (;;) {
-    CScheduler::Get()->Yield();
-  }
-#else
-  // Pi 4 keeps VICE and the same NetworkService co-located on core 0. VICE's
-  // regular circle_yield() remains the scheduler driver there.
-#endif
-}
-
 bool NetworkService::ReadSnapshot(bool *feature_enabled, bool *ready,
                                   char *ip, unsigned ip_size,
                                   char *netmask, unsigned netmask_size,
@@ -720,7 +703,7 @@ bool NetworkService::SubmitUpdateJob(
   m_updateOperation = operation;
   m_updateDestructiveResetConsent = destructive_reset_consent;
   m_updateCancelRequested = false;
-  m_updateProgressValid = false;
+  m_updateProgressMailbox.Reset();
   m_updateResult = -1;
   m_updateMessage[0] = '\0';
   m_updateState = JobPosted;
@@ -740,8 +723,13 @@ NetworkJobPollStatus NetworkService::PollUpdateJob(
     m_jobLock.Release();
     return NetworkJobPollStatus::Missing;
   }
-  snapshot->progress_valid = m_updateProgressValid;
-  snapshot->progress = m_updateProgress;
+  if (m_updateProgressMailbox.PopTransition(&snapshot->progress)) {
+    snapshot->progress_valid = true;
+    m_jobLock.Release();
+    return NetworkJobPollStatus::Pending;
+  }
+  snapshot->progress_valid =
+      m_updateProgressMailbox.Latest(&snapshot->progress);
   if (m_updateState != JobComplete) {
     m_jobLock.Release();
     return NetworkJobPollStatus::Pending;

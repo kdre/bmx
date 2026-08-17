@@ -37,7 +37,11 @@
 #include <circle/usb/usbhcidevice.h>
 #include <ff.h>
 
-#if RASPPI != 5
+#ifndef BMX_PI4_LEGACY_DISPLAY
+#define BMX_PI4_LEGACY_DISPLAY (RASPPI == 4 && AARCH == 32)
+#endif
+
+#if BMX_PI4_LEGACY_DISPLAY
 #include <vc4/vchiq/vchiqdevice.h>
 #endif
 
@@ -292,7 +296,7 @@ public:
         mTimer(&mInterrupt),
         mLogger(mOptions.GetLogLevel(), &mTimer),
         mGPIOManager(&mInterrupt)
-#if RASPPI != 5
+#if BMX_PI4_LEGACY_DISPLAY
         , mVCHIQ(&mMemory, &mInterrupt)
 #endif
         {
@@ -301,6 +305,7 @@ public:
   }
 
   virtual bool Initialize(void);
+  virtual void Cleanup(void);
 
 protected:
   bool StartNetwork(void);
@@ -312,7 +317,7 @@ protected:
   CLogger mLogger;
   CScheduler mScheduler;
   CGPIOManager mGPIOManager;
-#if RASPPI != 5
+#if BMX_PI4_LEGACY_DISPLAY
   CVCHIQDevice mVCHIQ;
 #endif
   CMachineInfo mMachineInfo;

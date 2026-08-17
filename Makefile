@@ -84,18 +84,64 @@ AARCH ?= 32
 
 BOARD ?= pi4
 
-ifeq ($(BOARD),pi5)
-BMX_PI5_SID_WORKER ?= 1
+# Keep the original Pi5 knobs as compatibility aliases while exposing the
+# board-independent configuration used by the Pi4 multicore A/B builds.
+ifneq ($(origin BMX_PI5_SID_WORKER),undefined)
+ifneq ($(origin BMX_SID_WORKER),undefined)
+ifneq ($(BMX_PI5_SID_WORKER),$(BMX_SID_WORKER))
+$(error BMX_PI5_SID_WORKER and BMX_SID_WORKER disagree)
+endif
 else
-BMX_PI5_SID_WORKER ?= 0
+BMX_SID_WORKER := $(BMX_PI5_SID_WORKER)
 endif
-BMX_PI5_SID_DIAGNOSTICS ?= 0
+endif
+ifneq ($(origin BMX_PI5_SID_DIAGNOSTICS),undefined)
+ifneq ($(origin BMX_SID_DIAGNOSTICS),undefined)
+ifneq ($(BMX_PI5_SID_DIAGNOSTICS),$(BMX_SID_DIAGNOSTICS))
+$(error BMX_PI5_SID_DIAGNOSTICS and BMX_SID_DIAGNOSTICS disagree)
+endif
+else
+BMX_SID_DIAGNOSTICS := $(BMX_PI5_SID_DIAGNOSTICS)
+endif
+endif
 
-ifneq ($(filter-out 0 1,$(BMX_PI5_SID_WORKER)),)
-$(error BMX_PI5_SID_WORKER must be exactly 0 or 1)
+BMX_EMU_MULTICORE ?= 1
+BMX_SID_WORKER ?= 1
+BMX_SID_DIAGNOSTICS ?= 0
+BMX_V3D_RENDER_TEST_KERNEL ?= 0
+
+ifneq ($(strip $(BMX_EMU_MULTICORE)),0)
+ifneq ($(strip $(BMX_EMU_MULTICORE)),1)
+$(error BMX_EMU_MULTICORE must be exactly 0 or 1)
 endif
-ifneq ($(filter-out 0 1,$(BMX_PI5_SID_DIAGNOSTICS)),)
-$(error BMX_PI5_SID_DIAGNOSTICS must be exactly 0 or 1)
+endif
+ifneq ($(strip $(BMX_SID_WORKER)),0)
+ifneq ($(strip $(BMX_SID_WORKER)),1)
+$(error BMX_SID_WORKER must be exactly 0 or 1)
+endif
+endif
+ifneq ($(strip $(BMX_SID_DIAGNOSTICS)),0)
+ifneq ($(strip $(BMX_SID_DIAGNOSTICS)),1)
+$(error BMX_SID_DIAGNOSTICS must be exactly 0 or 1)
+endif
+endif
+ifneq ($(strip $(BMX_V3D_RENDER_TEST_KERNEL)),0)
+ifneq ($(strip $(BMX_V3D_RENDER_TEST_KERNEL)),1)
+$(error BMX_V3D_RENDER_TEST_KERNEL must be exactly 0 or 1)
+endif
+endif
+ifeq ($(BMX_V3D_RENDER_TEST_KERNEL),1)
+ifneq ($(BMX_EMU_MULTICORE),1)
+$(error BMX_V3D_RENDER_TEST_KERNEL=1 requires BMX_EMU_MULTICORE=1)
+endif
+ifneq ($(AARCH),64)
+$(error BMX_V3D_RENDER_TEST_KERNEL=1 requires AARCH=64)
+endif
+endif
+ifeq ($(BMX_SID_WORKER),1)
+ifneq ($(BMX_EMU_MULTICORE),1)
+$(error BMX_SID_WORKER=1 requires BMX_EMU_MULTICORE=1)
+endif
 endif
 
 ifeq ($(BOARD),pi4)
@@ -113,14 +159,13 @@ BMC64_COMMON_LIB ?= third_party/common/libbmc64common.a
 BMX_GENERATE_LISTING ?= 1
 
 ifeq ($(strip $(RASPPI)),4)
-ifneq ($(strip $(AARCH)),32)
-$(error Pi4 builds currently use 32-bit Circle only)
+ifneq ($(filter $(strip $(AARCH)),32 64),$(strip $(AARCH)))
+$(error Pi4 builds require AARCH=32 or AARCH=64)
 endif
-ifneq ($(BMX_PI5_SID_WORKER)$(BMX_PI5_SID_DIAGNOSTICS),00)
-$(error Pi5 SID worker and diagnostics are not supported in Pi4 builds)
-endif
-TARGET_BASENAME ?= kernel7l
+TARGET_BASENAME ?= $(if $(filter 64,$(strip $(AARCH))),kernel8,kernel7l)
+ifeq ($(strip $(AARCH)),32)
 C_STANDARD += -Wno-incompatible-pointer-types
+endif
 else ifeq ($(strip $(RASPPI)),5)
 ifneq ($(strip $(AARCH)),64)
 $(error Pi5 builds require 64-bit Circle)
@@ -152,7 +197,7 @@ BMC64_OBJS = main.o kernel.o mouse_input.o usb_keyboard_state.o viceoptions.o vi
              remote/http_parser.o \
              remote/http_response_writer.o remote/http_router.o \
              remote/http_server.o remote/http_types.o \
-             remote/remote_service.o \
+             remote/remote_service.o remote/v3d_test_status.o \
              update/build_info.o update/body_sinks.o \
              update/circle_secure_stream.o \
              update/config_migration.o update/config_schema.o \
@@ -182,11 +227,9 @@ BMC64_OBJS = main.o kernel.o mouse_input.o usb_keyboard_state.o viceoptions.o vi
 # all machine kernels without changing the existing direct-object link order.
 BMC64_MACHINE_OBJS := kernel.o viceapp.o machines/machine_descriptor.o
 
-ifeq ($(RASPPI),5)
-ifneq ($(BMX_PI5_SID_WORKER)$(BMX_PI5_SID_DIAGNOSTICS),00)
+ifneq ($(BMX_SID_WORKER)$(BMX_SID_DIAGNOSTICS),00)
 BMC64_OBJS += sidworker.o
 BMC64_MACHINE_OBJS += sidworker.o
-endif
 endif
 BMC64_COMMON_OBJS := $(filter-out $(BMC64_MACHINE_OBJS),$(BMC64_OBJS))
 OBJS = $(addprefix $(BMX_COMMON_BUILD_DIR)/,$(BMC64_COMMON_OBJS)) \
@@ -195,7 +238,44 @@ OBJS = $(addprefix $(BMX_COMMON_BUILD_DIR)/,$(BMC64_COMMON_OBJS)) \
 MINIZ_TINFL_OBJ := $(BMX_COMMON_BUILD_DIR)/update/miniz_tinfl.o
 OBJS += $(MINIZ_TINFL_OBJ)
 
+ifeq ($(BMX_V3D_RENDER_TEST_KERNEL),1)
+V3D_RENDER_TEST_SOURCE_DIR := tools/pi5/v3d-render-test
+OBJS += $(BMX_COMMON_BUILD_DIR)/v3dtest/network_render_test.o \
+	$(BMX_COMMON_BUILD_DIR)/v3dtest/review_capture.o \
+	$(BMX_COMMON_BUILD_DIR)/v3dtest/kms_mode_runner.o \
+	$(BMX_COMMON_BUILD_DIR)/v3dtest/render_matrix_runner.o \
+	$(BMX_COMMON_BUILD_DIR)/v3dtest/render_test_support.o
+
+$(BMX_COMMON_BUILD_DIR)/v3dtest/kms_mode_runner.o: \
+	$(V3D_RENDER_TEST_SOURCE_DIR)/kms_mode_runner.cpp | $(BMX_COMMON_BUILD_DIR)
+	@echo "  CPP   $@"
+	@mkdir -p $(dir $@)
+	@$(CPP) $(CPPFLAGS) -I$(V3D_RENDER_TEST_SOURCE_DIR) \
+		-MMD -MP -MF $(@:.o=.d) -MT $@ -c -o $@ $<
+
+$(BMX_COMMON_BUILD_DIR)/v3dtest/render_matrix_runner.o: \
+	$(V3D_RENDER_TEST_SOURCE_DIR)/render_matrix_runner.cpp | $(BMX_COMMON_BUILD_DIR)
+	@echo "  CPP   $@"
+	@mkdir -p $(dir $@)
+	@$(CPP) $(CPPFLAGS) -I$(V3D_RENDER_TEST_SOURCE_DIR) \
+		-MMD -MP -MF $(@:.o=.d) -MT $@ -c -o $@ $<
+
+$(BMX_COMMON_BUILD_DIR)/v3dtest/render_test_support.o: \
+	$(V3D_RENDER_TEST_SOURCE_DIR)/render_test_support.cpp | $(BMX_COMMON_BUILD_DIR)
+	@echo "  CPP   $@"
+	@mkdir -p $(dir $@)
+	@$(CPP) $(CPPFLAGS) -I$(V3D_RENDER_TEST_SOURCE_DIR) \
+		-MMD -MP -MF $(@:.o=.d) -MT $@ -c -o $@ $<
+endif
+
 OBJS	+= $(BMX_COMMON_BUILD_DIR)/viceemulatorcore.o
+OBJS	+= $(BMX_COMMON_BUILD_DIR)/v3dcrt/v3d_crt.o
+OBJS	+= $(BMX_COMMON_BUILD_DIR)/v3dcrt/effect_params.o
+OBJS	+= $(BMX_COMMON_BUILD_DIR)/v3dcrt/semantic_values.o
+OBJS	+= $(BMX_COMMON_BUILD_DIR)/v3dcrt/rgba8_texture_layout.o
+OBJS	+= $(BMX_COMMON_BUILD_DIR)/v3dcrt/output_response.o
+OBJS	+= $(BMX_COMMON_BUILD_DIR)/v3dcrt/shaders/shader_package.o
+OBJS	+= $(BMX_COMMON_BUILD_DIR)/kms/kms_mode.o
 ifneq ($(wildcard $(VICE_SOURCE)/blockdev.h),)
 OBJS	+= $(BMX_COMMON_BUILD_DIR)/vice_blockdev.o
 endif
@@ -209,9 +289,40 @@ endif
 endif
 
 ifeq ($(RASPPI),5)
-OBJS += $(BMX_COMMON_BUILD_DIR)/fbl_pi5.o $(BMX_COMMON_BUILD_DIR)/pi5_kms.o
+OBJS += $(BMX_COMMON_BUILD_DIR)/fbl_native_kms.o \
+	$(BMX_COMMON_BUILD_DIR)/pi5_kms.o \
+	$(BMX_COMMON_BUILD_DIR)/pi5v3d/pi5_v3d.o \
+	$(BMX_COMMON_BUILD_DIR)/pi5v3d/pi5_v3d71_texture_state.o \
+	$(BMX_COMMON_BUILD_DIR)/pi5v3d/pi5_v3d_shader.o \
+	$(BMX_COMMON_BUILD_DIR)/pi5v3d/shaders/pi5_shader_package_adapter.o \
+	$(BMX_COMMON_BUILD_DIR)/pi5v3d/shaders/shader_artifact_materializer.o
+else ifeq ($(AARCH),64)
+OBJS += $(BMX_COMMON_BUILD_DIR)/fbl_native_kms.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4kms/pi4_native_kms.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4kms/pi4_kms.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4kms/pi4_kms_dlist.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4kms/pi4_kms_mode.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4kms/pi4_kms_probe.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4v3d/pi4_v3d.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4v3d/pi4_v3d_identity.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4v3d/pi4_v3d_mmu.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4v3d/pi4_v3d_power.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4v3d/pi4_v3d42_shader_package_adapter.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4v3d/pi4_v3d42_texture_state.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4v3d/pi4_v3d_render.o
 else
-OBJS += $(BMX_COMMON_BUILD_DIR)/fbl.o
+OBJS += $(BMX_COMMON_BUILD_DIR)/fbl.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4kms/pi4_kms.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4kms/pi4_kms_dlist.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4kms/pi4_kms_mode.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4kms/pi4_kms_probe.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4v3d/pi4_v3d.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4v3d/pi4_v3d_identity.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4v3d/pi4_v3d_mmu.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4v3d/pi4_v3d_power.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4v3d/pi4_v3d42_shader_package_adapter.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4v3d/pi4_v3d42_texture_state.o \
+	$(BMX_COMMON_BUILD_DIR)/pi4v3d/pi4_v3d_render.o
 endif
 
 $(BMX_COMMON_BUILD_DIR)/pi5_kms.o: $(SRC_DIR)/pi5kms/pi5_kms.cpp | $(BMX_COMMON_BUILD_DIR)
@@ -228,12 +339,16 @@ CFLAGS += -I $(SRC_DIR) -I . -I third_party/common -I "$(NEWLIBDIR)/include" -I 
           -I $(CIRCLEHOME)/addon/fatfs \
           -DRASPI_COMPILE
 
-ifeq ($(RASPPI),5)
-CFLAGS += -DBMX_SID_WORKER=$(BMX_PI5_SID_WORKER) \
-	-DBMX_SID_DIAGNOSTICS=$(BMX_PI5_SID_DIAGNOSTICS)
-CPPFLAGS += -DBMX_SID_WORKER=$(BMX_PI5_SID_WORKER) \
-	-DBMX_SID_DIAGNOSTICS=$(BMX_PI5_SID_DIAGNOSTICS)
-endif
+CFLAGS += -DBMX_EMU_MULTICORE=$(BMX_EMU_MULTICORE) \
+	-DBMX_SID_WORKER=$(BMX_SID_WORKER) \
+	-DBMX_SID_DIAGNOSTICS=$(BMX_SID_DIAGNOSTICS) \
+	-DBMX_V3D_RENDER_TEST_KERNEL=$(BMX_V3D_RENDER_TEST_KERNEL)
+CPPFLAGS += -DBMX_EMU_MULTICORE=$(BMX_EMU_MULTICORE) \
+	-DBMX_SID_WORKER=$(BMX_SID_WORKER) \
+	-DBMX_SID_DIAGNOSTICS=$(BMX_SID_DIAGNOSTICS) \
+	-DBMX_V3D_RENDER_TEST_KERNEL=$(BMX_V3D_RENDER_TEST_KERNEL) \
+	-DBMX_PI4_LEGACY_DISPLAY=$(if $(filter 4-32,$(RASPPI)-$(AARCH)),1,0)
+CFLAGS += -DBMX_PI4_LEGACY_DISPLAY=$(if $(filter 4-32,$(RASPPI)-$(AARCH)),1,0)
 
 # Circle's freestanding operator new/new[] returns null on allocation failure.
 # GCC may otherwise assume throwing-new semantics and remove the explicit null
@@ -382,8 +497,7 @@ LIBS := $(VICELIBS) \
         $(CIRCLEHOME)/addon/linux/liblinuxemu.a \
         $(CIRCLEHOME)/lib/sound/libsound.a
 
-ifeq ($(RASPPI),5)
-else
+ifeq ($(RASPPI)-$(AARCH),4-32)
 LIBS += $(CIRCLEHOME)/addon/vc4/vchiq/libvchiq.a \
 	$(CIRCLEHOME)/addon/vc4/interface/bcm_host/libbcm_host.a \
 	$(CIRCLEHOME)/addon/vc4/interface/khronos/libkhrn_client.a \

@@ -17,6 +17,9 @@ namespace {
 const char kDeveloperPrefix[] = "/bmx/dev/v1";
 const char kFilePrefix[] = "/bmx/dev/v1/fs/";
 const char kDirectoryPrefix[] = "/bmx/dev/v1/directory/";
+const char kV3dReviewPath[] = "/bmx/dev/v1/v3d-review";
+const char kV3dReviewScreenshotPath[] =
+    "/bmx/dev/v1/v3d-review/screenshot.ppm";
 
 void CloseDeveloperFileVolume(
     void *context, bmx::update::UpdateFileSystem *file_system)
@@ -49,7 +52,7 @@ public:
     StatusResponse() : body_() {}
     void Complete(HttpCompletionReason) override { delete this; }
 
-    char body_[4096U];
+    char body_[5U * 1024U];
 };
 
 class MemoryResponse : public HttpCompletion {
@@ -62,6 +65,21 @@ public:
 
 private:
     uint8_t *data_;
+};
+
+class V3dScreenshotResponse : public HttpCompletion {
+public:
+    V3dScreenshotResponse(uint8_t *data, void (*release)(uint8_t *))
+        : data_(data), release_(release) {}
+    void Complete(HttpCompletionReason) override {
+        if (release_ != 0) release_(data_);
+        else free(data_);
+        delete this;
+    }
+
+private:
+    uint8_t *data_;
+    void (*release_)(uint8_t *);
 };
 
 class RebootCompletion : public OwnedResponse {
@@ -527,6 +545,10 @@ void DeveloperRouter::Route(const HttpRequestHead &request,
     } else if (ExactPath(request.raw_path,
                          "/bmx/dev/v1/diagnostics/usb/stop")) {
         RouteUsbStop(request, result);
+    } else if (ExactPath(request.raw_path, kV3dReviewScreenshotPath)) {
+        RouteV3dReviewScreenshot(request, result);
+    } else if (ExactPath(request.raw_path, kV3dReviewPath)) {
+        RouteV3dReview(request, result);
     } else {
         RespondJsonError(404U, "{\"error\":\"not found\"}\n", result);
     }
@@ -637,6 +659,47 @@ void DeveloperRouter::RouteStatus(const HttpRequestHead &request,
     writer.Unsigned(status.uptime_ms);
     writer.Text(",\"network_ready\":");
     writer.Boolean(status.network_ready);
+    writer.Text(",\"v3d_test\":{\"enabled\":");
+    writer.Boolean(status.v3d_test.enabled);
+    writer.Text(",\"running\":");
+    writer.Boolean(status.v3d_test.running);
+    writer.Text(",\"complete\":");
+    writer.Boolean(status.v3d_test.complete);
+    writer.Text(",\"backend\":");
+    writer.String(status.v3d_test.backend);
+    writer.Text(",\"phase\":");
+    writer.String(status.v3d_test.phase);
+    writer.Text(",\"current_case\":");
+    writer.String(status.v3d_test.current_case);
+    writer.Text(",\"result\":");
+    writer.String(status.v3d_test.result);
+    writer.Text(",\"passed\":");
+    writer.Unsigned(status.v3d_test.passed);
+    writer.Text(",\"failed\":");
+    writer.Unsigned(status.v3d_test.failed);
+    writer.Text(",\"skipped\":");
+    writer.Unsigned(status.v3d_test.skipped);
+    writer.Text(",\"unbaselined\":");
+    writer.Unsigned(status.v3d_test.unbaselined);
+    writer.Text(",\"kms_passed\":");
+    writer.Unsigned(status.v3d_test.kms_passed);
+    writer.Text(",\"review_available\":");
+    writer.Boolean(status.v3d_test.review_available);
+    writer.Text(",\"review_active\":");
+    writer.Boolean(status.v3d_test.review_active);
+    writer.Text(",\"screenshot_available\":");
+    writer.Boolean(status.v3d_test.screenshot_available);
+    writer.Text(",\"review_index\":");
+    writer.Unsigned(status.v3d_test.review_index);
+    writer.Text(",\"review_total\":");
+    writer.Unsigned(status.v3d_test.review_total);
+    writer.Text(",\"review_generation\":");
+    writer.Unsigned(status.v3d_test.review_generation);
+    writer.Text(",\"review_case\":");
+    writer.String(status.v3d_test.review_case);
+    writer.Text(",\"review_error\":");
+    writer.String(status.v3d_test.review_error);
+    writer.Text("}");
     writer.Text(",\"ram_total_kb\":");
     writer.Unsigned(status.ram_total_kb);
     writer.Text(",\"heap_free_kb\":");
@@ -1384,6 +1447,165 @@ void DeveloperRouter::RouteLogs(const HttpRequestHead &request,
     if (reset) response.AddHeader("X-BMX-Log-Reset", "1");
     response.SetStream(stream);
     response.completion = stream;
+    result->Respond(response);
+}
+
+void DeveloperRouter::RouteV3dReview(const HttpRequestHead &request,
+                                     HttpRouteResult *result)
+{
+    if (request.method != HttpMethod::Post) {
+        MethodError(result);
+        return;
+    }
+    if (!request.has_query ||
+        (request.has_content_length && request.content_length != 0U) ||
+        !OnlyQueryNames(request.raw_query, "action", "index")) {
+        BadRequest("{\"error\":\"invalid V3D review request\"}\n", result);
+        return;
+    }
+
+    HttpStringView action_value;
+    HttpStringView index_value;
+    unsigned action_count = 0U;
+    unsigned index_count = 0U;
+    QueryValue(request.raw_query, "action", &action_value, &action_count);
+    QueryValue(request.raw_query, "index", &index_value, &index_count);
+    V3dTestReviewAction action = V3dTestReviewAction::None;
+    const char *action_text = 0;
+    if (action_count == 1U && HttpStringEquals(action_value, "show")) {
+        action = V3dTestReviewAction::Show;
+        action_text = "show";
+    } else if (action_count == 1U &&
+               HttpStringEquals(action_value, "first")) {
+        action = V3dTestReviewAction::First;
+        action_text = "first";
+    } else if (action_count == 1U &&
+               HttpStringEquals(action_value, "last")) {
+        action = V3dTestReviewAction::Last;
+        action_text = "last";
+    } else if (action_count == 1U &&
+               HttpStringEquals(action_value, "next")) {
+        action = V3dTestReviewAction::Next;
+        action_text = "next";
+    } else if (action_count == 1U &&
+               HttpStringEquals(action_value, "previous")) {
+        action = V3dTestReviewAction::Previous;
+        action_text = "previous";
+    } else if (action_count == 1U &&
+               HttpStringEquals(action_value, "continue")) {
+        action = V3dTestReviewAction::Continue;
+        action_text = "continue";
+    } else {
+        BadRequest("{\"error\":\"invalid V3D review action\"}\n", result);
+        return;
+    }
+
+    uint32_t index = 0U;
+    if ((action == V3dTestReviewAction::Show &&
+         (index_count != 1U ||
+          !ParseUnsignedDecimal(index_value, 0U, UINT32_MAX, &index))) ||
+        (action != V3dTestReviewAction::Show && index_count != 0U)) {
+        BadRequest("{\"error\":\"invalid V3D review index\"}\n", result);
+        return;
+    }
+
+    const V3dTestReviewRequestStatus status =
+        backend_->RequestV3dTestReview(action, index);
+    if (status == V3dTestReviewRequestStatus::InvalidIndex) {
+        BadRequest("{\"error\":\"V3D review index out of range\"}\n",
+                   result);
+        return;
+    }
+    if (status == V3dTestReviewRequestStatus::Busy) {
+        RespondJsonError(409U, "{\"error\":\"V3D review busy\"}\n",
+                         result);
+        return;
+    }
+    if (status != V3dTestReviewRequestStatus::Accepted) {
+        RespondJsonError(503U,
+                         "{\"error\":\"V3D review unavailable\"}\n",
+                         result);
+        return;
+    }
+
+    OwnedResponse *owned = new OwnedResponse();
+    if (owned == 0) {
+        InternalError(result);
+        return;
+    }
+    BoundedJsonWriter writer(owned->body_, sizeof owned->body_);
+    writer.Text("{\"accepted\":true,\"action\":");
+    writer.String(action_text);
+    if (action == V3dTestReviewAction::Show) {
+        writer.Text(",\"index\":");
+        writer.Unsigned(index);
+    }
+    writer.Text("}\n");
+    if (!writer.valid()) {
+        delete owned;
+        InternalError(result);
+        return;
+    }
+    HttpResponse response;
+    response.Reset(202U);
+    response.AddHeader("Content-Type", "application/json");
+    response.SetFixedText(owned->body_);
+    response.completion = owned;
+    result->Respond(response);
+}
+
+void DeveloperRouter::RouteV3dReviewScreenshot(
+    const HttpRequestHead &request, HttpRouteResult *result)
+{
+    if (request.method != HttpMethod::Get) {
+        MethodError(result);
+        return;
+    }
+    if (request.has_content_length && request.content_length != 0U) {
+        BadRequest("{\"error\":\"screenshot body must be empty\"}\n",
+                   result);
+        return;
+    }
+    uint32_t maximum_width = 0U;
+    if (request.has_query) {
+        HttpStringView width_value;
+        unsigned width_count = 0U;
+        QueryValue(request.raw_query, "width", &width_value, &width_count);
+        if (!OnlyQueryNames(request.raw_query, "width") ||
+            width_count != 1U ||
+            !ParseUnsignedDecimal(width_value, 160U, 3840U,
+                                  &maximum_width)) {
+            BadRequest("{\"error\":\"invalid screenshot width\"}\n",
+                       result);
+            return;
+        }
+    }
+
+    BmxBinaryPayload payload = {};
+    if (!backend_->CaptureV3dTestReviewScreenshot(maximum_width, &payload) ||
+        payload.data == 0 || payload.size == 0U || payload.width == 0U ||
+        payload.height == 0U) {
+        if (payload.release != 0) payload.release(payload.data);
+        else free(payload.data);
+        RespondJsonError(409U,
+                         "{\"error\":\"V3D review screenshot unavailable\"}\n",
+                         result);
+        return;
+    }
+    V3dScreenshotResponse *owned =
+        new V3dScreenshotResponse(payload.data, payload.release);
+    if (owned == 0) {
+        if (payload.release != 0) payload.release(payload.data);
+        else free(payload.data);
+        InternalError(result);
+        return;
+    }
+    HttpResponse response;
+    response.Reset(200U);
+    response.AddHeader("Content-Type", "image/x-portable-pixmap");
+    response.AddHeader("Cache-Control", "no-store");
+    response.SetFixedBody(payload.data, payload.size);
+    response.completion = owned;
     result->Respond(response);
 }
 

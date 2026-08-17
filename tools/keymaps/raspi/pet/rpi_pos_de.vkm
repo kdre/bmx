@@ -28,8 +28,8 @@ Down 5 4 8
 F1 2 0 8
 F2 8 0 8
 Page_Down 7 6 8
-Control_L -1 -1 0
-Control_R -1 -1 0
+!UNDEF Control_L
+!UNDEF Control_R
 
 # Generated from C64 positional DE reference.
 LeftBracket 3 6 0  # at

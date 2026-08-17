@@ -32,7 +32,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <circle/bcmpropertytags.h>
 #include <circle/gpiopin.h>
+#include <circle/multicore.h>
 #include <circle/startup.h>
 #if RASPPI == 4
 #include <circle/bcm2835.h>
@@ -57,6 +59,9 @@ enum BmxRemoteMenuId {
   {key, id, 0, MENU_CONTROL_PUBLIC_CONTROL, MENU_CONTROL_ACTION_NONE}
 #define BMX_REMOTE_ACTION(key, id) \
   {key, id, 0, MENU_CONTROL_PUBLIC_ACTION, MENU_CONTROL_ACTION_NONE}
+#define BMX_REMOTE_ACTION_ANY_SUB(key, id) \
+  {key, id, MENU_CONTROL_SUB_ID_ANY, MENU_CONTROL_PUBLIC_ACTION, \
+   MENU_CONTROL_ACTION_NONE}
 #define BMX_REMOTE_MEDIA_ACTION(key, id) \
   {key, id, 0, MENU_CONTROL_PUBLIC_ACTION, MENU_CONTROL_ACTION_MEDIA_PATH}
 
@@ -77,8 +82,10 @@ static const menu_control_public_binding kVicePublicBindings[] = {
                        MENU_TAPE_RESET_WITH_MACHINE),
     BMX_REMOTE_CONTROL("video.diagnostics.overlay",
                        MENU_DIAGNOSTICS_OVERLAY),
-    BMX_REMOTE_CONTROL("video.scaling.interpolation",
-                       MENU_SCALING_INTERPOLATION),
+
+#include "remote/vice_video_bindings.inc"
+
+#include "remote/vice_machine_bindings.inc"
 
     BMX_REMOTE_ACTION("emulation.reset.hard", MENU_HARD_RESET),
     BMX_REMOTE_ACTION("emulation.reset.soft", MENU_SOFT_RESET),
@@ -106,6 +113,7 @@ static const menu_control_public_binding kVicePublicBindings[] = {
 };
 
 #undef BMX_REMOTE_MEDIA_ACTION
+#undef BMX_REMOTE_ACTION_ANY_SUB
 #undef BMX_REMOTE_ACTION
 #undef BMX_REMOTE_CONTROL
 
@@ -328,6 +336,16 @@ unsigned long circle_get_ticks() {
   return static_kernel->circle_get_ticks();
 }
 
+uint64_t circle_get_ticks64() {
+  // Keep long-running diagnostics monotonic on 32-bit Pi4 builds.
+  return static_kernel->circle_get_ticks64();
+}
+
+int circle_run_on_platform_core(circle_platform_call_t function,
+                                void *context) {
+  return static_kernel->circle_run_on_platform_core(function, context);
+}
+
 int circle_sound_bufferspace() {
   // Sound init will happen before this so this is okay
   return static_kernel->circle_sound_bufferspace();
@@ -366,6 +384,12 @@ void circle_yield(void) {
   // Scheduler guaranteed to be ready before vice calls this.
   static_kernel->circle_yield();
 }
+
+#if BMX_V3D_RENDER_TEST_KERNEL
+void circle_v3d_test_poll_remote(void) {
+  static_kernel->circle_v3d_test_poll_remote();
+}
+#endif
 
 void circle_check_gpio() {
   // GPIO pins guaranteed to be setup before vice calls this.
@@ -406,6 +430,18 @@ int circle_realloc_fbl(int layer, int shader) {
   return static_kernel->circle_realloc_fbl(layer, shader);
 }
 
+int circle_shader_backend_available() {
+  return static_kernel->circle_shader_backend_available();
+}
+
+int circle_shader_backend_available_for_layer(int layer) {
+  return static_kernel->circle_shader_backend_available_for_layer(layer);
+}
+
+int circle_status_layer_can_coexist_with_ui() {
+  return static_kernel->circle_status_layer_can_coexist_with_ui();
+}
+
 void circle_free_fbl(int layer) {
   static_kernel->circle_free_fbl(layer);
 }
@@ -424,6 +460,10 @@ void circle_hide_fbl(int layer) {
 
 void circle_present_fbl(uint32_t ready_mask, int sync) {
   static_kernel->circle_present_fbl(ready_mask, sync);
+}
+
+int circle_get_last_present_timing(struct circle_present_timing *timing) {
+  return static_kernel->circle_get_last_present_timing(timing);
 }
 
 void circle_set_palette_fbl(int layer, uint8_t index, uint16_t rgb565) {
@@ -551,42 +591,54 @@ void circle_set_use_shader(int enable) {
   static_kernel->circle_set_use_shader(enable);
 }
 
-void circle_set_shader_params(int curvature,
-		float curvature_x,
-		float curvature_y,
-		int mask,
-		float mask_brightness,
-		int gamma,
-		int fake_gamma,
-		int scanlines,
-		int multisample,
-		float scanline_weight,
-		float scanline_gap_brightness,
-		float bloom_factor,
-		float input_gamma,
-		float output_gamma,
-		int sharper,
-                int bilinear_interpolation) {
-  static_kernel->circle_set_shader_params(curvature,
-			curvature_x,
-			curvature_y,
-			mask,
-			mask_brightness,
-			gamma,
-			fake_gamma,
-			scanlines,
-			multisample,
-			scanline_weight,
-			scanline_gap_brightness,
-			bloom_factor,
-			input_gamma,
-			output_gamma,
-			sharper,
-                        bilinear_interpolation);
+void circle_set_shader_params(const struct bmx_crt_effect_params *params) {
+  if (params != nullptr) {
+    static_kernel->circle_set_shader_params(*params);
+  }
 }
 };
 
 namespace {
+
+struct TDiagnosticsPropertyTags {
+  TPropertyTagClockRate measured_clock;
+  TPropertyTagClockRate current_clock;
+  TPropertyTagTemperature temperature;
+} PACKED;
+
+void initialize_property_tag(TPropertyTag *tag, u32 tag_id,
+                             unsigned value_buffer_size) {
+  tag->nTagId = tag_id;
+  tag->nValueBufSize = value_buffer_size;
+  tag->nValueLength = sizeof(u32);
+}
+
+void initialize_diagnostics_property_tags(TDiagnosticsPropertyTags *tags) {
+  memset(tags, 0, sizeof(*tags));
+
+  initialize_property_tag(
+      &tags->measured_clock.Tag, PROPTAG_GET_CLOCK_RATE_MEASURED,
+      sizeof(tags->measured_clock) - sizeof(TPropertyTag));
+  tags->measured_clock.nClockId = CLOCK_ID_ARM;
+
+  initialize_property_tag(
+      &tags->current_clock.Tag, PROPTAG_GET_CLOCK_RATE,
+      sizeof(tags->current_clock) - sizeof(TPropertyTag));
+  tags->current_clock.nClockId = CLOCK_ID_ARM;
+
+  initialize_property_tag(
+      &tags->temperature.Tag, PROPTAG_GET_TEMPERATURE,
+      sizeof(tags->temperature) - sizeof(TPropertyTag));
+  tags->temperature.nTemperatureId = TEMPERATURE_ID;
+}
+
+bool property_tag_has_response(const TPropertyTag &tag,
+                               unsigned expected_value_size) {
+  const u32 response_size =
+      tag.nValueLength & ~static_cast<u32>(VALUE_LENGTH_RESPONSE);
+  return (tag.nValueLength & VALUE_LENGTH_RESPONSE) != 0 &&
+         response_size >= expected_value_size;
+}
 
 // VICE normally enters the cooperative Circle scheduler once per emulated
 // frame.  WLAN, IP and HTTP processing often needs several task turns for one
@@ -596,6 +648,16 @@ namespace {
 #ifndef BMC64_USE_EMU_MULTICORE
 static const unsigned kWlanSchedulerPumpMaxRounds = 4U;
 static const uint64_t kWlanSchedulerPumpBudgetUS = 1000U;
+#endif
+
+#if BMX_PI4_CORE0_DISPATCHER && BMX_SID_DIAGNOSTICS
+void atomic_update_max_u32(uint32_t *maximum, uint32_t value) {
+  uint32_t current = __atomic_load_n(maximum, __ATOMIC_RELAXED);
+  while (current < value &&
+         !__atomic_compare_exchange_n(maximum, &current, value, false,
+                                      __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+  }
+}
 #endif
 
 long func_to_keycode(int btn_func) {
@@ -645,9 +707,30 @@ CKernel::CKernel(void)
       mSoundSampleRate(SAMPLE_RATE),
       mNumCoresComplete(0),
       mNeedSoundInit(false), mNumSoundChannels(1),
+      mDiagnosticsFirmwareValid(false), mDiagnosticsFirmwareTicks(0),
+      mDiagnosticsArmClockHz(0), mDiagnosticsTemperatureC(0),
+      mDiagnosticsThrottleClockHz(0),
       mSchedulerSafePoints(0U), mSchedulerRounds(0U),
       mSchedulerExtraRounds(0U), mSchedulerPumpUS(0U),
-      mSchedulerPumpMaxUS(0U), mSchedulerPumpBudgetStops(0U) {
+      mSchedulerPumpMaxUS(0U), mSchedulerPumpBudgetStops(0U)
+#if BMX_PI4_CORE0_DISPATCHER
+      , mCore0FBLLogged(false), mPi4NativeViceCoreLogged(false)
+#if BMX_SID_DIAGNOSTICS
+      , mCore0LoopLastUS(0U), mCore0LoopGapMaxUS(0U),
+      mCore0LoopGapOver10MS(0U), mCore0LoopGapOver20MS(0U),
+      mCore0LoopGapOver40MS(0U), mCore0LastGapOver10MSAtMS(0U),
+      mCore0YieldMaxUS(0U), mPi4PresentMaxUS(0U),
+      mPi4PresentOver20MS(0U), mPi4PresentOver40MS(0U),
+      mPi4PresentLastOver20MSAtMS(0U), mPi4PresentCore(0U),
+      mPi4PresentFenceMaxUS(0U), mPi4PresentRenderMaxUS(0U),
+      mPi4PresentSubmitMaxUS(0U), mPi4PresentFenceOver20MS(0U),
+      mPi4PresentRenderOver20MS(0U), mPi4PresentSubmitOver20MS(0U),
+      mPi4PresentLastSlowFenceUS(0U), mPi4PresentLastSlowRenderUS(0U),
+      mPi4PresentLastSlowSubmitUS(0U),
+      mCore0DiagnosticsMaxUS(0U)
+#endif
+#endif
+      {
   static_kernel = this;
   (void)menu_control_public_set_bindings(
       kVicePublicBindings,
@@ -709,6 +792,13 @@ bool CKernel::Initialize(void) {
   if (!ViceStdioApp::Initialize()) {
     return false;
   }
+
+#if BMX_PI4_CORE0_DISPATCHER
+  // Property-tag requests synchronously occupy Core 0.  Take the diagnostic
+  // firmware sample before Core 1 starts VICE so runtime status requests can
+  // remain side-effect-free and cannot starve the HDMI audio queue.
+  RefreshDiagnosticsFirmwareCache();
+#endif
 
   if (circle_gpio_enabled()) {
     uint32_t levels = CGPIOPin::ReadAll();
@@ -1293,6 +1383,57 @@ void CKernel::PublishCurrentSoundOutput() {
   emu_set_current_sound_output(output, mUSBOutputProduct);
 }
 
+#ifdef BMC64_USE_EMU_MULTICORE
+void CKernel::RunCore0Scheduler(void) {
+  const unsigned core = CMultiCoreSupport::ThisCore();
+  printf("multicore: core 0 scheduler owner core %u\r\n", core);
+  if (core != 0U) {
+    printf("multicore: refusing core 0 scheduler on foreign core %u\r\n",
+           core);
+    for (;;) {
+      CTimer::SimpleMsDelay(1000U);
+    }
+  }
+
+  for (;;) {
+#if BMX_PI4_CORE0_DISPATCHER && BMX_SID_DIAGNOSTICS
+    const uint32_t loop_started_us = CTimer::GetClockTicks();
+    if (mCore0LoopLastUS != 0U) {
+      const uint32_t loop_gap_us = loop_started_us - mCore0LoopLastUS;
+      atomic_update_max_u32(&mCore0LoopGapMaxUS, loop_gap_us);
+      if (loop_gap_us > 10000U) {
+        __atomic_fetch_add(&mCore0LoopGapOver10MS, 1U, __ATOMIC_RELAXED);
+        __atomic_store_n(&mCore0LastGapOver10MSAtMS,
+                         loop_started_us / 1000U, __ATOMIC_RELAXED);
+      }
+      if (loop_gap_us > 20000U) {
+        __atomic_fetch_add(&mCore0LoopGapOver20MS, 1U, __ATOMIC_RELAXED);
+      }
+      if (loop_gap_us > 40000U) {
+        __atomic_fetch_add(&mCore0LoopGapOver40MS, 1U, __ATOMIC_RELAXED);
+      }
+    }
+    mCore0LoopLastUS = loop_started_us;
+#endif
+
+#if BMX_PI4_CORE0_DISPATCHER
+    ProcessCore0Request();
+#endif
+
+    // Circle tasks can become runnable without publishing an inter-core
+    // event.  Keep yielding cooperatively; do not wait on WFE here.
+#if BMX_PI4_CORE0_DISPATCHER && BMX_SID_DIAGNOSTICS
+    const uint32_t yield_started_us = CTimer::GetClockTicks();
+#endif
+    CScheduler::Get()->Yield();
+#if BMX_PI4_CORE0_DISPATCHER && BMX_SID_DIAGNOSTICS
+    atomic_update_max_u32(&mCore0YieldMaxUS,
+                          CTimer::GetClockTicks() - yield_started_us);
+#endif
+  }
+}
+#endif
+
 ViceApp::TShutdownMode CKernel::Run(void) {
   printf("boot: kernel run enter\r\n");
 
@@ -1324,10 +1465,15 @@ ViceApp::TShutdownMode CKernel::Run(void) {
   printf("boot: emulator returned\r\n");
 #else
   printf("Core 0 servicing Circle, network and USB plug-and-play\n");
-  if (mNetworkService == nullptr) {
-    return ShutdownHalt;
-  }
-  mNetworkService->RunScheduler();
+
+#if BMX_PI4_CORE0_DISPATCHER
+  // Pi4 starts Core 1 here so the synchronous legacy display bridge can be
+  // serviced immediately. Pi5 keeps its earlier USB-initialization launch.
+  printf("multicore: pi4 core 0 dispatcher ready\r\n");
+  mEmulatorCore->LaunchEmulator(mTimingOption);
+  printf("boot: emulator launched\r\n");
+#endif
+  RunCore0Scheduler();
 #endif
   return ShutdownHalt;
 }
@@ -1747,6 +1893,176 @@ void CKernel::circle_sleep(long delay) { mTimer.SimpleusDelay(delay); }
 
 unsigned long CKernel::circle_get_ticks() { return mTimer.GetClockTicks(); }
 
+uint64_t CKernel::circle_get_ticks64() { return CTimer::GetClockTicks64(); }
+
+int CKernel::circle_run_on_platform_core(circle_platform_call_t function,
+                                         void *context) {
+  if (function == nullptr) {
+    return -1;
+  }
+#if BMX_PI4_CORE0_DISPATCHER
+  const unsigned core = CMultiCoreSupport::ThisCore();
+  if (core == 0 || !ShouldDispatchPi4LegacyDisplayCall()) {
+    return function(context);
+  }
+  assert(core == 1);
+  if (core != 1) {
+    return -1;
+  }
+  mCore0Request.args.platformCall = {function, context};
+  SubmitCore0Request(Core0Command::PlatformCall);
+  return mCore0Request.result;
+#else
+  return function(context);
+#endif
+}
+
+#if BMX_PI4_CORE0_DISPATCHER
+void CKernel::SubmitCore0Request(Core0Command command) {
+  const unsigned core = CMultiCoreSupport::ThisCore();
+  assert(core == 1);
+  (void) core;
+  mCore0Request.command = command;
+  mCore0Mailbox.RequestAndWait();
+}
+
+bool CKernel::ShouldDispatchPi4LegacyDisplayCall() const {
+  const unsigned core = CMultiCoreSupport::ThisCore();
+  assert(core == 0 || core == 1);
+  // The first native present remains a Pi4 hardware handover on Core 0.  Once
+  // that one-way transition is committed, runtime framebuffer and capture
+  // operations have the same Core-1 ownership as Pi5.  A disabled or failed
+  // takeover keeps the legacy DispmanX bridge on Core 0.
+  return core == 1 && !pi4kms::NativeScanoutCommitted();
+}
+
+void CKernel::ProcessCore0Request() {
+  if (!mCore0Mailbox.HasPendingRequest()) {
+    return;
+  }
+
+  const unsigned core = CMultiCoreSupport::ThisCore();
+  assert(core == 0);
+  (void) core;
+  mCore0Request.result = 0;
+
+  if (mCore0Request.command <= Core0Command::FBLSetShaderParams) {
+    if (!mCore0FBLLogged) {
+      printf("multicore: pi4 VC4 requests executing on core 0\r\n");
+      mCore0FBLLogged = true;
+    }
+  }
+
+  switch (mCore0Request.command) {
+  case Core0Command::FBLAllocate: {
+    const auto &request = mCore0Request.args.allocate;
+    mCore0Request.result =
+        fbl[request.layer].Allocate(request.pixelmode, request.pixels,
+                                    request.width, request.height,
+                                    request.pitch);
+    break;
+  }
+  case Core0Command::FBLReAllocate:
+    mCore0Request.result =
+        fbl[mCore0Request.args.layerValue.layer].ReAllocate(
+            mCore0Request.args.layerValue.value);
+    break;
+  case Core0Command::FBLFree:
+    fbl[mCore0Request.args.layer.layer].Free();
+    break;
+  case Core0Command::FBLClear:
+    fbl[mCore0Request.args.layer.layer].Clear();
+    break;
+  case Core0Command::FBLShow:
+    fbl[mCore0Request.args.layer.layer].Show();
+    break;
+  case Core0Command::FBLHide:
+    fbl[mCore0Request.args.layer.layer].Hide();
+    break;
+  case Core0Command::FBLPresent: {
+    PresentFrameBufferLayers(mCore0Request.args.present.readyMask,
+                             mCore0Request.args.present.sync);
+    break;
+  }
+  case Core0Command::FBLSetPalette16: {
+    const auto &request = mCore0Request.args.palette16;
+    fbl[request.layer].SetPalette(request.index, request.rgb565);
+    break;
+  }
+  case Core0Command::FBLSetPalette32: {
+    const auto &request = mCore0Request.args.palette32;
+    fbl[request.layer].SetPalette(request.index, request.argb);
+    break;
+  }
+  case Core0Command::FBLUpdatePalette:
+    fbl[mCore0Request.args.layer.layer].UpdatePalette();
+    break;
+  case Core0Command::FBLSetStretch: {
+    const auto &request = mCore0Request.args.stretch;
+    fbl[request.layer].SetStretch(
+        request.hstretch, request.vstretch, request.hintstr, request.vintstr,
+        request.useHintstr, request.useVintstr);
+    break;
+  }
+  case Core0Command::FBLSetCenterOffset:
+    fbl[mCore0Request.args.pair.layer].SetCenterOffset(
+        mCore0Request.args.pair.first, mCore0Request.args.pair.second);
+    break;
+  case Core0Command::FBLSetSrcRect: {
+    const auto &request = mCore0Request.args.rect;
+    fbl[request.layer].SetSrcRect(request.x, request.y, request.width,
+                                  request.height);
+    break;
+  }
+  case Core0Command::FBLSetVAlign:
+    fbl[mCore0Request.args.pair.layer].SetVerticalAlignment(
+        mCore0Request.args.pair.first, mCore0Request.args.pair.second);
+    break;
+  case Core0Command::FBLSetHAlign:
+    fbl[mCore0Request.args.pair.layer].SetHorizontalAlignment(
+        mCore0Request.args.pair.first, mCore0Request.args.pair.second);
+    break;
+  case Core0Command::FBLSetPadding: {
+    const auto &request = mCore0Request.args.padding;
+    fbl[request.layer].SetPadding(request.left, request.right, request.top,
+                                  request.bottom);
+    break;
+  }
+  case Core0Command::FBLSetZLayer:
+    fbl[mCore0Request.args.layerValue.layer].SetLayer(
+        mCore0Request.args.layerValue.value);
+    break;
+  case Core0Command::FBLGetZLayer:
+    mCore0Request.result = fbl[mCore0Request.args.layer.layer].GetLayer();
+    break;
+  case Core0Command::FBLGetDimensions: {
+    const auto &request = mCore0Request.args.dimensions;
+    fbl[request.layer].GetDimensions(
+        request.displayWidth, request.displayHeight, request.fbWidth,
+        request.fbHeight, request.srcWidth, request.srcHeight,
+        request.dstWidth, request.dstHeight);
+    break;
+  }
+  case Core0Command::FBLSetInterpolation:
+    FrameBufferLayer::SetInterpolation(mCore0Request.args.layerValue.value);
+    break;
+  case Core0Command::FBLSetUseShader:
+    fbl[0].SetUsesShader(mCore0Request.args.layerValue.value);
+    break;
+  case Core0Command::FBLSetShaderParams: {
+    fbl[0].SetShaderParams(mCore0Request.args.shader);
+    break;
+  }
+  case Core0Command::PlatformCall:
+    mCore0Request.result = mCore0Request.args.platformCall.function(
+        mCore0Request.args.platformCall.context);
+    break;
+  }
+
+  mCore0Mailbox.CompleteRequest();
+}
+#endif
+
 // Called from VICE: Core 1
 int CKernel::circle_sound_init(const char *param, int *speed, int *fragsize,
                                int *fragnr, int *channels) {
@@ -1757,9 +2073,9 @@ int CKernel::circle_sound_init(const char *param, int *speed, int *fragsize,
   mNumSoundChannels = *channels;
   printf("boot: sound sample rate %u Hz\r\n", mSoundSampleRate);
 
-  // NOTE: We init sound after boot is complete to avoid an initial
-  // sound sync issue if a cartridge is attached. But if it's already
-  // initialised, cancel and restart here in case channels has changed.
+  // Initialize sound after boot to avoid the cartridge startup sync issue.
+  // Like Pi5, Pi4 owns the sound lifecycle on the VICE core; DMA and its
+  // interrupt-driven consumer remain independent of that control context.
 #ifdef BMC64_USE_EMU_MULTICORE
   circle_lock_acquire();
 #endif
@@ -1821,6 +2137,11 @@ void CKernel::circle_yield(void) {
   // Core 0 continuously owns and drives Circle. This VICE safe point only
   // consumes application-level handoffs.
   ++mSchedulerSafePoints;
+#if BMX_PI4_CORE0_DISPATCHER
+  // CKernel drives the Circle scheduler on core 0 while this core waits for
+  // the next VICE safe point.
+  asm volatile("yield" ::: "memory");
+#endif
 #else
   const bool pump_wlan =
       mViceOptions.GetNetworkAdapter() == BMX_NETWORK_WIFI;
@@ -1848,6 +2169,12 @@ void CKernel::circle_yield(void) {
 #endif
 }
 
+#if BMX_V3D_RENDER_TEST_KERNEL
+void CKernel::circle_v3d_test_poll_remote(void) {
+  ProcessRemoteCommand();
+}
+#endif
+
 void CKernel::ProcessRemoteCommand() {
   if (mRemoteService == nullptr) return;
   mRemoteService->Capture()->PumpAudioCancel();
@@ -1858,16 +2185,36 @@ void CKernel::ProcessRemoteCommand() {
     return;
   }
 
-  printf("developer: reboot requested\r\n");
-  StopRemoteService();
+  const unsigned long reboot_started_us = CTimer::GetClockTicks();
+#ifdef BMC64_USE_EMU_MULTICORE
+  const unsigned reboot_core = CMultiCoreSupport::ThisCore();
+#else
+  const unsigned reboot_core = 0U;
+#endif
+  printf("developer: reboot phase=requested core=%u\r\n", reboot_core);
+  // Pi4 and Pi5 use the same shutdown owner: VICE completes emulator and
+  // storage shutdown on Core 1 while Core 0 keeps the Circle scheduler and
+  // RemoteService task runnable until the stop request has been consumed.
+  printf("developer: reboot phase=emulator-shutdown-begin\r\n");
+#if BMX_V3D_RENDER_TEST_KERNEL
+  printf("developer: emulator shutdown skipped for V3D render test\r\n");
+#else
   if (emux_prepare_shutdown() != 0) {
     printf("developer: emulator shutdown failed; reboot cancelled\r\n");
     return;
   }
-  if (PrepareSystemShutdown() != 0) {
+#endif
+  printf("developer: reboot phase=emulator-shutdown-done elapsed_us=%lu\r\n",
+         CTimer::GetClockTicks() - reboot_started_us);
+  printf("developer: reboot phase=platform-shutdown-begin\r\n");
+  if (circle_prepare_system_shutdown() != 0) {
     printf("developer: storage shutdown failed; reboot cancelled\r\n");
     return;
   }
+  printf("developer: reboot phase=platform-shutdown-done elapsed_us=%lu\r\n",
+         CTimer::GetClockTicks() - reboot_started_us);
+  printf("developer: reboot phase=reset-call elapsed_us=%lu\r\n",
+         CTimer::GetClockTicks() - reboot_started_us);
   reboot();
 }
 
@@ -1888,7 +2235,7 @@ void CKernel::CompleteAudioCapture(const int16_t *samples,
   response.status = MENU_CONTROL_OK;
   response.binary = payload;
   if (!mRemoteService->CompleteControl(token, response)) {
-    free(payload.data);
+    bmx::remote::ReleaseBinaryPayload(&payload);
   }
 }
 
@@ -1903,6 +2250,13 @@ void CKernel::ProcessControlRequest() {
   bmx::remote::BmxApiResponse response = {};
   response.operation = request.operation;
   response.status = MENU_CONTROL_UNAVAILABLE;
+#if BMX_V3D_RENDER_TEST_KERNEL
+  // There is deliberately no VICE/menu owner in this build. Complete public
+  // API requests explicitly instead of invoking emulator entry points or
+  // leaving clients waiting for the mailbox timeout.
+  (void)mRemoteService->CompleteControl(token, response);
+  return;
+#endif
   switch (request.operation) {
     case bmx::remote::BmxApiOperation::Menu: {
       const bool visible = emu_is_ui_activated() != 0;
@@ -1955,7 +2309,8 @@ void CKernel::ProcessControlRequest() {
              : timing >= 6 && timing <= 9 ? "dpi" : "hdmi");
       int display_width = 0, display_height = 0;
       int ignored = 0;
-      fbl[FB_LAYER_VIC].GetDimensions(
+      circle_get_fbl_dimensions(
+          FB_LAYER_VIC,
           &display_width, &display_height, &ignored, &ignored, &ignored,
           &ignored, &ignored, &ignored);
       response.state.display_width = display_width > 0
@@ -1977,7 +2332,134 @@ void CKernel::ProcessControlRequest() {
         response.state.audio_queue_min_fill_frames =
             mViceSound->QueueMinimumFillFrames();
         response.state.audio_write_waits = mViceSound->WriteWaitCount();
+        ViceSoundDiagnostics sound_diagnostics = {};
+        mViceSound->GetDiagnostics(&sound_diagnostics);
+        response.state.audio_diagnostics_enabled =
+            sound_diagnostics.enabled != 0U;
+        response.state.audio_write_calls = sound_diagnostics.write_calls;
+        response.state.audio_write_frames = sound_diagnostics.write_frames;
+        response.state.audio_write_gap_max_us =
+            sound_diagnostics.write_gap_max_us;
+        response.state.audio_write_gap_over_10ms =
+            sound_diagnostics.write_gap_over_10ms;
+        response.state.audio_write_gap_over_20ms =
+            sound_diagnostics.write_gap_over_20ms;
+        response.state.audio_write_gap_over_40ms =
+            sound_diagnostics.write_gap_over_40ms;
+        response.state.audio_write_last_gap_over_10ms_ms =
+            sound_diagnostics.write_last_gap_over_10ms_ms;
+        response.state.audio_write_duration_max_us =
+            sound_diagnostics.write_duration_max_us;
+        response.state.audio_write_blocked_calls =
+            sound_diagnostics.write_blocked_calls;
+        response.state.audio_write_blocked_max_us =
+            sound_diagnostics.write_blocked_max_us;
+        response.state.audio_write_short_calls =
+            sound_diagnostics.write_short_calls;
+        response.state.audio_hdmi_diagnostics_armed =
+            sound_diagnostics.hdmi_armed != 0U;
+        response.state.audio_hdmi_chunk_frames =
+            sound_diagnostics.hdmi_chunk_frames;
+        response.state.audio_hdmi_chunk_expected_us =
+            sound_diagnostics.hdmi_chunk_expected_us;
+        response.state.audio_hdmi_chunk_calls =
+            sound_diagnostics.hdmi_chunk_calls;
+        response.state.audio_hdmi_chunk_gap_max_us =
+            sound_diagnostics.hdmi_chunk_gap_max_us;
+        response.state.audio_hdmi_chunk_late_calls =
+            sound_diagnostics.hdmi_chunk_late_calls;
+        response.state.audio_hdmi_chunk_last_late_ms =
+            sound_diagnostics.hdmi_chunk_last_late_ms;
+        response.state.audio_hdmi_refill_max_us =
+            sound_diagnostics.hdmi_refill_max_us;
+        response.state.audio_hdmi_queue_fill_frames =
+            sound_diagnostics.hdmi_queue_fill_frames;
+        response.state.audio_hdmi_queue_margin_min_frames =
+            sound_diagnostics.hdmi_queue_margin_min_frames;
+        response.state.audio_hdmi_underrun_chunks =
+            sound_diagnostics.hdmi_underrun_chunks;
+        response.state.audio_hdmi_underrun_frames =
+            sound_diagnostics.hdmi_underrun_frames;
+        response.state.audio_hdmi_last_underrun_ms =
+            sound_diagnostics.hdmi_last_underrun_ms;
+        response.state.audio_hdmi_underrun_interval_min_us =
+            sound_diagnostics.hdmi_underrun_interval_min_us;
+        response.state.audio_hdmi_underrun_interval_max_us =
+            sound_diagnostics.hdmi_underrun_interval_max_us;
+        response.state.audio_pcm_frames = sound_diagnostics.pcm_frames;
+        response.state.audio_pcm_delta_max_ch0 =
+            sound_diagnostics.pcm_delta_max_ch0;
+        response.state.audio_pcm_delta_max_ch1 =
+            sound_diagnostics.pcm_delta_max_ch1;
+        response.state.audio_pcm_delta_over_4096_ch0 =
+            sound_diagnostics.pcm_delta_over_4096_ch0;
+        response.state.audio_pcm_delta_over_4096_ch1 =
+            sound_diagnostics.pcm_delta_over_4096_ch1;
+        response.state.audio_pcm_delta_over_8192_ch0 =
+            sound_diagnostics.pcm_delta_over_8192_ch0;
+        response.state.audio_pcm_delta_over_8192_ch1 =
+            sound_diagnostics.pcm_delta_over_8192_ch1;
+        response.state.audio_pcm_zero_frames =
+            sound_diagnostics.pcm_zero_frames;
+        response.state.audio_pcm_zero_run_max =
+            sound_diagnostics.pcm_zero_run_max;
+        response.state.audio_pcm_zero_samples_ch0 =
+            sound_diagnostics.pcm_zero_samples_ch0;
+        response.state.audio_pcm_zero_samples_ch1 =
+            sound_diagnostics.pcm_zero_samples_ch1;
+        response.state.audio_pcm_zero_run_max_ch0 =
+            sound_diagnostics.pcm_zero_run_max_ch0;
+        response.state.audio_pcm_zero_run_max_ch1 =
+            sound_diagnostics.pcm_zero_run_max_ch1;
+        response.state.audio_pcm_constant_run_max_ch0 =
+            sound_diagnostics.pcm_constant_run_max_ch0;
+        response.state.audio_pcm_constant_run_max_ch1 =
+            sound_diagnostics.pcm_constant_run_max_ch1;
       }
+#if BMX_PI4_CORE0_DISPATCHER && BMX_SID_DIAGNOSTICS
+      response.state.audio_core0_loop_gap_max_us = __atomic_load_n(
+          &mCore0LoopGapMaxUS, __ATOMIC_RELAXED);
+      response.state.audio_core0_loop_gap_over_10ms = __atomic_load_n(
+          &mCore0LoopGapOver10MS, __ATOMIC_RELAXED);
+      response.state.audio_core0_loop_gap_over_20ms = __atomic_load_n(
+          &mCore0LoopGapOver20MS, __ATOMIC_RELAXED);
+      response.state.audio_core0_loop_gap_over_40ms = __atomic_load_n(
+          &mCore0LoopGapOver40MS, __ATOMIC_RELAXED);
+      response.state.audio_core0_last_gap_over_10ms_ms = __atomic_load_n(
+          &mCore0LastGapOver10MSAtMS, __ATOMIC_RELAXED);
+      response.state.audio_core0_yield_max_us = __atomic_load_n(
+          &mCore0YieldMaxUS, __ATOMIC_RELAXED);
+      response.state.audio_pi4_present_max_us = __atomic_load_n(
+          &mPi4PresentMaxUS, __ATOMIC_RELAXED);
+      response.state.audio_pi4_present_over_20ms = __atomic_load_n(
+          &mPi4PresentOver20MS, __ATOMIC_RELAXED);
+      response.state.audio_pi4_present_over_40ms = __atomic_load_n(
+          &mPi4PresentOver40MS, __ATOMIC_RELAXED);
+      response.state.audio_pi4_present_last_over_20ms_ms = __atomic_load_n(
+          &mPi4PresentLastOver20MSAtMS, __ATOMIC_RELAXED);
+      response.state.audio_pi4_present_core = __atomic_load_n(
+          &mPi4PresentCore, __ATOMIC_RELAXED);
+      response.state.audio_pi4_present_fence_max_us = __atomic_load_n(
+          &mPi4PresentFenceMaxUS, __ATOMIC_RELAXED);
+      response.state.audio_pi4_present_render_max_us = __atomic_load_n(
+          &mPi4PresentRenderMaxUS, __ATOMIC_RELAXED);
+      response.state.audio_pi4_present_submit_max_us = __atomic_load_n(
+          &mPi4PresentSubmitMaxUS, __ATOMIC_RELAXED);
+      response.state.audio_pi4_present_fence_over_20ms = __atomic_load_n(
+          &mPi4PresentFenceOver20MS, __ATOMIC_RELAXED);
+      response.state.audio_pi4_present_render_over_20ms = __atomic_load_n(
+          &mPi4PresentRenderOver20MS, __ATOMIC_RELAXED);
+      response.state.audio_pi4_present_submit_over_20ms = __atomic_load_n(
+          &mPi4PresentSubmitOver20MS, __ATOMIC_RELAXED);
+      response.state.audio_pi4_present_last_slow_fence_us = __atomic_load_n(
+          &mPi4PresentLastSlowFenceUS, __ATOMIC_RELAXED);
+      response.state.audio_pi4_present_last_slow_render_us = __atomic_load_n(
+          &mPi4PresentLastSlowRenderUS, __ATOMIC_RELAXED);
+      response.state.audio_pi4_present_last_slow_submit_us = __atomic_load_n(
+          &mPi4PresentLastSlowSubmitUS, __ATOMIC_RELAXED);
+      response.state.audio_core0_diagnostics_max_us = __atomic_load_n(
+          &mCore0DiagnosticsMaxUS, __ATOMIC_RELAXED);
+#endif
       response.state.audio_capture_drops =
           mRemoteService->Capture()->drops();
       response.state.menu_visible = emu_is_ui_activated() != 0;
@@ -2205,15 +2687,35 @@ void CKernel::ProcessControlRequest() {
           response.status = MENU_CONTROL_INVALID_VALUE;
           break;
         }
-        int accepted = key_count != 0U
-            ? (emu_is_ui_activated()
-                   ? emu_ui_key_interrupt_batch(keys, pressed, key_count)
-                   : emux_key_interrupt_batch(keys, pressed, modifiers,
-                                              key_count))
-            : joy_count != 0U
-                  ? emux_joy_interrupt_batch(joy_ports, joy_devices,
-                                             joy_values, joy_count)
-                  : 1;
+        // F12 is BMX's menu toggle.  Physical keyboard input routes its key-up
+        // through emu_key_released(), which schedules the UI transition; the
+        // direct VICE batch path deliberately does not.  Preserve that same
+        // behavior for remote input so developer-mode clients can open and
+        // close the menu as if F12 had been pressed locally.
+        bool menu_key_sequence = key_count != 0U;
+        for (size_t i = 0U; i < key_count; ++i) {
+          if (keys[i] != KEYCODE_F12) {
+            menu_key_sequence = false;
+            break;
+          }
+        }
+        int accepted = 1;
+        if (menu_key_sequence) {
+          for (size_t i = 0U; i < key_count; ++i) {
+            if (pressed[i]) {
+              emu_key_pressed_mod(keys[i], modifiers[i]);
+            } else {
+              emu_key_released_mod(keys[i], modifiers[i]);
+            }
+          }
+        } else if (key_count != 0U) {
+          accepted = emu_is_ui_activated()
+              ? emu_ui_key_interrupt_batch(keys, pressed, key_count)
+              : emux_key_interrupt_batch(keys, pressed, modifiers, key_count);
+        } else if (joy_count != 0U) {
+          accepted = emux_joy_interrupt_batch(joy_ports, joy_devices,
+                                              joy_values, joy_count);
+        }
         if (mouse_count != 0U) {
           static BmxMouseStatusState remote_mouse = {0, 0, 0};
           for (size_t i = 0U; i < request.input_count; ++i) {
@@ -2272,7 +2774,7 @@ void CKernel::ProcessControlRequest() {
 
   if (!mRemoteService->CompleteControl(token, response) &&
       response.binary.data != nullptr) {
-    free(response.binary.data);
+    bmx::remote::ReleaseBinaryPayload(&response.binary);
   }
 }
 
@@ -2842,84 +3344,316 @@ void CKernel::circle_boot_complete() {
 
 int CKernel::circle_alloc_fbl(int layer, int pixelmode, uint8_t **pixels,
                               int width, int height, int *pitch) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.allocate =
+        {layer, pixelmode, pixels, width, height, pitch};
+    SubmitCore0Request(Core0Command::FBLAllocate);
+    return mCore0Request.result;
+  }
+#endif
   return fbl[layer].Allocate(pixelmode, pixels, width, height, pitch);
 }
 
 int CKernel::circle_realloc_fbl(int layer, int shader) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.layerValue = {layer, shader};
+    SubmitCore0Request(Core0Command::FBLReAllocate);
+    return mCore0Request.result;
+  }
+#endif
   return fbl[layer].ReAllocate(shader);
 }
 
+int CKernel::circle_shader_backend_available() {
+  return FrameBufferLayer::ShaderBackendAvailable() ? 1 : 0;
+}
+
+int CKernel::circle_shader_backend_available_for_layer(int layer) {
+  return FrameBufferLayer::ShaderBackendAvailableForLayer(layer) ? 1 : 0;
+}
+
+int CKernel::circle_status_layer_can_coexist_with_ui() {
+#if BMX_PI4_LEGACY_DISPLAY
+  // The firmware/DispmanX composition cannot safely display the status layer
+  // together with the menu.  Native KMS owns both as independent HVS planes.
+  return pi4kms::NativeScanoutCommitted() ? 1 : 0;
+#else
+  return 1;
+#endif
+}
+
 void CKernel::circle_free_fbl(int layer) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.layer = {layer};
+    SubmitCore0Request(Core0Command::FBLFree);
+    return;
+  }
+#endif
   fbl[layer].Free();
 }
 
 void CKernel::circle_clear_fbl(int layer) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.layer = {layer};
+    SubmitCore0Request(Core0Command::FBLClear);
+    return;
+  }
+#endif
   fbl[layer].Clear();
 }
 
 void CKernel::circle_show_fbl(int layer) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.layer = {layer};
+    SubmitCore0Request(Core0Command::FBLShow);
+    return;
+  }
+#endif
   fbl[layer].Show();
 }
 
 void CKernel::circle_hide_fbl(int layer) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.layer = {layer};
+    SubmitCore0Request(Core0Command::FBLHide);
+    return;
+  }
+#endif
   fbl[layer].Hide();
 }
 
 void CKernel::circle_present_fbl(uint32_t ready_mask, int sync) {
-  if (ready_mask == 0) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.present = {ready_mask, sync};
+    SubmitCore0Request(Core0Command::FBLPresent);
     return;
   }
 
+  if (!mPi4NativeViceCoreLogged) {
+    printf("multicore: pi4 native display runtime executing on core 1\r\n");
+    mPi4NativeViceCoreLogged = true;
+  }
+#endif
+  PresentFrameBufferLayers(ready_mask, sync);
+}
+
+void CKernel::PresentFrameBufferLayers(uint32_t readyMask, int sync) {
+  if (readyMask == 0) {
+    return;
+  }
+
+#if BMX_PI4_CORE0_DISPATCHER && BMX_SID_DIAGNOSTICS
+  const uint32_t present_started_us = CTimer::GetClockTicks();
+#endif
+#if BMX_PI4_LEGACY_DISPLAY
+  // Fence the previously submitted native list before FrameReady reuses its
+  // old V3D/overlay buffers.  The current list is queued asynchronously after
+  // rendering, so each frame is preserved without a post-submit VBlank stall.
+  if (!pi4kms::SynchronizePreviousPresent(sync != 0)) {
+    return;
+  }
+#endif
+#if BMX_PI4_CORE0_DISPATCHER && BMX_SID_DIAGNOSTICS
+  const uint32_t fence_done_us = CTimer::GetClockTicks();
+#endif
   for (unsigned i = 0; i < FB_NUM_LAYERS; i++) {
-    if (ready_mask & FB_LAYER_MASK(i)) {
+    if (readyMask & FB_LAYER_MASK(i)) {
       fbl[i].FrameReady(sync);
     }
   }
 
-  FrameBufferLayer::PresentLayers(sync, fbl, ready_mask);
+#if BMX_PI4_CORE0_DISPATCHER && BMX_SID_DIAGNOSTICS
+  const uint32_t render_done_us = CTimer::GetClockTicks();
+#endif
+  FrameBufferLayer::PresentLayers(sync, fbl, readyMask);
+
+#if BMX_PI4_CORE0_DISPATCHER && BMX_SID_DIAGNOSTICS
+  const uint32_t present_done_us = CTimer::GetClockTicks();
+  const uint32_t fence_elapsed_us = fence_done_us - present_started_us;
+  const uint32_t render_elapsed_us = render_done_us - fence_done_us;
+  const uint32_t submit_elapsed_us = present_done_us - render_done_us;
+  const uint32_t present_elapsed_us = present_done_us - present_started_us;
+  atomic_update_max_u32(&mPi4PresentMaxUS, present_elapsed_us);
+  atomic_update_max_u32(&mPi4PresentFenceMaxUS, fence_elapsed_us);
+  atomic_update_max_u32(&mPi4PresentRenderMaxUS, render_elapsed_us);
+  atomic_update_max_u32(&mPi4PresentSubmitMaxUS, submit_elapsed_us);
+  __atomic_store_n(&mPi4PresentCore, CMultiCoreSupport::ThisCore(),
+                   __ATOMIC_RELAXED);
+  if (fence_elapsed_us > 20000U) {
+    __atomic_fetch_add(&mPi4PresentFenceOver20MS, 1U, __ATOMIC_RELAXED);
+  }
+  if (render_elapsed_us > 20000U) {
+    __atomic_fetch_add(&mPi4PresentRenderOver20MS, 1U, __ATOMIC_RELAXED);
+  }
+  if (submit_elapsed_us > 20000U) {
+    __atomic_fetch_add(&mPi4PresentSubmitOver20MS, 1U, __ATOMIC_RELAXED);
+  }
+  if (present_elapsed_us > 20000U) {
+    __atomic_fetch_add(&mPi4PresentOver20MS, 1U, __ATOMIC_RELAXED);
+    __atomic_store_n(&mPi4PresentLastSlowFenceUS, fence_elapsed_us,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&mPi4PresentLastSlowRenderUS, render_elapsed_us,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&mPi4PresentLastSlowSubmitUS, submit_elapsed_us,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&mPi4PresentLastOver20MSAtMS,
+                     present_done_us / 1000U, __ATOMIC_RELAXED);
+  }
+  if (present_elapsed_us > 40000U) {
+    __atomic_fetch_add(&mPi4PresentOver40MS, 1U, __ATOMIC_RELAXED);
+  }
+#endif
+}
+
+int CKernel::circle_get_last_present_timing(
+    struct circle_present_timing *timing) {
+  if (timing == nullptr) {
+    return 0;
+  }
+  memset(timing, 0, sizeof *timing);
+#if !BMX_PI4_LEGACY_DISPLAY
+  pi5kms::PresentTiming kms_timing = {};
+  if (!pi5kms::GetLastPresentTiming(&kms_timing)) {
+    return 0;
+  }
+  timing->sequence = kms_timing.sequence;
+  timing->wait_us = kms_timing.wait_us;
+  timing->total_us = kms_timing.total_us;
+  timing->valid = kms_timing.valid ? 1 : 0;
+  timing->wait_requested = kms_timing.wait_requested ? 1 : 0;
+  return timing->valid;
+#else
+  return 0;
+#endif
 }
 
 void CKernel::circle_set_palette_fbl(int layer, uint8_t index, uint16_t rgb565) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.palette16 = {layer, index, rgb565};
+    SubmitCore0Request(Core0Command::FBLSetPalette16);
+    return;
+  }
+#endif
   fbl[layer].SetPalette(index, rgb565);
 }
 
 void CKernel::circle_set_palette32_fbl(int layer, uint8_t index, uint32_t argb) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.palette32 = {layer, index, argb};
+    SubmitCore0Request(Core0Command::FBLSetPalette32);
+    return;
+  }
+#endif
   fbl[layer].SetPalette(index, argb);
 }
 
 void CKernel::circle_update_palette_fbl(int layer) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.layer = {layer};
+    SubmitCore0Request(Core0Command::FBLUpdatePalette);
+    return;
+  }
+#endif
   fbl[layer].UpdatePalette();
 }
 
 void CKernel::circle_set_stretch_fbl(int layer, double hstretch, double vstretch, int hintstr, int vintstr, int use_hintstr, int use_vintstr) {
-  fbl[layer].SetStretch(hstretch, vstretch, hintstr, vintstr, use_hintstr, use_vintstr);
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.stretch = {layer, hstretch, vstretch, hintstr, vintstr,
+                                  use_hintstr, use_vintstr};
+    SubmitCore0Request(Core0Command::FBLSetStretch);
+    return;
+  }
+#endif
+  fbl[layer].SetStretch(hstretch, vstretch, hintstr, vintstr,
+                        use_hintstr, use_vintstr);
 }
 
 void CKernel::circle_set_center_offset(int layer, int cx, int cy) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.pair = {layer, cx, cy};
+    SubmitCore0Request(Core0Command::FBLSetCenterOffset);
+    return;
+  }
+#endif
   fbl[layer].SetCenterOffset(cx, cy);
 }
 
 void CKernel::circle_set_src_rect_fbl(int layer, int x, int y, int w, int h) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.rect = {layer, x, y, w, h};
+    SubmitCore0Request(Core0Command::FBLSetSrcRect);
+    return;
+  }
+#endif
   fbl[layer].SetSrcRect(x,y,w,h);
 }
 
 void CKernel::circle_set_valign_fbl(int layer, int align, int padding) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.pair = {layer, align, padding};
+    SubmitCore0Request(Core0Command::FBLSetVAlign);
+    return;
+  }
+#endif
   fbl[layer].SetVerticalAlignment(align, padding);
 }
 
 void CKernel::circle_set_halign_fbl(int layer, int align, int padding) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.pair = {layer, align, padding};
+    SubmitCore0Request(Core0Command::FBLSetHAlign);
+    return;
+  }
+#endif
   fbl[layer].SetHorizontalAlignment(align, padding);
 }
 
 void CKernel::circle_set_padding_fbl(int layer, double lpad, double rpad, double tpad, double bpad) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.padding = {layer, lpad, rpad, tpad, bpad};
+    SubmitCore0Request(Core0Command::FBLSetPadding);
+    return;
+  }
+#endif
   fbl[layer].SetPadding(lpad, rpad, tpad, bpad);
 }
 
 void CKernel::circle_set_zlayer_fbl(int layer, int zlayer) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.layerValue = {layer, zlayer};
+    SubmitCore0Request(Core0Command::FBLSetZLayer);
+    return;
+  }
+#endif
   fbl[layer].SetLayer(zlayer);
 }
 
 int CKernel::circle_get_zlayer_fbl(int layer) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.layer = {layer};
+    SubmitCore0Request(Core0Command::FBLGetZLayer);
+    return mCore0Request.result;
+  }
+#endif
   return fbl[layer].GetLayer();
 }
 
@@ -2964,7 +3698,42 @@ int CKernel::circle_gpio_outputs_enabled() {
   return !mViceOptions.DPIEnabled() && mViceOptions.GPIOOutputsEnabled();
 }
 
-void CKernel::circle_get_diagnostics(struct bmx_diagnostics_snapshot *snapshot) {
+void CKernel::RefreshDiagnosticsFirmwareCache() {
+  TDiagnosticsPropertyTags tags;
+  initialize_diagnostics_property_tags(&tags);
+  CBcmPropertyTags property_tags;
+  const bool tags_ok = property_tags.GetTags(&tags, sizeof(tags));
+  const bool measured_clock_ok =
+      tags_ok &&
+      property_tag_has_response(tags.measured_clock.Tag, 2 * sizeof(u32));
+  const bool current_clock_ok =
+      tags_ok &&
+      property_tag_has_response(tags.current_clock.Tag, 2 * sizeof(u32));
+  const bool temperature_ok =
+      tags_ok &&
+      property_tag_has_response(tags.temperature.Tag, 2 * sizeof(u32));
+
+  if (measured_clock_ok && tags.measured_clock.nRate != 0) {
+    const unsigned precision = 1000000;
+    mDiagnosticsArmClockHz =
+        (tags.measured_clock.nRate + precision / 2) / precision * precision;
+  } else if (current_clock_ok && tags.current_clock.nRate != 0) {
+    mDiagnosticsArmClockHz = tags.current_clock.nRate;
+  } else {
+    mDiagnosticsArmClockHz = mMachineInfo.GetClockRate(CLOCK_ID_ARM);
+  }
+
+  mDiagnosticsTemperatureC =
+      temperature_ok ? (tags.temperature.nValue + 500) / 1000
+                     : mCPUThrottle.GetTemperature();
+  mDiagnosticsThrottleClockHz =
+      current_clock_ok ? tags.current_clock.nRate
+                       : mCPUThrottle.GetClockRate();
+  mDiagnosticsFirmwareTicks = circle_get_ticks();
+  mDiagnosticsFirmwareValid = true;
+}
+
+void CKernel::CollectDiagnostics(struct bmx_diagnostics_snapshot *snapshot) {
   if (snapshot == 0) {
     return;
   }
@@ -2977,16 +3746,29 @@ void CKernel::circle_get_diagnostics(struct bmx_diagnostics_snapshot *snapshot) 
       (uint32_t)(mMemory.GetHeapFreeSpace(HEAP_LOW) / 1024);
   snapshot->heap_high_free_kb =
       (uint32_t)(mMemory.GetHeapFreeSpace(HEAP_HIGH) / 1024);
-  snapshot->arm_clock_hz = mMachineInfo.GetClockRate(CLOCK_ID_ARM);
   snapshot->emu_cycles_per_sec = circle_cycles_per_second();
-  snapshot->temperature_c = mCPUThrottle.GetTemperature();
-  snapshot->throttle_clock_hz = mCPUThrottle.GetClockRate();
+
+#if !BMX_PI4_CORE0_DISPATCHER
+  const unsigned long now = circle_get_ticks();
+  if (!mDiagnosticsFirmwareValid ||
+      now - mDiagnosticsFirmwareTicks >= 4 * TICKS_PER_SECOND) {
+    RefreshDiagnosticsFirmwareCache();
+  }
+#endif
+
+  snapshot->arm_clock_hz = mDiagnosticsArmClockHz;
+  snapshot->temperature_c = mDiagnosticsTemperatureC;
+  snapshot->throttle_clock_hz = mDiagnosticsThrottleClockHz;
   snapshot->scheduler_safe_points = mSchedulerSafePoints;
   snapshot->scheduler_rounds = mSchedulerRounds;
   snapshot->scheduler_extra_rounds = mSchedulerExtraRounds;
   snapshot->scheduler_pump_us = mSchedulerPumpUS;
   snapshot->scheduler_pump_max_us = mSchedulerPumpMaxUS;
   snapshot->scheduler_pump_budget_stops = mSchedulerPumpBudgetStops;
+}
+
+void CKernel::circle_get_diagnostics(struct bmx_diagnostics_snapshot *snapshot) {
+  CollectDiagnostics(snapshot);
 }
 
 int CKernel::circle_prepare_system_shutdown(void) {
@@ -3007,10 +3789,16 @@ void CKernel::circle_get_fbl_dimensions(int layer,
                                int *fb_w, int *fb_h,
                                int *src_w, int *src_h,
                                int *dst_w, int *dst_h) {
-  return fbl[layer].GetDimensions(display_w, display_h,
-                                  fb_w, fb_h,
-                                  src_w, src_h,
-                                  dst_w, dst_h);
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.dimensions = {layer, display_w, display_h, fb_w, fb_h,
+                                     src_w, src_h, dst_w, dst_h};
+    SubmitCore0Request(Core0Command::FBLGetDimensions);
+    return;
+  }
+#endif
+  fbl[layer].GetDimensions(display_w, display_h, fb_w, fb_h,
+                           src_w, src_h, dst_w, dst_h);
 }
 
 void CKernel::circle_get_scaling_params(int display,
@@ -3020,45 +3808,37 @@ void CKernel::circle_get_scaling_params(int display,
 }
 
 void CKernel::circle_set_interpolation(int enable) {
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.layerValue = {0, enable};
+    SubmitCore0Request(Core0Command::FBLSetInterpolation);
+    return;
+  }
+#endif
   FrameBufferLayer::SetInterpolation(enable);
 }
 
 void CKernel::circle_set_use_shader(int enable) {
 	// Only the main display (layer 0) ever gets a shader.
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.layerValue = {0, enable};
+    SubmitCore0Request(Core0Command::FBLSetUseShader);
+    return;
+  }
+#endif
   fbl[0].SetUsesShader(enable);
 }
 
-void CKernel::circle_set_shader_params(int curvature,
-		float curvature_x,
-		float curvature_y,
-		int mask,
-		float mask_brightness,
-		int gamma,
-		int fake_gamma,
-		int scanlines,
-		int multisample,
-		float scanline_weight,
-		float scanline_gap_brightness,
-		float bloom_factor,
-		float input_gamma,
-		float output_gamma,
-		int sharper,
-                int bilinear_interpolation) {
+void CKernel::circle_set_shader_params(
+    const struct bmx_crt_effect_params &params) {
   // Only the main display (layer 0) ever gets a shader.
-  fbl[0].SetShaderParams(curvature,
-			curvature_x,
-			curvature_y,
-			mask,
-			mask_brightness,
-			gamma,
-			fake_gamma,
-			scanlines,
-			multisample,
-			scanline_weight,
-			scanline_gap_brightness,
-			bloom_factor,
-			input_gamma,
-			output_gamma,
-			sharper,
-                        bilinear_interpolation);
+#if BMX_PI4_CORE0_DISPATCHER
+  if (ShouldDispatchPi4LegacyDisplayCall()) {
+    mCore0Request.args.shader = params;
+    SubmitCore0Request(Core0Command::FBLSetShaderParams);
+    return;
+  }
+#endif
+  fbl[0].SetShaderParams(params);
 }

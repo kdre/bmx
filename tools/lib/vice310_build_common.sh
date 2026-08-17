@@ -62,20 +62,49 @@ esac
 
 case "$BMX_BUILD_BOARD" in
   pi4)
-    NEWLIB_SUBDIR="install/arm-none-circle"
-    TOOLCHAIN_NAME="arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi"
-    TOOLCHAIN_URL_BASE="https://developer.arm.com/-/media/Files/downloads/gnu/14.2.rel1/binrel"
-    TOOL_PREFIX="arm-none-eabi-"
-    VICE_HOST="arm-none-eabi"
-    CIRCLE_CONFIG_ARGS=(
-      --raspberrypi=4 --kernel-max-size 48
-      --option ARM_ALLOW_MULTI_CORE --option USE_USB_SOF_INTR
-      --opt-tls --prefix arm-none-eabi-
-    )
-    VICE_ARCH_FLAGS="-march=armv8-a -mtune=cortex-a72 -marm -mfpu=neon-fp-armv8 -mfloat-abi=hard"
-    VICE_C_WARNING_FLAGS=" -Wno-incompatible-pointer-types"
-    TARGET_BASENAME="kernel7l"
-    TARGET_AARCH=32
+    BMX_PI4_AARCH64="${BMX_PI4_AARCH64:-1}"
+    case "$BMX_PI4_AARCH64" in
+      0)
+        NEWLIB_SUBDIR="install/arm-none-circle"
+        TOOLCHAIN_NAME="arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi"
+        TOOLCHAIN_URL_BASE="https://developer.arm.com/-/media/Files/downloads/gnu/14.2.rel1/binrel"
+        TOOL_PREFIX="arm-none-eabi-"
+        VICE_HOST="arm-none-eabi"
+        CIRCLE_CONFIG_ARGS=(
+          --raspberrypi=4 --kernel-max-size 48
+          --option ARM_ALLOW_MULTI_CORE --option USE_USB_SOF_INTR
+          --opt-tls --prefix arm-none-eabi-
+        )
+        VICE_ARCH_FLAGS="-march=armv8-a -mtune=cortex-a72 -marm -mfpu=neon-fp-armv8 -mfloat-abi=hard"
+        VICE_C_WARNING_FLAGS=" -Wno-incompatible-pointer-types"
+        TARGET_BASENAME="kernel7l"
+        IMAGE_BASENAME="kernel7l"
+        TARGET_AARCH=32
+        BMX_PI4_LEGACY_DISPLAY=1
+        ;;
+      1)
+        NEWLIB_SUBDIR="install/aarch64-none-circle"
+        TOOLCHAIN_NAME="arm-gnu-toolchain-15.2.rel1-x86_64-aarch64-none-elf"
+        TOOLCHAIN_URL_BASE="https://developer.arm.com/-/media/Files/downloads/gnu/15.2.rel1/binrel"
+        TOOL_PREFIX="aarch64-none-elf-"
+        VICE_HOST="aarch64-none-elf"
+        CIRCLE_CONFIG_ARGS=(
+          --raspberrypi=4 --aarch64 --kernel-max-size 48
+          --option ARM_ALLOW_MULTI_CORE --option USE_USB_SOF_INTR
+          --opt-tls --prefix aarch64-none-elf-
+        )
+        VICE_ARCH_FLAGS="-mcpu=cortex-a72 -mlittle-endian"
+        VICE_C_WARNING_FLAGS=""
+        TARGET_BASENAME="kernel8"
+        IMAGE_BASENAME="kernel8"
+        TARGET_AARCH=64
+        BMX_PI4_LEGACY_DISPLAY=0
+        ;;
+      *)
+        echo "BMX_PI4_AARCH64 must be exactly 0 or 1" >&2
+        return 2
+        ;;
+    esac
     ;;
   pi5)
     NEWLIB_SUBDIR="install/aarch64-none-circle"
@@ -91,7 +120,9 @@ case "$BMX_BUILD_BOARD" in
     VICE_ARCH_FLAGS="-mcpu=cortex-a76 -mlittle-endian"
     VICE_C_WARNING_FLAGS=""
     TARGET_BASENAME="kernel_2712"
+    IMAGE_BASENAME="kernel_2712"
     TARGET_AARCH=64
+    BMX_PI4_LEGACY_DISPLAY=0
     ;;
   *)
     echo "unsupported BMX_BUILD_BOARD: $BMX_BUILD_BOARD" >&2
@@ -110,18 +141,49 @@ case "$BMX_BUILD_CLEAN" in
   *) echo "BMX_BUILD_CLEAN must be exactly 0 or 1" >&2; return 2 ;;
 esac
 BMX_UPDATE_UPDATER_ABI="${BMX_UPDATE_UPDATER_ABI:-2}"
-if [ "$BMX_BUILD_BOARD" = pi5 ]; then
-  BMX_PI5_SID_WORKER="${BMX_PI5_SID_WORKER:-1}"
-else
-  BMX_PI5_SID_WORKER="${BMX_PI5_SID_WORKER:-0}"
+if [ "${BMX_PI5_SID_WORKER+x}" = x ]; then
+  if [ "${BMX_SID_WORKER+x}" = x ] && \
+     [ "$BMX_PI5_SID_WORKER" != "$BMX_SID_WORKER" ]; then
+    echo "BMX_PI5_SID_WORKER and BMX_SID_WORKER disagree" >&2
+    return 2
+  fi
+  BMX_SID_WORKER="$BMX_PI5_SID_WORKER"
 fi
-BMX_PI5_SID_DIAGNOSTICS="${BMX_PI5_SID_DIAGNOSTICS:-0}"
-case "$BMX_PI5_SID_WORKER" in 0|1) ;; *) echo "BMX_PI5_SID_WORKER must be exactly 0 or 1" >&2; return 2 ;; esac
-case "$BMX_PI5_SID_DIAGNOSTICS" in 0|1) ;; *) echo "BMX_PI5_SID_DIAGNOSTICS must be exactly 0 or 1" >&2; return 2 ;; esac
-if [ "$BMX_BUILD_BOARD" = pi4 ] && \
-   [ "$BMX_PI5_SID_WORKER$BMX_PI5_SID_DIAGNOSTICS" != 00 ]; then
-  echo "Pi5 SID worker and diagnostics are not supported in Pi4 builds" >&2
+if [ "${BMX_PI5_SID_DIAGNOSTICS+x}" = x ]; then
+  if [ "${BMX_SID_DIAGNOSTICS+x}" = x ] && \
+     [ "$BMX_PI5_SID_DIAGNOSTICS" != "$BMX_SID_DIAGNOSTICS" ]; then
+    echo "BMX_PI5_SID_DIAGNOSTICS and BMX_SID_DIAGNOSTICS disagree" >&2
+    return 2
+  fi
+  BMX_SID_DIAGNOSTICS="$BMX_PI5_SID_DIAGNOSTICS"
+fi
+# Do not leak the compatibility aliases into the downstream Make process,
+# where they could conflict with the canonical generic values.
+unset BMX_PI5_SID_WORKER BMX_PI5_SID_DIAGNOSTICS
+if [ "${BMX_EMU_MULTICORE+x}" != x ]; then BMX_EMU_MULTICORE=1; fi
+if [ "${BMX_SID_WORKER+x}" != x ]; then BMX_SID_WORKER=1; fi
+if [ "${BMX_SID_DIAGNOSTICS+x}" != x ]; then BMX_SID_DIAGNOSTICS=0; fi
+if [ "${BMX_V3D_RENDER_TEST_KERNEL+x}" != x ]; then
+  BMX_V3D_RENDER_TEST_KERNEL=0
+fi
+case "$BMX_EMU_MULTICORE" in 0|1) ;; *) echo "BMX_EMU_MULTICORE must be exactly 0 or 1" >&2; return 2 ;; esac
+case "$BMX_SID_WORKER" in 0|1) ;; *) echo "BMX_SID_WORKER must be exactly 0 or 1" >&2; return 2 ;; esac
+case "$BMX_SID_DIAGNOSTICS" in 0|1) ;; *) echo "BMX_SID_DIAGNOSTICS must be exactly 0 or 1" >&2; return 2 ;; esac
+case "$BMX_V3D_RENDER_TEST_KERNEL" in
+  0|1) ;;
+  *) echo "BMX_V3D_RENDER_TEST_KERNEL must be exactly 0 or 1" >&2; return 2 ;;
+esac
+if [ "$BMX_SID_WORKER" = 1 ] && [ "$BMX_EMU_MULTICORE" != 1 ]; then
+  echo "BMX_SID_WORKER=1 requires BMX_EMU_MULTICORE=1" >&2
   return 2
+fi
+if [ "$BMX_V3D_RENDER_TEST_KERNEL" = 1 ]; then
+  if [ "$BMX_EMU_MULTICORE" != 1 ] || [ "$TARGET_AARCH" != 64 ]; then
+    echo "BMX_V3D_RENDER_TEST_KERNEL=1 requires an AArch64 multicore build" >&2
+    return 2
+  fi
+  TARGET_BASENAME="${TARGET_BASENAME}-v3dtest"
+  IMAGE_BASENAME="${IMAGE_BASENAME}-v3dtest"
 fi
 
 # Keep every configuration input visible to child make processes even when a
@@ -129,8 +191,9 @@ fi
 export BMC64_BUILD_PROFILE BMC64_MENU_LOG_LEVEL BMC64_RS232_LOG_LEVEL \
   BMC64_ACIA_LOG_LEVEL BMC64_TCP_LOG_LEVEL BMC64_NET_LOG_LEVEL \
   BMC64_WLAN_TRACE BMC64_WLAN_LOW_IMPACT_TRACE \
-  BMC64_WLAN_LOW_IMPACT_TRACE_LOG BMX_PI5_SID_WORKER \
-  BMX_PI5_SID_DIAGNOSTICS BMX_UPDATE_UPDATER_ABI BMX_UPDATE_TEST_CHANNEL \
+  BMC64_WLAN_LOW_IMPACT_TRACE_LOG BMX_EMU_MULTICORE BMX_SID_WORKER \
+  BMX_SID_DIAGNOSTICS BMX_V3D_RENDER_TEST_KERNEL \
+  BMX_PI4_LEGACY_DISPLAY BMX_UPDATE_UPDATER_ABI BMX_UPDATE_TEST_CHANNEL \
   BMX_UPDATE_TEST_REPOSITORY_OWNER BMX_UPDATE_TEST_REPOSITORY_NAME \
   BMX_UPDATE_HARDWARE_TEST_MODE BMX_UPDATE_SIMPLE_PRODUCTION \
   BMX_UPDATE_OWNER_DRAFT_TEST
@@ -151,14 +214,16 @@ bmx_build_value() {
 bmx_variant_hash() {
   local name
   {
-    printf 'format=4\nboard=%s\nprofile=%s\ntoolchain=%s\n' \
+    printf 'format=5\nboard=%s\nprofile=%s\ntoolchain=%s\n' \
       "$BMX_BUILD_BOARD" "$BMC64_BUILD_PROFILE" "$BMX_TOOLCHAIN_FINGERPRINT"
     printf 'source-root=%s\ncircle-input=%s\n' "$SRC_DIR" "$BMX_CIRCLE_INPUT_HASH"
     for name in \
       BMC64_MENU_LOG_LEVEL BMC64_RS232_LOG_LEVEL BMC64_ACIA_LOG_LEVEL \
       BMC64_TCP_LOG_LEVEL BMC64_NET_LOG_LEVEL BMC64_WLAN_TRACE \
       BMC64_WLAN_LOW_IMPACT_TRACE BMC64_WLAN_LOW_IMPACT_TRACE_LOG \
-      BMX_PI5_SID_WORKER BMX_PI5_SID_DIAGNOSTICS \
+      BMX_EMU_MULTICORE BMX_SID_WORKER BMX_SID_DIAGNOSTICS \
+      BMX_V3D_RENDER_TEST_KERNEL \
+      BMX_PI4_LEGACY_DISPLAY \
       BMX_UPDATE_UPDATER_ABI BMX_UPDATE_TEST_CHANNEL \
       BMX_UPDATE_TEST_REPOSITORY_OWNER BMX_UPDATE_TEST_REPOSITORY_NAME \
       BMX_UPDATE_HARDWARE_TEST_MODE BMX_UPDATE_SIMPLE_PRODUCTION \
@@ -261,17 +326,12 @@ set_vice310_make_args() {
   local release_define=""
   local diag_defines=""
   local sid_defines=""
-  local sid_worker="${BMX_PI5_SID_WORKER:-1}"
-  local sid_diagnostics="${BMX_PI5_SID_DIAGNOSTICS:-0}"
+  local sid_worker="${BMX_SID_WORKER:-0}"
+  local sid_diagnostics="${BMX_SID_DIAGNOSTICS:-0}"
 
-  if [ "$BMX_BUILD_BOARD" = pi4 ]; then
-    sid_worker=0
-    sid_diagnostics=0
-  else
-    case "$sid_worker" in 0|1) ;; *) echo "BMX_PI5_SID_WORKER must be exactly 0 or 1" >&2; return 2 ;; esac
-    case "$sid_diagnostics" in 0|1) ;; *) echo "BMX_PI5_SID_DIAGNOSTICS must be exactly 0 or 1" >&2; return 2 ;; esac
-    sid_defines=" -DBMX_SID_WORKER=$sid_worker -DBMX_SID_DIAGNOSTICS=$sid_diagnostics"
-  fi
+  case "$sid_worker" in 0|1) ;; *) echo "BMX_SID_WORKER must be exactly 0 or 1" >&2; return 2 ;; esac
+  case "$sid_diagnostics" in 0|1) ;; *) echo "BMX_SID_DIAGNOSTICS must be exactly 0 or 1" >&2; return 2 ;; esac
+  sid_defines=" -DBMX_SID_WORKER=$sid_worker -DBMX_SID_DIAGNOSTICS=$sid_diagnostics"
 
   if [ "${BMC64_BUILD_PROFILE:-release}" = debug ]; then
     debug_define=" -DBMC64_DEBUG_PROFILE"
@@ -627,17 +687,19 @@ build_vice310_kernel() {
       UPDATE_PATH_POLICY_MODULE=tools/update_path_policy.py \
       UPDATE_PATH_POLICY_HEADER=src/update/generated/update_path_policy_v1.h \
       BMC64_BUILD_PROFILE="${BMC64_BUILD_PROFILE:-release}" \
-      BMX_PI5_SID_WORKER="${BMX_PI5_SID_WORKER:-$([ "$BMX_BUILD_BOARD" = pi5 ] && echo 1 || echo 0)}" \
-      BMX_PI5_SID_DIAGNOSTICS="${BMX_PI5_SID_DIAGNOSTICS:-0}"
+      BMX_EMU_MULTICORE="${BMX_EMU_MULTICORE:-1}" \
+      BMX_SID_WORKER="${BMX_SID_WORKER:-1}" \
+      BMX_SID_DIAGNOSTICS="${BMX_SID_DIAGNOSTICS:-0}" \
+      BMX_V3D_RENDER_TEST_KERNEL="${BMX_V3D_RENDER_TEST_KERNEL:-0}"
   )
   bmx_update_kernel_listing "$machine_build_dir"
 
   image_dir="$BMX_VARIANT_ROOT/images"
   mkdir -p "$image_dir"
-  output_image="$image_dir/$TARGET_BASENAME.img.$VICE310_IMAGE_SUFFIX"
+  output_image="$image_dir/$IMAGE_BASENAME.img.$VICE310_IMAGE_SUFFIX"
   bmx_copy_if_changed "$source_image" "$output_image"
   if [ "$VICE310_COPY_DEFAULT" -eq 1 ]; then
-    bmx_copy_if_changed "$source_image" "$image_dir/$TARGET_BASENAME.img"
+    bmx_copy_if_changed "$source_image" "$image_dir/$IMAGE_BASENAME.img"
   fi
 }
 
@@ -652,13 +714,18 @@ publish_vice310_images() {
   for machine in "$@"; do
     vice310_machine_config "$machine"
     bmx_copy_if_changed \
-      "$source_dir/$TARGET_BASENAME.img.$VICE310_IMAGE_SUFFIX" \
-      "$destination_dir/$TARGET_BASENAME.img.$VICE310_IMAGE_SUFFIX"
+      "$source_dir/$IMAGE_BASENAME.img.$VICE310_IMAGE_SUFFIX" \
+      "$destination_dir/$IMAGE_BASENAME.img.$VICE310_IMAGE_SUFFIX"
     if [ "$VICE310_COPY_DEFAULT" -eq 1 ]; then
-      bmx_copy_if_changed "$source_dir/$TARGET_BASENAME.img" \
-        "$destination_dir/$TARGET_BASENAME.img"
+      bmx_copy_if_changed "$source_dir/$IMAGE_BASENAME.img" \
+        "$destination_dir/$IMAGE_BASENAME.img"
     fi
   done
+  if [ "$BMX_BUILD_BOARD" = pi4 ] && [ "$BMX_PI4_AARCH64" = 1 ]; then
+    local armstub_source="$CIRCLE_STDLIB_HOME/libs/circle/boot/armstub8-rpi4.bin"
+    bmx_copy_if_changed "$armstub_source" "$source_dir/armstub8-rpi4.bin"
+    bmx_copy_if_changed "$armstub_source" "$destination_dir/armstub8-rpi4.bin"
+  fi
   flock -u "$publish_lock_fd"
   exec {publish_lock_fd}>&-
 }

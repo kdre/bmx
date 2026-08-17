@@ -1,6 +1,9 @@
 #include "remote/remote_capture.h"
 
 #include "fbl.h"
+extern "C" {
+#include "third_party/common/circle.h"
+}
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +11,71 @@
 
 namespace bmx {
 namespace remote {
+
+namespace {
+
+uint8_t *g_screenshot_ppm_buffer = 0;
+size_t g_screenshot_ppm_capacity = 0U;
+volatile uint32_t g_screenshot_ppm_in_use = 0U;
+
+bool AcquireScreenshotPpmBuffer(size_t capacity, uint8_t **data)
+{
+    if (capacity == 0U || data == 0) return false;
+    uint32_t available = 0U;
+    if (!__atomic_compare_exchange_n(&g_screenshot_ppm_in_use, &available, 1U,
+                                     false, __ATOMIC_ACQUIRE,
+                                     __ATOMIC_RELAXED)) return false;
+    if (g_screenshot_ppm_capacity < capacity) {
+        uint8_t *replacement = static_cast<uint8_t *>(malloc(capacity));
+        if (replacement == 0) {
+            __atomic_store_n(&g_screenshot_ppm_in_use, 0U, __ATOMIC_RELEASE);
+            return false;
+        }
+        free(g_screenshot_ppm_buffer);
+        g_screenshot_ppm_buffer = replacement;
+        g_screenshot_ppm_capacity = capacity;
+    }
+    *data = g_screenshot_ppm_buffer;
+    return true;
+}
+
+void ReleaseScreenshotPpmBuffer(uint8_t *data)
+{
+    if (data == g_screenshot_ppm_buffer) {
+        __atomic_store_n(&g_screenshot_ppm_in_use, 0U, __ATOMIC_RELEASE);
+    }
+}
+
+struct CaptureDimensionsRequest {
+    int *width;
+    int *height;
+};
+
+int CaptureDimensionsOnPlatformCore(void *opaque)
+{
+    CaptureDimensionsRequest *request =
+        static_cast<CaptureDimensionsRequest *>(opaque);
+    return FrameBufferLayer::CaptureDimensions(request->width,
+                                                request->height) ? 1 : 0;
+}
+
+struct CaptureRgb888Request {
+    uint8_t *output;
+    int width;
+    int height;
+    unsigned pitch;
+};
+
+int CaptureRgb888OnPlatformCore(void *opaque)
+{
+    CaptureRgb888Request *request =
+        static_cast<CaptureRgb888Request *>(opaque);
+    return FrameBufferLayer::CaptureRgb888(
+        request->output, request->width, request->height,
+        request->pitch) ? 1 : 0;
+}
+
+}  // namespace
 
 RemoteCapture::RemoteCapture()
     : audio_(0), audio_capacity_(0U), audio_size_(0U),
@@ -18,6 +86,11 @@ RemoteCapture::RemoteCapture()
 RemoteCapture::~RemoteCapture()
 {
     ResetAudio();
+    if (__atomic_load_n(&g_screenshot_ppm_in_use, __ATOMIC_ACQUIRE) == 0U) {
+        free(g_screenshot_ppm_buffer);
+        g_screenshot_ppm_buffer = 0;
+        g_screenshot_ppm_capacity = 0U;
+    }
 }
 
 void RemoteCapture::ResetAudio()
@@ -50,9 +123,12 @@ bool RemoteCapture::Screenshot(uint32_t maximum_width,
                                BmxBinaryPayload *payload)
 {
     if (payload == 0) return false;
+    memset(payload, 0, sizeof(*payload));
     int display_width = 0;
     int display_height = 0;
-    if (!FrameBufferLayer::CaptureDimensions(&display_width, &display_height) ||
+    CaptureDimensionsRequest dimensions = {&display_width, &display_height};
+    if (circle_run_on_platform_core(
+            CaptureDimensionsOnPlatformCore, &dimensions) != 1 ||
         display_width <= 0 || display_height <= 0) return false;
     int width = display_width;
     int height = display_height;
@@ -70,19 +146,26 @@ bool RemoteCapture::Screenshot(uint32_t maximum_width,
         (size_t)width * (size_t)height > SIZE_MAX / 3U) return false;
     const size_t pixels_size = (size_t)width * (size_t)height * 3U;
     if (pixels_size > SIZE_MAX - (size_t)header_size) return false;
-    uint8_t *data = (uint8_t *)malloc((size_t)header_size + pixels_size);
-    if (data == 0) return false;
+    if ((size_t)display_width > SIZE_MAX / (size_t)display_height ||
+        (size_t)display_width * (size_t)display_height >
+            (SIZE_MAX - sizeof(header)) / 3U) return false;
+    const size_t capacity = sizeof(header) +
+        (size_t)display_width * (size_t)display_height * 3U;
+    uint8_t *data = 0;
+    if (!AcquireScreenshotPpmBuffer(capacity, &data)) return false;
     memcpy(data, header, (size_t)header_size);
-    if (!FrameBufferLayer::CaptureRgb888(data + header_size, width, height,
-                                         (unsigned)width * 3U)) {
-        free(data);
+    CaptureRgb888Request capture = {
+        data + header_size, width, height, (unsigned)width * 3U};
+    if (circle_run_on_platform_core(
+            CaptureRgb888OnPlatformCore, &capture) != 1) {
+        ReleaseScreenshotPpmBuffer(data);
         return false;
     }
-    memset(payload, 0, sizeof(*payload));
     payload->data = data;
     payload->size = (size_t)header_size + pixels_size;
     payload->width = (uint32_t)width;
     payload->height = (uint32_t)height;
+    payload->release = ReleaseScreenshotPpmBuffer;
     return true;
 }
 

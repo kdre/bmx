@@ -24,6 +24,10 @@
 #define VOLUME_NAME_LEN 16
 #define PI5KMS_MODE_LEN 32
 #define PI5KMS_TIMINGS_LEN 192
+#define V3DCRT_SHADER_LEN 32
+#define V3DCRT_TEST_LEN 32
+#define V3DCRT_FRAGMENT_PACKAGE_LEN 32
+#define V3DCRT_RENDER_RESOLUTION_LEN 16
 #define NETWORK_TEST_HOST_LEN 64
 #define RS232NET_TARGET_LEN 96
 #define RS232NET_PHONEBOOK_LEN 256
@@ -80,7 +84,20 @@ public:
   unsigned GetFramebufferWidth(void) const;
   unsigned GetFramebufferHeight(void) const;
   unsigned GetFramebufferDepth(void) const;
+  bool Pi4KmsEnabled(void) const;
   bool Pi5KmsEnabled(void) const;
+  bool V3DCrtEnabled(void) const;
+  const char *GetV3DCrtShader(void) const;
+  const char *GetV3DCrtTest(void) const;
+  // Diagnostic package overrides are parsed only by debug builds.
+  const char *GetV3DCrtFragmentPackage(void) const;
+  const char *GetV3DCrtRenderResolution(void) const;
+  bool GetV3DCrtFragmentProbeWaitVblank(void) const;
+  bool GetV3DCrtScanlineWeight(float *value) const;
+  bool GetV3DCrtScanlineGapBrightness(float *value) const;
+  bool Pi5V3DEnabled(void) const;
+  const char *GetPi5V3DShader(void) const;
+  const char *GetPi5V3DTest(void) const;
   unsigned GetHdmiGroup(void) const;
   unsigned GetHdmiMode(void) const;
   const char *GetPi5KmsTimings(void) const;
@@ -122,6 +139,8 @@ private:
   static unsigned
   GetDecimal(char *pString); // returns decimal value, -1 on error
 
+  static bool GetFloat(char *pString, float *pValue);
+
   static bool ParseIPv4(char *pString, u8 out[4]);
 
 private:
@@ -144,7 +163,18 @@ private:
   unsigned m_nFramebufferWidth;
   unsigned m_nFramebufferHeight;
   unsigned m_nFramebufferDepth;
+  bool m_bPi4KmsEnabled;
   bool m_bPi5KmsEnabled;
+  bool m_bV3DCrtEnabled;
+  char m_v3dCrtShader[V3DCRT_SHADER_LEN];
+  char m_v3dCrtTest[V3DCRT_TEST_LEN];
+  char m_v3dCrtFragmentPackage[V3DCRT_FRAGMENT_PACKAGE_LEN];
+  char m_v3dCrtRenderResolution[V3DCRT_RENDER_RESOLUTION_LEN];
+  bool m_bV3DCrtFragmentProbeWaitVblank;
+  bool m_bV3DCrtScanlineWeightOverride;
+  bool m_bV3DCrtScanlineGapBrightnessOverride;
+  float m_v3dCrtScanlineWeight;
+  float m_v3dCrtScanlineGapBrightness;
   unsigned m_nHdmiGroup;
   unsigned m_nHdmiMode;
   char m_pi5KmsTimings[PI5KMS_TIMINGS_LEN];

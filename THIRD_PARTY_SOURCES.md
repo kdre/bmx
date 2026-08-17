@@ -5,7 +5,7 @@ current BMX port. It distinguishes between sources that are vendored in
 this repository, sources downloaded by build/staging scripts, and sources used
 only as implementation references.
 
-Last checked: 2026-07-19
+Last checked: 2026-08-11
 
 ## BMC64 upstream
 
@@ -21,6 +21,36 @@ Last checked: 2026-07-19
 
 The current branch is based on this upstream commit. BMX changes live on
 top of it in this repository.
+
+## Unscii 8 bitmap font
+
+| Item | Value |
+| --- | --- |
+| Role | Machine-independent 8x8 font for BMX Latin-1 and fixed PETSCII UI text |
+| Local upstream source | `tools/font_gen/unscii-8.hex` |
+| PETSCII profile map | `tools/font_gen/unscii-c64-upper.map` |
+| Generated runtime table | `third_party/common/font.c` |
+| Project URL | https://viznut.fi/unscii/ |
+| Version | 2.1 |
+| Source archive | https://viznut.fi/unscii/unscii-2.1-src.tar.gz |
+| Source archive SHA-256 | `4d1215d495e49d005ae70828ec1529e997049b9a7f152b9439d78c7e70c65b57` |
+| Published font | https://viznut.fi/unscii/unscii-8.hex |
+| Local font SHA-256 | `03094f7fbab7085cf6a6b624cee61e47e71ce5d0c2f308c2f4436afdc17f776c` |
+| PETSCII map SHA-256 | `505ba8d27fc550f4fe866f2b857fdcdbd4c4e6d3297e9759259f3451984fb65e` |
+| License | Public Domain; the upstream source notice excludes only `unscii-16-full`, which incorporates GPL Unifont pieces |
+
+The local `.hex` file is byte-identical to the published Unscii 8 font. The
+complete Unicode font is retained, including its legacy-computing glyphs.
+`tools/font_gen/font_gen.c` parses and validates all 3191 source glyphs, then
+selects compact 256-glyph runtime profiles: `font8x8` for Latin-1 and
+`font8x8_petscii_upper` for the fixed Commodore upper-case/graphics screen-code
+set, including inverse glyphs. This keeps the BMX renderer byte-based while
+allowing later profiles to select any glyph in the complete source through a
+mapping file. The checked-in tables need no host-side font tool or network at
+bare-metal build time. Image-directory PETSCII uses the active machine's
+character ROM; BMX-owned PETSCII UI uses the fixed Unscii profile so it looks
+identical on every machine. Raw virtual-keyboard symbols also continue to use
+the active machine's character ROM.
 
 ## VICE
 
@@ -40,6 +70,10 @@ top of it in this repository.
 The VICE 3.10 source is vendored in the repository. BMX patches and Raspi
 adapter work should be reviewed relative to the local import commit
 `ae4d04aa6029ac2f1df83a051c5d2cf3573c611d`.
+
+Selected fixes imported from VICE development after 3.10, including their
+upstream and local commit IDs, are tracked in
+[`VICE_3_10_BACKPORTS.md`](VICE_3_10_BACKPORTS.md).
 
 ### TCPSER modem-core subset
 
@@ -173,9 +207,12 @@ individual source hashes are recorded in `third_party/miniz/README.bmx.md`.
 | Pi4 files | `start4.elf`, `fixup4.dat`, `bcm2711-rpi-4-b.dtb`, `bcm2711-rpi-400.dtb`, `bcm2711-rpi-cm4.dtb` |
 | Pi5 files | `bcm2712-rpi-5-b.dtb`, `bcm2712-rpi-500.dtb`, `bcm2712d0-rpi-5-b.dtb`, `overlays/bcm2712d0.dtbo`, `overlays/uart0-pi5.dtbo` |
 
-Pi4 staging also copies `armstub7-rpi4.bin` from
-`third_party/raspberrypi-firmware/boot/pi4`. That binary is generated from the
-Circle armstub source included in the `circle-stdlib` source archive.
+Pi4 staging selects exactly one Circle armstub: `armstub7-rpi4.bin` for an
+explicit AArch32 fallback stage or `armstub8-rpi4.bin` for the default AArch64
+stage. The former is stored in `third_party/raspberrypi-firmware/boot/pi4`; the
+latter is copied into the immutable build output from the pinned Circle source
+tree. Both binaries are generated from the Circle armstub source included in
+the `circle-stdlib` source archive.
 
 ### Raspberry Pi WLAN firmware staged locally
 
@@ -214,11 +251,53 @@ Useful reference links:
 - https://github.com/raspberrypi/linux/blob/0a382e93f18ae5b8b7f10d62106b5480c2a0f1dd/drivers/gpu/drm/vc4/vc4_hdmi_phy.c
 - https://github.com/raspberrypi/linux/blob/0a382e93f18ae5b8b7f10d62106b5480c2a0f1dd/drivers/gpu/drm/vc4/vc4_hvs.c
 
+## Mesa V3D offline compiler
+
+| Item | Value |
+| --- | --- |
+| Role | Host-only GLSL/NIR to V3D 4.2/7.1 QPU offline compiler and Linux hardware reference |
+| Upstream URL | https://gitlab.freedesktop.org/mesa/mesa |
+| Version/tag | `mesa-24.2.8` |
+| Commit | `7d908b5aed61a280411380e29814ad48336427a7` |
+| Tag URL | https://gitlab.freedesktop.org/mesa/mesa/-/tree/mesa-24.2.8 |
+| Cached source | `third_party/source-cache/mesa-24.2.8-7d908b5a-full.tar.gz.part-*` |
+| Reconstructed archive size | `46748909` bytes |
+| Reconstructed archive SHA-256 | `42179de11c6615e169e3afed12e0296951a4f48ddb5ae15138104c11d45f80f6` |
+| BMX patch set | `tools/v3d/offline-compiler/patches/mesa-24.2.8/` |
+| Runtime dependency | None; Mesa is used only to generate and validate committed BMX shader artifacts |
+| License | Main Mesa, Gallium and Broadcom V3D code: MIT; C11 thread emulation: BSL-1.0; other bundled components retain their source licenses |
+
+The source cache is a clean `git archive` of the pinned commit with no `.git`
+directory and no generated build products. Normal offline-compiler builds
+reconstruct and verify this archive locally instead of downloading Mesa. The
+private Mesa tree is extracted and patched below `build/host/v3d-offline/`.
+
+| Cache part | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `part-00` | `26214400` | `6cb726d651c878e102ba4f063d8c4377af0cbde910ec00dd3a3eec563210f76a` |
+| `part-01` | `20534509` | `d4ad02b0946526f859cd709d8d2896f4705329c73ef977ee9bccda54f5ced5c3` |
+
+The BMX patch set contains:
+
+- an explicit no-op DRM-shim target selector for `bcm2711-v3d42` and
+  `bcm2712-v3d71`
+- an opt-in machine-readable export after Mesa's `v3d_compile()`, including
+  target-ISA decode validation and non-canonical QPU disassembly sidecars
+- the upstream C23/glibc compatibility fix from Mesa commit
+  `179e744f7577d98df7c79d7324c22acfb32a0154`
+
+Mesa libraries are not linked into Pi4 or Pi5 BMX kernels. Generated QPU words
+record the Mesa commit, patch-set hash, shader-source hash and target profile.
+The pinned private build was also validated on Pi5 Linux with renderer
+`V3D 7.1.10.2`: compiler-owned V3D 7.1 output matches the desktop no-op target
+exactly and the hardware draw/readback checksum is `0x300af2e5`.
+
 ## ARM GNU toolchains
 
 | Board | Toolchain | URL |
 | --- | --- | --- |
-| Pi4/Pi400 | `arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi` | https://developer.arm.com/-/media/Files/downloads/gnu/14.2.rel1/binrel/arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi.tar.xz |
+| Pi4/Pi400 (default AArch64) | `arm-gnu-toolchain-15.2.rel1-x86_64-aarch64-none-elf` | https://developer.arm.com/-/media/Files/downloads/gnu/15.2.rel1/binrel/arm-gnu-toolchain-15.2.rel1-x86_64-aarch64-none-elf.tar.xz |
+| Pi4/Pi400 (`--aarch32` fallback) | `arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi` | https://developer.arm.com/-/media/Files/downloads/gnu/14.2.rel1/binrel/arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi.tar.xz |
 | Pi5/Pi500 | `arm-gnu-toolchain-15.2.rel1-x86_64-aarch64-none-elf` | https://developer.arm.com/-/media/Files/downloads/gnu/15.2.rel1/binrel/arm-gnu-toolchain-15.2.rel1-x86_64-aarch64-none-elf.tar.xz |
 
 The build scripts download these into `.toolchains/` only if no matching
@@ -236,6 +315,8 @@ compiler is already available in `PATH`.
 
 ```sh
 git remote -v
+sha256sum tools/font_gen/unscii-8.hex
+sha256sum tools/font_gen/unscii-c64-upper.map
 sha256sum third_party/source-cache/mbedtls-3.6.7.tar.bz2
 tar -tzf third_party/source-cache/circle-stdlib-v20-a4fbed9b-full.tar.gz | grep '^circle-stdlib/libs/circle/Rules.mk$'
 tar -tjf third_party/source-cache/mbedtls-3.6.7.tar.bz2 | grep '^mbedtls-3.6.7/include/mbedtls/version.h$'
@@ -245,4 +326,7 @@ git ls-remote https://github.com/raspberrypi/linux.git refs/heads/rpi-6.12.y
 git ls-remote https://github.com/raspberrypi/firmware.git refs/heads/master
 git ls-remote https://github.com/VICE-Team/svn-mirror.git refs/tags/3.10.0
 git ls-remote https://github.com/go4retro/tcpser.git refs/heads/master
+git ls-remote https://gitlab.freedesktop.org/mesa/mesa.git refs/tags/mesa-24.2.8^{}
+cat third_party/source-cache/mesa-24.2.8-7d908b5a-full.tar.gz.part-* | sha256sum
+curl -fsS https://viznut.fi/unscii/unscii-8.hex | sha256sum
 ```

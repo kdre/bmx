@@ -1,0 +1,18 @@
+diff --git a/libs/circle/lib/net/dhcpclient.cpp b/libs/circle/lib/net/dhcpclient.cpp
+index febfe4e3..d500041b 100644
+--- a/libs/circle/lib/net/dhcpclient.cpp
++++ b/libs/circle/lib/net/dhcpclient.cpp
+@@ -396,7 +396,12 @@ boolean CDHCPClient::IsBound (void) const
+ 
+ TDHCPStatus CDHCPClient::SelectAndRequest (void)
+ {
+-	m_bUseBroadcast = TRUE;
++	// The server already knows the client hardware address from CHAddr and can
++	// deliver OFFER and ACK before IP configuration as Ethernet unicast.  Do
++	// not request broadcast replies here: on WLAN that would unnecessarily
++	// make DHCP depend on the group-key receive path instead of the pairwise
++	// key established for this station.
++	m_bUseBroadcast = FALSE;
+ 
+ 	CIPAddress BroadcastIP;
+ 	BroadcastIP.SetBroadcast ();

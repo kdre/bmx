@@ -60,9 +60,11 @@ void WriteLe32(uint8_t *output, uint32_t value) {
 class BinaryResponse : public HttpResponseStream, public HttpCompletion {
 public:
     BinaryResponse(uint8_t *data, size_t size, uint32_t sample_rate,
-                   uint32_t channels, bool wav)
+                   uint32_t channels, bool wav,
+                   void (*release)(uint8_t *data))
         : data_(data), size_(size), offset_(0U), released_(false),
-          wav_header_(), wav_size_(wav ? sizeof(wav_header_) : 0U),
+          release_(release), wav_header_(),
+          wav_size_(wav ? sizeof(wav_header_) : 0U),
           wav_offset_(0U), sample_rate_(), channels_() {
         snprintf(sample_rate_, sizeof(sample_rate_), "%lu",
                  (unsigned long)sample_rate);
@@ -122,9 +124,10 @@ public:
 private:
     void Release() {
         if (!released_) {
-            free(data_);
+            ReleaseBinaryData(data_, release_);
             data_ = 0;
             size_ = 0U;
+            release_ = 0;
             released_ = true;
         }
     }
@@ -132,6 +135,7 @@ private:
     size_t size_;
     size_t offset_;
     bool released_;
+    void (*release_)(uint8_t *data);
     uint8_t wav_header_[44U];
     size_t wav_size_;
     size_t wav_offset_;
@@ -1721,13 +1725,16 @@ bool BmxApiRouter::BuildResponse(const BmxApiResponse &api,
     }
     if (api.binary.data != 0) {
         if (api.binary.wav && api.binary.size > UINT32_MAX - 36U) {
-            free(api.binary.data);
+            ReleaseBinaryData(api.binary.data, api.binary.release);
             return false;
         }
         BinaryResponse *owned = new BinaryResponse(
             api.binary.data, api.binary.size, api.binary.sample_rate,
-            api.binary.channels, api.binary.wav);
-        if (owned == 0) { free(api.binary.data); return false; }
+            api.binary.channels, api.binary.wav, api.binary.release);
+        if (owned == 0) {
+            ReleaseBinaryData(api.binary.data, api.binary.release);
+            return false;
+        }
         response->Reset(200U);
         if (api.binary.sample_rate != 0U) {
             response->AddHeader("Content-Type",
@@ -1788,6 +1795,69 @@ bool BmxApiRouter::BuildResponse(const BmxApiResponse &api,
         writer.Text(",\"audio_queue_min_fill_frames\":"); writer.Unsigned(api.state.audio_queue_min_fill_frames);
         writer.Text(",\"audio_write_waits\":"); writer.Unsigned(api.state.audio_write_waits);
         writer.Text(",\"audio_capture_drops\":"); writer.Unsigned(api.state.audio_capture_drops);
+        writer.Text(",\"audio_diagnostics_enabled\":"); writer.Text(api.state.audio_diagnostics_enabled ? "true" : "false");
+        writer.Text(",\"audio_write_calls\":"); writer.Unsigned(api.state.audio_write_calls);
+        writer.Text(",\"audio_write_frames\":"); writer.Unsigned(api.state.audio_write_frames);
+        writer.Text(",\"audio_write_gap_max_us\":"); writer.Unsigned(api.state.audio_write_gap_max_us);
+        writer.Text(",\"audio_write_gap_over_10ms\":"); writer.Unsigned(api.state.audio_write_gap_over_10ms);
+        writer.Text(",\"audio_write_gap_over_20ms\":"); writer.Unsigned(api.state.audio_write_gap_over_20ms);
+        writer.Text(",\"audio_write_gap_over_40ms\":"); writer.Unsigned(api.state.audio_write_gap_over_40ms);
+        writer.Text(",\"audio_write_last_gap_over_10ms_ms\":"); writer.Unsigned(api.state.audio_write_last_gap_over_10ms_ms);
+        writer.Text(",\"audio_write_duration_max_us\":"); writer.Unsigned(api.state.audio_write_duration_max_us);
+        writer.Text(",\"audio_write_blocked_calls\":"); writer.Unsigned(api.state.audio_write_blocked_calls);
+        writer.Text(",\"audio_write_blocked_max_us\":"); writer.Unsigned(api.state.audio_write_blocked_max_us);
+        writer.Text(",\"audio_write_short_calls\":"); writer.Unsigned(api.state.audio_write_short_calls);
+        writer.Text(",\"audio_hdmi_diagnostics_armed\":"); writer.Text(api.state.audio_hdmi_diagnostics_armed ? "true" : "false");
+        writer.Text(",\"audio_hdmi_chunk_frames\":"); writer.Unsigned(api.state.audio_hdmi_chunk_frames);
+        writer.Text(",\"audio_hdmi_chunk_expected_us\":"); writer.Unsigned(api.state.audio_hdmi_chunk_expected_us);
+        writer.Text(",\"audio_hdmi_chunk_calls\":"); writer.Unsigned(api.state.audio_hdmi_chunk_calls);
+        writer.Text(",\"audio_hdmi_chunk_gap_max_us\":"); writer.Unsigned(api.state.audio_hdmi_chunk_gap_max_us);
+        writer.Text(",\"audio_hdmi_chunk_late_calls\":"); writer.Unsigned(api.state.audio_hdmi_chunk_late_calls);
+        writer.Text(",\"audio_hdmi_chunk_last_late_ms\":"); writer.Unsigned(api.state.audio_hdmi_chunk_last_late_ms);
+        writer.Text(",\"audio_hdmi_refill_max_us\":"); writer.Unsigned(api.state.audio_hdmi_refill_max_us);
+        writer.Text(",\"audio_hdmi_queue_fill_frames\":"); writer.Unsigned(api.state.audio_hdmi_queue_fill_frames);
+        writer.Text(",\"audio_hdmi_queue_margin_min_frames\":"); writer.Unsigned(api.state.audio_hdmi_queue_margin_min_frames);
+        writer.Text(",\"audio_hdmi_underrun_chunks\":"); writer.Unsigned(api.state.audio_hdmi_underrun_chunks);
+        writer.Text(",\"audio_hdmi_underrun_frames\":"); writer.Unsigned(api.state.audio_hdmi_underrun_frames);
+        writer.Text(",\"audio_hdmi_last_underrun_ms\":"); writer.Unsigned(api.state.audio_hdmi_last_underrun_ms);
+        writer.Text(",\"audio_hdmi_underrun_interval_min_us\":"); writer.Unsigned(api.state.audio_hdmi_underrun_interval_min_us);
+        writer.Text(",\"audio_hdmi_underrun_interval_max_us\":"); writer.Unsigned(api.state.audio_hdmi_underrun_interval_max_us);
+        writer.Text(",\"audio_pcm_frames\":"); writer.Unsigned(api.state.audio_pcm_frames);
+        writer.Text(",\"audio_pcm_delta_max_ch0\":"); writer.Unsigned(api.state.audio_pcm_delta_max_ch0);
+        writer.Text(",\"audio_pcm_delta_max_ch1\":"); writer.Unsigned(api.state.audio_pcm_delta_max_ch1);
+        writer.Text(",\"audio_pcm_delta_over_4096_ch0\":"); writer.Unsigned(api.state.audio_pcm_delta_over_4096_ch0);
+        writer.Text(",\"audio_pcm_delta_over_4096_ch1\":"); writer.Unsigned(api.state.audio_pcm_delta_over_4096_ch1);
+        writer.Text(",\"audio_pcm_delta_over_8192_ch0\":"); writer.Unsigned(api.state.audio_pcm_delta_over_8192_ch0);
+        writer.Text(",\"audio_pcm_delta_over_8192_ch1\":"); writer.Unsigned(api.state.audio_pcm_delta_over_8192_ch1);
+        writer.Text(",\"audio_pcm_zero_frames\":"); writer.Unsigned(api.state.audio_pcm_zero_frames);
+        writer.Text(",\"audio_pcm_zero_run_max\":"); writer.Unsigned(api.state.audio_pcm_zero_run_max);
+        writer.Text(",\"audio_pcm_zero_samples_ch0\":"); writer.Unsigned(api.state.audio_pcm_zero_samples_ch0);
+        writer.Text(",\"audio_pcm_zero_samples_ch1\":"); writer.Unsigned(api.state.audio_pcm_zero_samples_ch1);
+        writer.Text(",\"audio_pcm_zero_run_max_ch0\":"); writer.Unsigned(api.state.audio_pcm_zero_run_max_ch0);
+        writer.Text(",\"audio_pcm_zero_run_max_ch1\":"); writer.Unsigned(api.state.audio_pcm_zero_run_max_ch1);
+        writer.Text(",\"audio_pcm_constant_run_max_ch0\":"); writer.Unsigned(api.state.audio_pcm_constant_run_max_ch0);
+        writer.Text(",\"audio_pcm_constant_run_max_ch1\":"); writer.Unsigned(api.state.audio_pcm_constant_run_max_ch1);
+        writer.Text(",\"audio_core0_loop_gap_max_us\":"); writer.Unsigned(api.state.audio_core0_loop_gap_max_us);
+        writer.Text(",\"audio_core0_loop_gap_over_10ms\":"); writer.Unsigned(api.state.audio_core0_loop_gap_over_10ms);
+        writer.Text(",\"audio_core0_loop_gap_over_20ms\":"); writer.Unsigned(api.state.audio_core0_loop_gap_over_20ms);
+        writer.Text(",\"audio_core0_loop_gap_over_40ms\":"); writer.Unsigned(api.state.audio_core0_loop_gap_over_40ms);
+        writer.Text(",\"audio_core0_last_gap_over_10ms_ms\":"); writer.Unsigned(api.state.audio_core0_last_gap_over_10ms_ms);
+        writer.Text(",\"audio_core0_yield_max_us\":"); writer.Unsigned(api.state.audio_core0_yield_max_us);
+        writer.Text(",\"audio_pi4_present_max_us\":"); writer.Unsigned(api.state.audio_pi4_present_max_us);
+        writer.Text(",\"audio_pi4_present_over_20ms\":"); writer.Unsigned(api.state.audio_pi4_present_over_20ms);
+        writer.Text(",\"audio_pi4_present_over_40ms\":"); writer.Unsigned(api.state.audio_pi4_present_over_40ms);
+        writer.Text(",\"audio_pi4_present_last_over_20ms_ms\":"); writer.Unsigned(api.state.audio_pi4_present_last_over_20ms_ms);
+        writer.Text(",\"audio_pi4_present_core\":"); writer.Unsigned(api.state.audio_pi4_present_core);
+        writer.Text(",\"audio_pi4_present_fence_max_us\":"); writer.Unsigned(api.state.audio_pi4_present_fence_max_us);
+        writer.Text(",\"audio_pi4_present_render_max_us\":"); writer.Unsigned(api.state.audio_pi4_present_render_max_us);
+        writer.Text(",\"audio_pi4_present_submit_max_us\":"); writer.Unsigned(api.state.audio_pi4_present_submit_max_us);
+        writer.Text(",\"audio_pi4_present_fence_over_20ms\":"); writer.Unsigned(api.state.audio_pi4_present_fence_over_20ms);
+        writer.Text(",\"audio_pi4_present_render_over_20ms\":"); writer.Unsigned(api.state.audio_pi4_present_render_over_20ms);
+        writer.Text(",\"audio_pi4_present_submit_over_20ms\":"); writer.Unsigned(api.state.audio_pi4_present_submit_over_20ms);
+        writer.Text(",\"audio_pi4_present_last_slow_fence_us\":"); writer.Unsigned(api.state.audio_pi4_present_last_slow_fence_us);
+        writer.Text(",\"audio_pi4_present_last_slow_render_us\":"); writer.Unsigned(api.state.audio_pi4_present_last_slow_render_us);
+        writer.Text(",\"audio_pi4_present_last_slow_submit_us\":"); writer.Unsigned(api.state.audio_pi4_present_last_slow_submit_us);
+        writer.Text(",\"audio_core0_diagnostics_max_us\":"); writer.Unsigned(api.state.audio_core0_diagnostics_max_us);
         writer.Text(",\"menu_visible\":"); writer.Text(api.state.menu_visible ? "true" : "false");
         writer.Text(",\"warp\":"); writer.Text(api.state.warp ? "true" : "false");
         writer.Text(",\"diagnostics_overlay\":"); writer.Text(api.state.diagnostics_overlay ? "true" : "false");

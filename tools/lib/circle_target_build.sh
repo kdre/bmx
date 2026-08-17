@@ -160,13 +160,16 @@ circle_required_artifacts() {
     "$CIRCLE_STDLIB_HOME/libs/mbedtls/library/libmbedx509.a" \
     "$CIRCLE_STDLIB_HOME/libs/mbedtls/library/libmbedcrypto.a"
 
-  if [ "$BMX_BUILD_BOARD" = pi4 ]; then
+  if [ "${BMX_PI4_LEGACY_DISPLAY:-0}" = 1 ]; then
     printf '%s\n' \
       "$circle/addon/vc4/vchiq/libvchiq.a" \
       "$circle/addon/vc4/interface/bcm_host/libbcm_host.a" \
       "$circle/addon/vc4/interface/khronos/libkhrn_client.a" \
       "$circle/addon/vc4/interface/vcos/libvcos.a" \
       "$circle/addon/vc4/interface/vmcs_host/libvmcs_host.a"
+  fi
+  if [ "$BMX_BUILD_BOARD" = pi4 ] && [ "${BMX_PI4_AARCH64:-0}" = 1 ]; then
+    printf '%s\n' "$circle/boot/armstub8-rpi4.bin"
   fi
 }
 
@@ -270,7 +273,7 @@ build_circle_stdlib_artifacts() {
     "${deterministic_archive_args[@]}" libwpa_supplicant.a || return
   rename_wpa_supplicant_sha1_symbols || return
 
-  if [ "$BMX_BUILD_BOARD" = pi4 ]; then
+  if [ "${BMX_PI4_LEGACY_DISPLAY:-0}" = 1 ]; then
     make -C "$CIRCLE_STDLIB_HOME/libs/circle/addon/vc4/vchiq" \
       -j"$BMX_BUILD_JOBS" "${deterministic_archive_args[@]}" || return
     make -C "$CIRCLE_STDLIB_HOME/libs/circle/addon/vc4/interface/bcm_host" \
@@ -284,6 +287,9 @@ build_circle_stdlib_artifacts() {
   else
     make -C "$CIRCLE_STDLIB_HOME/libs/circle/lib/sound" \
       -j"$BMX_BUILD_JOBS" "${deterministic_archive_args[@]}" all || return
+  fi
+  if [ "$BMX_BUILD_BOARD" = pi4 ] && [ "${BMX_PI4_AARCH64:-0}" = 1 ]; then
+    make -C "$CIRCLE_STDLIB_HOME/libs/circle/boot" armstub64 || return
   fi
   remove_newlib_conflicting_members || return
 }

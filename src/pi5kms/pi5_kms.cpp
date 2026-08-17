@@ -1,4 +1,5 @@
 #include "pi5_kms.h"
+#include "kms/kms_mode.h"
 #include "scaling_order.h"
 
 #include <circle/bcm2835.h>
@@ -10,7 +11,6 @@
 #include <circle/timer.h>
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #ifndef ALIGN_UP
@@ -23,11 +23,14 @@ namespace {
 
 constexpr uintptr kPv0Base = ARM_IO_BASE + 0x410000;
 constexpr uintptr kHvsBase = ARM_IO_BASE + 0x580000;
+constexpr uintptr kHdmi0DvpGlobalBase = ARM_IO_BASE + 0x700000;
 constexpr uintptr kHdmi0HdBase = ARM_IO_BASE + 0x720000;
 constexpr uintptr kHdmi0Base = ARM_IO_BASE + 0x701400;
 constexpr uintptr kHdmi0DvpBase = ARM_IO_BASE + 0x701000;
 constexpr uintptr kHdmi0PhyBase = ARM_IO_BASE + 0x701D00;
 constexpr uintptr kHdmi0RmBase = ARM_IO_BASE + 0x702000;
+constexpr uintptr kHdmi0PacketRamBase = ARM_IO_BASE + 0x703800;
+constexpr uintptr kHdmi0CscBase = ARM_IO_BASE + 0x700100;
 
 constexpr unsigned kClockPixel = 10;
 constexpr unsigned kClockM2mc = 13;
@@ -41,10 +44,21 @@ constexpr u32 kPvHorzb = 0x010;
 constexpr u32 kPvVerta = 0x014;
 constexpr u32 kPvVertb = 0x018;
 constexpr u32 kPvMuxCfg = 0x034;
-constexpr u32 kPvPipeInitCtrl = 0x040;
+constexpr u32 kPvPipeInitCtrl = 0x094;
 constexpr u32 kPvControlEnable = 1U << 0;
 constexpr u32 kPvControlFifoClear = 1U << 1;
+constexpr u32 kPvControlWaitHstart = 1U << 12;
+constexpr u32 kPvControlTriggerUnderflow = 1U << 13;
+constexpr u32 kPvControlClearAtStart = 1U << 14;
+constexpr unsigned kPvControlFifoLevelShift = 15;
+constexpr unsigned kPvD0ControlFifoLevelHighShift = 24;
+constexpr u32 kPvC0FifoLevel = 64U - 3U * 6U;
+constexpr u32 kPvD0FifoLevel = 512U - 3U * 6U;
 constexpr u32 kPvVControlVideoEnable = 1U << 0;
+constexpr u32 kPvVControlContinuous = 1U << 1;
+constexpr u32 kPvVControlOddTiming = 1U << 29;
+constexpr u32 kPvMuxRgbNoSwap = 8U << 2;
+constexpr u32 kPvPipeInit = (1U << 8) | (1U << 4) | (1U << 0);
 
 constexpr u32 kHvsVersion = 0x000;
 constexpr u32 kHvsVersionD0 = 0x54;
@@ -107,11 +121,34 @@ constexpr u32 kHvsPpfNoInterp = 1U << 31;
 constexpr u32 kHvsPpfAgc = 1U << 30;
 constexpr unsigned kHvsPpfPhaseBits = 6;
 constexpr unsigned kHvsFilterKernelWords = 11;
+constexpr unsigned kHvsScanoutDlistWords = 160;
+constexpr unsigned kHvsScanoutTemplatePlanes = 8;
+
+struct ScanoutDlistTemplate {
+  bool valid;
+  unsigned plane_count;
+  u32 display_width;
+  u32 display_height;
+  Plane planes[kHvsScanoutTemplatePlanes];
+  u32 words[kHvsScanoutDlistWords];
+  unsigned word_count;
+  unsigned ptr0_words[kHvsScanoutTemplatePlanes];
+  unsigned address_words[kHvsScanoutTemplatePlanes];
+};
 
 bool g_hvs_filter_kernels_uploaded = false;
 unsigned g_hvs_submitted_dlist = 0;
 bool g_hvs_has_active_dlist = false;
 bool g_hvs_vblank_timeout_logged = false;
+ScanoutDlistTemplate g_scanout_dlist_templates[2] = {};
+bool g_scanout_dlist_cache_hit_logged[2] = {};
+PresentTiming g_last_present_timing = {};
+Mode g_active_mode = {};
+bool g_active_mode_valid = false;
+bool g_waiting_for_initial_sink = false;
+u64 g_initial_sink_detected_us = 0;
+
+constexpr u64 kInitialSinkSettleUs = 250000;
 
 constexpr u32 HvsField(u32 value, unsigned shift) {
   return value << shift;
@@ -142,6 +179,8 @@ constexpr u32 kHvsNearestKernel[6] = {
 };
 
 constexpr u32 kHdmiFifoCtl = 0x07C;
+constexpr u32 kHdmiRamPacketConfig = 0x0C4;
+constexpr u32 kHdmiRamPacketStatus = 0x0CC;
 constexpr u32 kHdmiSchedulerControl = 0x0E8;
 constexpr u32 kHdmiHorza = 0x0EC;
 constexpr u32 kHdmiHorzb = 0x0F0;
@@ -150,11 +189,61 @@ constexpr u32 kHdmiVertb0 = 0x0F8;
 constexpr u32 kHdmiVerta1 = 0x100;
 constexpr u32 kHdmiVertb1 = 0x104;
 constexpr u32 kHdmiMiscControl = 0x114;
+constexpr u32 kHdmiDeepColorConfig1 = 0x18C;
+constexpr u32 kHdmiGcpConfig = 0x194;
+constexpr u32 kHdmiGcpWord1 = 0x198;
+constexpr u32 kHdmiHotplug = 0x1C8;
 constexpr u32 kHdmiClockStop = 0x0BC;
+constexpr u32 kHdmiVecInterfaceConfig = 0x0F0;
+constexpr u32 kHdmiVecInterfaceXbar = 0x0F4;
+constexpr u32 kHdmiDvpSoftwareInit = 0x004;
+constexpr u32 kHdmiDvpMiscConfig = 0x008;
+constexpr u32 kHdmiDvpSoftwareInitHdmi0 = 1U << 1;
+constexpr u32 kHdmiDvpAudioClockDisableHdmi0 = 1U << 3;
+constexpr u32 kHdmiDvpControl = 0x000;
+constexpr u32 kHdmiClockStopPixel = 1U << 1;
 constexpr u32 kHdmiSchedulerManualFormat = 1U << 15;
 constexpr u32 kHdmiSchedulerIgnoreVsyncPredicts = 1U << 5;
+constexpr u32 kHdmiSchedulerHdmiActive = 1U << 1;
+constexpr u32 kHdmiSchedulerModeHdmi = 1U << 0;
+constexpr u32 kHdmiRamPacketEnable = 1U << 16;
+constexpr u32 kHdmiAviPacketEnable = 1U << 2;
+constexpr u32 kHdmiFifoRecenterDone = 1U << 14;
 constexpr u32 kHdmiFifoRecenter = 1U << 6;
+constexpr u32 kHdmiFifoMasterSlaveN = 1U << 0;
 constexpr u32 kHdmiFifoValidWriteMask = 0x0000EFFF;
+
+constexpr u32 kHdmiHdVideoControl = 0x044;
+constexpr u32 kHdmiHdFrameCount = 0x060;
+constexpr u32 kHdmiHdVideoEnable = 1U << 31;
+constexpr u32 kHdmiHdVideoUnderflowEnable = 1U << 30;
+constexpr u32 kHdmiHdVideoFrameCounterReset = 1U << 29;
+constexpr u32 kHdmiHdVideoVsyncLow = 1U << 28;
+constexpr u32 kHdmiHdVideoHsyncLow = 1U << 27;
+constexpr u32 kHdmiHdVideoClearRgb = 1U << 23;
+constexpr u32 kHdmiHdVideoBlankPixel = 1U << 18;
+constexpr u32 kHdmiHdVideoBlankInsertEnable = 1U << 16;
+constexpr u32 kHdmiDeepColorInitPackPhaseMask = 7U << 8;
+constexpr u32 kHdmiDeepColorInitPackPhase8Bpc = 2U << 8;
+constexpr u32 kHdmiDeepColorDepthMask = 0xFU;
+constexpr u32 kHdmiGcpEnable = 1U << 31;
+constexpr u32 kHdmiGcpSubpacketBytes01Mask = 0xFFFFU;
+constexpr u32 kHdmiGcpClearAvMute = 1U << 4;
+constexpr u32 kHdmiHotplugConnected = 1U << 0;
+constexpr u32 kHdmiPacketStride = 0x24;
+constexpr u32 kHdmiAviPacketId = 2;
+
+constexpr u32 kHdmiCscControl = 0x000;
+constexpr u32 kHdmiCsc12_11 = 0x004;
+constexpr u32 kHdmiCsc14_13 = 0x008;
+constexpr u32 kHdmiCsc22_21 = 0x00C;
+constexpr u32 kHdmiCsc24_23 = 0x010;
+constexpr u32 kHdmiCsc32_31 = 0x014;
+constexpr u32 kHdmiCsc34_33 = 0x018;
+constexpr u32 kHdmiCscChannelControl = 0x02C;
+constexpr u32 kHdmiCscEnable = 1U << 2;
+constexpr u32 kHdmiCscCustomMode = 3U;
+constexpr u32 kHdmiRgbInterfaceXbar = 0x00354021;
 
 constexpr u32 kPhyResetCtl = 0x000;
 constexpr u32 kPhyPowerupCtl = 0x004;
@@ -193,6 +282,259 @@ u32 ReadReg(uintptr base, u32 offset) {
 
 void WriteReg(uintptr base, u32 offset, u32 value) {
   write32(base + offset, value);
+}
+
+bool HdmiSinkConnected() {
+  return (ReadReg(kHdmi0Base, kHdmiHotplug) &
+          kHdmiHotplugConnected) != 0;
+}
+
+bool WaitForRegisterBit(uintptr base, u32 offset, u32 mask,
+                        bool set, unsigned timeout_us) {
+  const u64 start = CTimer::GetClockTicks64();
+  do {
+    if (((ReadReg(base, offset) & mask) != 0) == set) {
+      return true;
+    }
+  } while (CTimer::GetClockTicks64() - start < timeout_us);
+  return ((ReadReg(base, offset) & mask) != 0) == set;
+}
+
+u32 QuiesceHdmiOutputForModeSet() {
+  // Follow the BCM2712 post-CRTC disable ordering before touching its PHY:
+  // stop data-island packets, blank the stream, then allow one millisecond
+  // for the blank to reach the link.  Do not clear HD_VID_CTL.ENABLE here;
+  // upstream vc4 documents that operation as lockup-prone on BCM2712.
+  const u32 packet_config = ReadReg(kHdmi0Base, kHdmiRamPacketConfig);
+  WriteReg(kHdmi0Base, kHdmiRamPacketConfig, 0);
+
+  const u32 hd_video = ReadReg(kHdmi0HdBase, kHdmiHdVideoControl);
+  WriteReg(kHdmi0HdBase, kHdmiHdVideoControl,
+           hd_video | kHdmiHdVideoClearRgb | kHdmiHdVideoBlankPixel);
+  DataSyncBarrier();
+  CTimer::SimpleusDelay(1000);
+
+  printf("boot: pi5kms hdmi quiesce packets=0x%08x->0x%08x "
+         "hd_video=0x%08x->0x%08x enable-preserved=yes\r\n",
+         packet_config,
+         ReadReg(kHdmi0Base, kHdmiRamPacketConfig),
+         hd_video,
+         ReadReg(kHdmi0HdBase, kHdmiHdVideoControl));
+  return packet_config;
+}
+
+void ResetHdmiCoreForModeSet() {
+  // BCM2712 exposes HDMI0 reset 1 and its 108 MHz audio clock gate through
+  // the shared DVP block.  Firmware does not necessarily initialize either
+  // one when the board boots without a sink, so the native modeset must not
+  // inherit their state.
+  const u32 misc_before = ReadReg(kHdmi0DvpGlobalBase,
+                                  kHdmiDvpMiscConfig);
+  WriteReg(kHdmi0DvpGlobalBase, kHdmiDvpMiscConfig,
+           misc_before & ~kHdmiDvpAudioClockDisableHdmi0);
+
+  const u32 reset_before = ReadReg(kHdmi0DvpGlobalBase,
+                                   kHdmiDvpSoftwareInit);
+  WriteReg(kHdmi0DvpGlobalBase, kHdmiDvpSoftwareInit,
+           reset_before | kHdmiDvpSoftwareInitHdmi0);
+  DataSyncBarrier();
+  CTimer::SimpleusDelay(1);
+  WriteReg(kHdmi0DvpGlobalBase, kHdmiDvpSoftwareInit,
+           reset_before & ~kHdmiDvpSoftwareInitHdmi0);
+
+  WriteReg(kHdmi0HdBase, kHdmiDvpControl, 0);
+  const u32 clock_stop_before = ReadReg(kHdmi0DvpBase, kHdmiClockStop);
+  WriteReg(kHdmi0DvpBase, kHdmiClockStop,
+           clock_stop_before | kHdmiClockStopPixel);
+  DataSyncBarrier();
+
+  printf("boot: pi5kms hdmi core reset software_init=0x%08x->0x%08x "
+         "misc=0x%08x->0x%08x clock_stop=0x%08x->0x%08x\r\n",
+         reset_before,
+         ReadReg(kHdmi0DvpGlobalBase, kHdmiDvpSoftwareInit),
+         misc_before,
+         ReadReg(kHdmi0DvpGlobalBase, kHdmiDvpMiscConfig),
+         clock_stop_before,
+         ReadReg(kHdmi0DvpBase, kHdmiClockStop));
+}
+
+bool RecenterHdmiFifo() {
+  // Match vc4_hdmi_recenter_fifo(): the second edge one millisecond after the
+  // first is significant on a controller starting from reset state.
+  const u32 fifo = ReadReg(kHdmi0Base, kHdmiFifoCtl) &
+                   kHdmiFifoValidWriteMask;
+  WriteReg(kHdmi0Base, kHdmiFifoCtl, fifo & ~kHdmiFifoRecenter);
+  WriteReg(kHdmi0Base, kHdmiFifoCtl, fifo | kHdmiFifoRecenter);
+  CTimer::SimpleusDelay(1000);
+  WriteReg(kHdmi0Base, kHdmiFifoCtl, fifo & ~kHdmiFifoRecenter);
+  WriteReg(kHdmi0Base, kHdmiFifoCtl, fifo | kHdmiFifoRecenter);
+  DataSyncBarrier();
+  return WaitForRegisterBit(kHdmi0Base, kHdmiFifoCtl,
+                            kHdmiFifoRecenterDone, true, 1000);
+}
+
+u8 CeaVicForMode(const Mode &mode) {
+  if (mode.width == 1280 && mode.height == 720 &&
+      mode.pixel_clock == 74250000) {
+    return mode.h_front_porch == 440 ? 19 :
+           mode.h_front_porch == 110 ? 4 : 0;
+  }
+  if (mode.width == 1920 && mode.height == 1080 &&
+      mode.pixel_clock == 148500000) {
+    return mode.h_front_porch == 528 ? 31 :
+           mode.h_front_porch == 88 ? 16 : 0;
+  }
+  return 0;
+}
+
+void ConfigureHdmiRgbOutput(const Mode &mode) {
+  // vc5_hdmi_csc_setup() is required on BCM2712 even for RGB output.  A
+  // connected firmware boot happens to leave this DVP crossbar and CSC
+  // programmed, while a headless boot does not.  Program the native RGB
+  // route explicitly so SetMode never depends on that inherited state.
+  const bool limited_range = CeaVicForMode(mode) != 0;
+  const u16 scale = limited_range ? 0x1B80 : 0x2000;
+  const u16 offset = limited_range ? 0x0400 : 0x0000;
+
+  WriteReg(kHdmi0DvpBase, kHdmiVecInterfaceConfig, 0);
+  WriteReg(kHdmi0DvpBase, kHdmiVecInterfaceXbar,
+           kHdmiRgbInterfaceXbar);
+
+  WriteReg(kHdmi0CscBase, kHdmiCsc12_11, scale);
+  WriteReg(kHdmi0CscBase, kHdmiCsc14_13,
+           static_cast<u32>(offset) << 16);
+  WriteReg(kHdmi0CscBase, kHdmiCsc22_21,
+           static_cast<u32>(scale) << 16);
+  WriteReg(kHdmi0CscBase, kHdmiCsc24_23,
+           static_cast<u32>(offset) << 16);
+  WriteReg(kHdmi0CscBase, kHdmiCsc32_31, 0);
+  WriteReg(kHdmi0CscBase, kHdmiCsc34_33,
+           (static_cast<u32>(offset) << 16) | scale);
+  WriteReg(kHdmi0CscBase, kHdmiCscChannelControl, 0);
+  WriteReg(kHdmi0CscBase, kHdmiCscControl,
+           kHdmiCscEnable | kHdmiCscCustomMode);
+  DataSyncBarrier();
+
+  printf("boot: pi5kms rgb route range=%s interface=0x%08x "
+         "xbar=0x%08x csc=0x%08x coeff=0x%08x,0x%08x,0x%08x\r\n",
+         limited_range ? "limited" : "full",
+         ReadReg(kHdmi0DvpBase, kHdmiVecInterfaceConfig),
+         ReadReg(kHdmi0DvpBase, kHdmiVecInterfaceXbar),
+         ReadReg(kHdmi0CscBase, kHdmiCscControl),
+         ReadReg(kHdmi0CscBase, kHdmiCsc12_11),
+         ReadReg(kHdmi0CscBase, kHdmiCsc22_21),
+         ReadReg(kHdmi0CscBase, kHdmiCsc34_33));
+}
+
+bool WriteAviInfoFrame(const Mode &mode) {
+  u8 packet[kHdmiPacketStride] = {};
+  packet[0] = 0x82;  // AVI InfoFrame type.
+  packet[1] = 0x02;  // Version 2.
+  packet[2] = 13;    // Payload bytes.
+
+  const u8 vic = CeaVicForMode(mode);
+  if (vic != 0) {
+    packet[5] = 2U << 4;  // 16:9 picture aspect ratio.
+    packet[7] = vic;
+  }
+
+  unsigned checksum = 0;
+  for (unsigned i = 0; i < 3; ++i) {
+    checksum += packet[i];
+  }
+  for (unsigned i = 4; i < 17; ++i) {
+    checksum += packet[i];
+  }
+  packet[3] = static_cast<u8>(0U - checksum);
+
+  WriteReg(kHdmi0Base, kHdmiRamPacketConfig,
+           ReadReg(kHdmi0Base, kHdmiRamPacketConfig) &
+               ~kHdmiAviPacketEnable);
+  WaitForRegisterBit(kHdmi0Base, kHdmiRamPacketStatus,
+                     kHdmiAviPacketEnable, false, 100);
+
+  u32 packet_offset = kHdmiAviPacketId * kHdmiPacketStride;
+  const u32 packet_end = packet_offset + kHdmiPacketStride;
+  for (unsigned i = 0; i < 17; i += 7) {
+    WriteReg(kHdmi0PacketRamBase, packet_offset,
+             static_cast<u32>(packet[i]) |
+                 (static_cast<u32>(packet[i + 1]) << 8) |
+                 (static_cast<u32>(packet[i + 2]) << 16));
+    packet_offset += sizeof(u32);
+    WriteReg(kHdmi0PacketRamBase, packet_offset,
+             static_cast<u32>(packet[i + 3]) |
+                 (static_cast<u32>(packet[i + 4]) << 8) |
+                 (static_cast<u32>(packet[i + 5]) << 16) |
+                 (static_cast<u32>(packet[i + 6]) << 24));
+    packet_offset += sizeof(u32);
+  }
+  while (packet_offset < packet_end) {
+    WriteReg(kHdmi0PacketRamBase, packet_offset, 0);
+    packet_offset += sizeof(u32);
+  }
+  DataSyncBarrier();
+
+  WriteReg(kHdmi0Base, kHdmiRamPacketConfig,
+           ReadReg(kHdmi0Base, kHdmiRamPacketConfig) |
+               kHdmiAviPacketEnable);
+  const bool active = WaitForRegisterBit(
+      kHdmi0Base, kHdmiRamPacketStatus,
+      kHdmiAviPacketEnable, true, 100);
+  printf("boot: pi5kms avi infoframe vic=%u checksum=0x%02x active=%s\r\n",
+         static_cast<unsigned>(vic), static_cast<unsigned>(packet[3]),
+         active ? "yes" : "timeout");
+  return active;
+}
+
+bool EnableHdmiOutput(const Mode &mode) {
+  u32 hd_video = kHdmiHdVideoEnable |
+                 kHdmiHdVideoUnderflowEnable |
+                 kHdmiHdVideoFrameCounterReset |
+                 kHdmiHdVideoClearRgb |
+                 kHdmiHdVideoBlankInsertEnable;
+  if (!mode.v_sync_positive) {
+    hd_video |= kHdmiHdVideoVsyncLow;
+  }
+  if (!mode.h_sync_positive) {
+    hd_video |= kHdmiHdVideoHsyncLow;
+  }
+  WriteReg(kHdmi0HdBase, kHdmiHdVideoControl, hd_video);
+  WriteReg(kHdmi0HdBase, kHdmiHdVideoControl,
+           ReadReg(kHdmi0HdBase, kHdmiHdVideoControl) &
+               ~kHdmiHdVideoBlankPixel);
+
+  WriteReg(kHdmi0Base, kHdmiSchedulerControl,
+           ReadReg(kHdmi0Base, kHdmiSchedulerControl) |
+               kHdmiSchedulerModeHdmi);
+  DataSyncBarrier();
+  const bool hdmi_active = WaitForRegisterBit(
+      kHdmi0Base, kHdmiSchedulerControl,
+      kHdmiSchedulerHdmiActive, true, 1000);
+
+  // Circle's HDMI audio device uses this bit as the hardware-ready contract.
+  // Make it deterministic even when firmware skipped display initialization.
+  WriteReg(kHdmi0Base, kHdmiRamPacketConfig,
+           ReadReg(kHdmi0Base, kHdmiRamPacketConfig) |
+               kHdmiRamPacketEnable);
+  DataSyncBarrier();
+  const bool avi_active = WriteAviInfoFrame(mode);
+
+  const bool fifo_recentered = RecenterHdmiFifo();
+  const u32 frame_start = ReadReg(kHdmi0HdBase, kHdmiHdFrameCount);
+  CTimer::SimpleusDelay(25000);
+  const u32 frame_end = ReadReg(kHdmi0HdBase, kHdmiHdFrameCount);
+
+  printf("boot: pi5kms hdmi enable active=%s avi=%s recenter=%s "
+         "scheduler=0x%08x hd_video=0x%08x packets=0x%08x "
+         "frame=0x%08x->0x%08x\r\n",
+         hdmi_active ? "yes" : "timeout",
+         avi_active ? "yes" : "timeout",
+         fifo_recentered ? "done" : "timeout",
+         ReadReg(kHdmi0Base, kHdmiSchedulerControl),
+         ReadReg(kHdmi0HdBase, kHdmiHdVideoControl),
+         ReadReg(kHdmi0Base, kHdmiRamPacketConfig),
+         frame_start, frame_end);
+  return hdmi_active && avi_active && fifo_recentered;
 }
 
 bool SetClockRate(unsigned clock_id, u32 rate) {
@@ -237,6 +579,57 @@ u32 MakePvVerta(const Mode &mode) {
 
 u32 MakePvVertb(const Mode &mode) {
   return ((u32)mode.v_front_porch << 16) | mode.height;
+}
+
+bool IsBcm2712D0() {
+  return (ReadReg(kHvsBase, kHvsVersion) & 0xFFU) == kHvsVersionD0;
+}
+
+u32 PvConfiguredControl() {
+  if (IsBcm2712D0()) {
+    // Pi500/D0 exposes three FIFO-level high bits at 26:24.  The working
+    // firmware reference programs a 512-byte FIFO threshold of 494 bytes.
+    return ((kPvD0FifoLevel >> 6) << kPvD0ControlFifoLevelHighShift) |
+           ((kPvD0FifoLevel & 0x3FU) << kPvControlFifoLevelShift) |
+           kPvControlClearAtStart;
+  }
+  return (kPvC0FifoLevel << kPvControlFifoLevelShift) |
+         kPvControlClearAtStart |
+         kPvControlTriggerUnderflow |
+         kPvControlWaitHstart |
+         kPvControlFifoClear;
+}
+
+u32 PvConfiguredVControl() {
+  // The D0 firmware reference runs progressive HDMI continuously without
+  // ODD_TIMING.  C0 follows the upstream one-pixel-per-clock sequence.
+  return kPvVControlContinuous |
+         (IsBcm2712D0() ? 0 : kPvVControlOddTiming);
+}
+
+void ConfigurePixelValve(const Mode &mode) {
+  // Match vc4_crtc_config_pv() for bcm2712-pixelvalve0: progressive HDMI0,
+  // RGB24, one pixel per clock and encoder clock-select 0.  C0 uses the
+  // upstream 64-byte FIFO layout; D0 uses its 512-byte FIFO layout.  Every
+  // control word is written from known state because firmware leaves a
+  // materially different (and non-running) PV setup after a headless boot.
+  WriteReg(kPv0Base, kPvHorza, MakePvHorza(mode));
+  WriteReg(kPv0Base, kPvHorzb, MakePvHorzb(mode));
+  WriteReg(kPv0Base, kPvVerta, MakePvVerta(mode));
+  WriteReg(kPv0Base, kPvVertb, MakePvVertb(mode));
+  WriteReg(kPv0Base, 0x008, 0);  // PV_VSYNCD_EVEN.
+  WriteReg(kPv0Base, kPvVControl, PvConfiguredVControl());
+  WriteReg(kPv0Base, kPvMuxCfg, kPvMuxRgbNoSwap);
+  WriteReg(kPv0Base, kPvPipeInitCtrl, kPvPipeInit);
+  WriteReg(kPv0Base, kPvControl, PvConfiguredControl());
+  DataSyncBarrier();
+
+  printf("boot: pi5kms pixelvalve configured ctl=0x%08x vctl=0x%08x "
+         "mux=0x%08x pipe=0x%08x\r\n",
+         ReadReg(kPv0Base, kPvControl),
+         ReadReg(kPv0Base, kPvVControl),
+         ReadReg(kPv0Base, kPvMuxCfg),
+         ReadReg(kPv0Base, kPvPipeInitCtrl));
 }
 
 u32 HvsDisp0Ctrl0Offset() {
@@ -502,7 +895,8 @@ void ProgramHvsCob0() {
 
 bool AppendPlaneDlist(const Plane &plane,
                       unsigned upm_slot,
-                      u32 *dlist, unsigned capacity, unsigned *count) {
+                      u32 *dlist, unsigned capacity, unsigned *count,
+                      unsigned *ptr0_word, unsigned *address_word) {
   if (dlist == nullptr || count == nullptr || *count >= capacity) {
     return false;
   }
@@ -534,7 +928,9 @@ bool AppendPlaneDlist(const Plane &plane,
   }
   dlist[(*count)++] = MakeHvsPos2(plane.source.width, plane.source.height);
   dlist[(*count)++] = 0xC0C0C0C0U;
+  *ptr0_word = *count;
   dlist[(*count)++] = MakeHvsPtr0(framebuffer_bus_address, upm_slot);
+  *address_word = *count;
   dlist[(*count)++] = framebuffer_bus_address;
   dlist[(*count)++] = plane.pitch & 0x1FFFFU;
 
@@ -671,9 +1067,12 @@ void LogScanoutPlanes(const Plane *planes, unsigned plane_count,
 bool BuildScanoutDlist(const Plane *planes, unsigned plane_count,
                        u32 display_width, u32 display_height,
                        u32 *dlist, unsigned dlist_capacity,
-                       unsigned *dlist_count) {
+                       unsigned *dlist_count,
+                       unsigned *ptr0_words,
+                       unsigned *address_words) {
   if (planes == nullptr || plane_count == 0 ||
-      dlist == nullptr || dlist_count == nullptr) {
+      dlist == nullptr || dlist_count == nullptr ||
+      ptr0_words == nullptr || address_words == nullptr) {
     return false;
   }
 
@@ -687,7 +1086,8 @@ bool BuildScanoutDlist(const Plane *planes, unsigned plane_count,
 
   unsigned count = 0;
   for (unsigned i = 0; i < plane_count; ++i) {
-    if (!AppendPlaneDlist(planes[i], i, dlist, dlist_capacity, &count)) {
+    if (!AppendPlaneDlist(planes[i], i, dlist, dlist_capacity, &count,
+                          &ptr0_words[i], &address_words[i])) {
       printf("boot: pi5kms display list build failed at plane %u\r\n", i);
       return false;
     }
@@ -702,6 +1102,62 @@ bool BuildScanoutDlist(const Plane *planes, unsigned plane_count,
   return true;
 }
 
+bool SameRect(const Rect &left, const Rect &right) {
+  return left.x == right.x && left.y == right.y &&
+         left.width == right.width && left.height == right.height;
+}
+
+bool SamePlaneLayout(const Plane &left, const Plane &right) {
+  return left.pitch == right.pitch && left.width == right.width &&
+         left.height == right.height && left.depth == right.depth &&
+         left.format == right.format && left.filter == right.filter &&
+         SameRect(left.source, right.source) &&
+         SameRect(left.destination, right.destination);
+}
+
+bool MatchesScanoutTemplate(const ScanoutDlistTemplate &dlist_template,
+                            const Plane *planes, unsigned plane_count,
+                            u32 display_width, u32 display_height) {
+  if (!dlist_template.valid || dlist_template.plane_count != plane_count ||
+      dlist_template.display_width != display_width ||
+      dlist_template.display_height != display_height) {
+    return false;
+  }
+  for (unsigned i = 0; i < plane_count; ++i) {
+    if (planes[i].framebuffer_bus_address == 0 ||
+        !SamePlaneLayout(dlist_template.planes[i], planes[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void RememberScanoutLayout(ScanoutDlistTemplate *dlist_template,
+                           const Plane *planes, unsigned plane_count,
+                           u32 display_width, u32 display_height) {
+  dlist_template->valid = true;
+  dlist_template->plane_count = plane_count;
+  dlist_template->display_width = display_width;
+  dlist_template->display_height = display_height;
+  for (unsigned i = 0; i < plane_count; ++i) {
+    dlist_template->planes[i] = planes[i];
+  }
+}
+
+void PatchScanoutAddresses(ScanoutDlistTemplate *dlist_template,
+                           const Plane *planes) {
+  for (unsigned i = 0; i < dlist_template->plane_count; ++i) {
+    const u32 bytes_per_pixel = planes[i].depth / 8;
+    const u32 source_offset =
+        (u32)planes[i].source.y * planes[i].pitch +
+        (u32)planes[i].source.x * bytes_per_pixel;
+    const u32 address = planes[i].framebuffer_bus_address + source_offset;
+    dlist_template->words[dlist_template->ptr0_words[i]] =
+        MakeHvsPtr0(address, i);
+    dlist_template->words[dlist_template->address_words[i]] = address;
+  }
+}
+
 u32 HvsDlistSlot(unsigned dlist_index) {
   return dlist_index == 0 ? kHvsDlistSlot0 : kHvsDlistSlot1;
 }
@@ -710,6 +1166,20 @@ bool ProgramScanout(const Plane *planes, unsigned plane_count,
                     u32 display_width, u32 display_height,
                     bool wait_for_vblank, bool log_planes,
                     bool program_channel) {
+#ifdef BMC64_DEBUG_PROFILE
+  u32 timing_start_us = 0;
+  u32 wait_start_us = 0;
+  u32 wait_done_us = 0;
+  bool wait_requested = false;
+  if (!program_channel) {
+    timing_start_us = CTimer::GetClockTicks();
+    ++g_last_present_timing.sequence;
+    g_last_present_timing.valid = false;
+    g_last_present_timing.wait_requested = false;
+    g_last_present_timing.wait_us = 0;
+    g_last_present_timing.total_us = 0;
+  }
+#endif
   if (planes == nullptr || plane_count == 0) {
     return false;
   }
@@ -726,11 +1196,43 @@ bool ProgramScanout(const Plane *planes, unsigned plane_count,
   const bool background_fill =
       NeedsBackgroundFill(planes, plane_count, display_width, display_height);
 
-  u32 dlist[160];
-  const unsigned dlist_capacity = sizeof(dlist) / sizeof(dlist[0]);
+  u32 uncached_dlist[kHvsScanoutDlistWords];
+  unsigned uncached_ptr0_words[kHvsScanoutDlistWords];
+  unsigned uncached_address_words[kHvsScanoutDlistWords];
+  const u32 *dlist = uncached_dlist;
   unsigned count = 0;
-  if (!BuildScanoutDlist(planes, plane_count, display_width, display_height,
-                         dlist, dlist_capacity, &count)) {
+  bool cache_hit = false;
+  if (plane_count <= kHvsScanoutTemplatePlanes) {
+    ScanoutDlistTemplate *dlist_template =
+        &g_scanout_dlist_templates[dlist_index];
+    cache_hit = MatchesScanoutTemplate(
+        *dlist_template, planes, plane_count, display_width, display_height);
+    if (!cache_hit) {
+      if (!BuildScanoutDlist(
+              planes, plane_count, display_width, display_height,
+              dlist_template->words, kHvsScanoutDlistWords,
+              &dlist_template->word_count, dlist_template->ptr0_words,
+              dlist_template->address_words)) {
+        dlist_template->valid = false;
+        return false;
+      }
+      RememberScanoutLayout(dlist_template, planes, plane_count,
+                            display_width, display_height);
+    } else {
+      PatchScanoutAddresses(dlist_template, planes);
+      if (!g_scanout_dlist_cache_hit_logged[dlist_index]) {
+        g_scanout_dlist_cache_hit_logged[dlist_index] = true;
+        printf("boot: pi5kms dlist template slot=%u status=hit words=%u "
+               "planes=%u\r\n", dlist_index, dlist_template->word_count,
+               plane_count);
+      }
+    }
+    dlist = dlist_template->words;
+    count = dlist_template->word_count;
+  } else if (!BuildScanoutDlist(
+                 planes, plane_count, display_width, display_height,
+                 uncached_dlist, kHvsScanoutDlistWords, &count,
+                 uncached_ptr0_words, uncached_address_words)) {
     return false;
   }
 
@@ -743,14 +1245,20 @@ bool ProgramScanout(const Plane *planes, unsigned plane_count,
              ReadReg(kHvsBase, kHvsControl) | kHvsControlEnable);
   }
 
-  if (!program_channel &&
-      wait_for_vblank &&
-      g_hvs_has_active_dlist &&
-      !WaitForVBlank()) {
-    if (!g_hvs_vblank_timeout_logged) {
-      printf("boot: pi5kms vblank wait timed out; presenting anyway\r\n");
-      g_hvs_vblank_timeout_logged = true;
+  if (!program_channel && wait_for_vblank && g_hvs_has_active_dlist) {
+#ifdef BMC64_DEBUG_PROFILE
+    wait_requested = true;
+    wait_start_us = CTimer::GetClockTicks();
+#endif
+    if (!WaitForVBlank()) {
+      if (!g_hvs_vblank_timeout_logged) {
+        printf("boot: pi5kms vblank wait timed out; presenting anyway\r\n");
+        g_hvs_vblank_timeout_logged = true;
+      }
     }
+#ifdef BMC64_DEBUG_PROFILE
+    wait_done_us = CTimer::GetClockTicks();
+#endif
   }
 
   for (unsigned i = 0; i < count; ++i) {
@@ -780,6 +1288,16 @@ bool ProgramScanout(const Plane *planes, unsigned plane_count,
 
   g_hvs_submitted_dlist = dlist_index;
   g_hvs_has_active_dlist = true;
+#ifdef BMC64_DEBUG_PROFILE
+  if (!program_channel) {
+    const u32 timing_done_us = CTimer::GetClockTicks();
+    g_last_present_timing.valid = true;
+    g_last_present_timing.wait_requested = wait_requested;
+    g_last_present_timing.wait_us =
+        wait_requested ? wait_done_us - wait_start_us : 0;
+    g_last_present_timing.total_us = timing_done_us - timing_start_us;
+  }
+#endif
   return true;
 }
 
@@ -869,87 +1387,43 @@ void InitVc6Phy(u32 tmds_rate) {
            ReadReg(kHdmi0PhyBase, kPhyPllResetCtl) | kPhyPllResetPllResetb);
 }
 
-bool ResolveStandardMode(unsigned hdmi_group, unsigned hdmi_mode,
-                         Mode *mode) {
-  if (hdmi_group != 1) {
-    return false;
+void ServiceInitialSinkAttach() {
+  if (!g_waiting_for_initial_sink || !g_active_mode_valid) {
+    return;
   }
 
-  switch (hdmi_mode) {
-    case 4:
-      *mode = {1280, 720, 74250000, 110, 40, 220, 5, 5, 20, true, true};
-      return true;
-    case 19:
-      *mode = {1280, 720, 74250000, 440, 40, 220, 5, 5, 20, true, true};
-      return true;
-    case 16:
-      *mode = {1920, 1080, 148500000, 88, 44, 148, 4, 5, 36, true, true};
-      return true;
-    case 31:
-      *mode = {1920, 1080, 148500000, 528, 44, 148, 4, 5, 36, true, true};
-      return true;
-    default:
-      return false;
-  }
-}
-
-bool ResolveNamedMode(const char *name, Mode *mode) {
-  if (name == nullptr || *name == '\0') {
-    return false;
+  if (!HdmiSinkConnected()) {
+    g_initial_sink_detected_us = 0;
+    return;
   }
 
-  if (strcmp(name, "1280x800@60") == 0) {
-    *mode = {1280, 800, 83500000, 72, 128, 200, 3, 6, 22, false, true};
-    return true;
+  const u64 now_us = CTimer::GetClockTicks64();
+  if (g_initial_sink_detected_us == 0) {
+    g_initial_sink_detected_us = now_us;
+    printf("boot: pi5kms initial sink detected hotplug=0x%08x "
+           "state=settling settle_us=%llu\r\n",
+           ReadReg(kHdmi0Base, kHdmiHotplug),
+           static_cast<unsigned long long>(kInitialSinkSettleUs));
+    return;
   }
-  if (strcmp(name, "1280x800@50") == 0) {
-    *mode = {1280, 800, 68000000, 56, 128, 184, 3, 6, 17, false, true};
-    return true;
-  }
-  if (strcmp(name, "1920x1200@60") == 0) {
-    *mode = {1920, 1200, 193250000, 136, 200, 336, 3, 6, 36, false, true};
-    return true;
-  }
-  if (strcmp(name, "1920x1200@50") == 0) {
-    *mode = {1920, 1200, 158250000, 120, 200, 320, 3, 6, 29, false, true};
-    return true;
+  if (now_us - g_initial_sink_detected_us < kInitialSinkSettleUs) {
+    return;
   }
 
-  return false;
-}
+  // This is a one-shot startup completion, not a runtime link monitor.  A
+  // stable first HPD completes the live headless mode using the normal
+  // BCM2712 disable/reconfigure/enable lifecycle and then retires the check.
+  g_waiting_for_initial_sink = false;
+  g_initial_sink_detected_us = 0;
+  const Mode mode = g_active_mode;
+  printf("boot: pi5kms initial sink stable hotplug=0x%08x "
+         "action=live-modeset\r\n",
+         ReadReg(kHdmi0Base, kHdmiHotplug));
 
-bool ParseTimings(const char *timings, Mode *mode) {
-  if (timings == nullptr || *timings == '\0') {
-    return false;
-  }
-
-  unsigned values[17];
-  const char *p = timings;
-  for (unsigned i = 0; i < 17; ++i) {
-    char *end = nullptr;
-    values[i] = strtoul(p, &end, 10);
-    if (end == p) {
-      return false;
-    }
-    p = end;
-    while (*p == ',' || *p == ' ') {
-      ++p;
-    }
-  }
-
-  mode->width = values[0];
-  mode->h_sync_positive = values[1] != 0;
-  mode->h_front_porch = values[2];
-  mode->h_sync = values[3];
-  mode->h_back_porch = values[4];
-  mode->height = values[5];
-  mode->v_sync_positive = values[6] != 0;
-  mode->v_front_porch = values[7];
-  mode->v_sync = values[8];
-  mode->v_back_porch = values[9];
-  mode->pixel_clock = values[15];
-
-  return mode->width != 0 && mode->height != 0 && mode->pixel_clock != 0;
+  const bool ready = SetMode(mode);
+  printf("boot: pi5kms initial sink completion status=%s "
+         "monitor=retired\r\n",
+         ready ? "ready" : "failed");
 }
 
 }  // namespace
@@ -957,17 +1431,9 @@ bool ParseTimings(const char *timings, Mode *mode) {
 bool ResolveBmcMode(unsigned hdmi_group, unsigned hdmi_mode,
                     const char *hdmi_timings, const char *named_mode,
                     Mode *mode) {
-  if (mode == nullptr) {
-    return false;
-  }
-
-  if (ResolveNamedMode(named_mode, mode)) {
-    return true;
-  }
-  if (hdmi_group == 2 && hdmi_mode == 87 && ParseTimings(hdmi_timings, mode)) {
-    return true;
-  }
-  return ResolveStandardMode(hdmi_group, hdmi_mode, mode);
+  return bmxkms::ResolveBmcMode(
+      hdmi_group, hdmi_mode, hdmi_timings, named_mode,
+      bmxkms::kTimingParsePermissive, mode);
 }
 
 bool SetMode(const Mode &mode) {
@@ -979,8 +1445,15 @@ bool SetMode(const Mode &mode) {
 
   printf("boot: pi5kms set %ux%u pclk %u\r\n",
          mode.width, mode.height, mode.pixel_clock);
+  const bool live_modeset = g_active_mode_valid;
+  const u32 packet_config_before =
+      live_modeset ? QuiesceHdmiOutputForModeSet() : 0;
+  g_active_mode_valid = false;
+  g_waiting_for_initial_sink = false;
+  g_initial_sink_detected_us = 0;
 
   const u32 pv_control_before = ReadReg(kPv0Base, kPvControl);
+  const u32 pv_vcontrol_before = ReadReg(kPv0Base, kPvVControl);
   WriteReg(kPv0Base, kPvControl, pv_control_before & ~kPvControlEnable);
   WriteReg(kPv0Base, kPvControl,
            (pv_control_before & ~kPvControlEnable) | kPvControlFifoClear);
@@ -991,9 +1464,15 @@ bool SetMode(const Mode &mode) {
       !SetClockRate(kClockDisp, GetHsmClock(mode.pixel_clock))) {
     printf("boot: pi5kms clock setup failed\r\n");
     WriteReg(kPv0Base, kPvControl, pv_control_before);
+    WriteReg(kPv0Base, kPvVControl, pv_vcontrol_before);
     return false;
   }
 
+  if (!live_modeset) {
+    ResetHdmiCoreForModeSet();
+  } else {
+    printf("boot: pi5kms hdmi core reset skipped for live modeset\r\n");
+  }
   InitVc6Phy(mode.pixel_clock);
 
   WriteReg(kHdmi0DvpBase, kHdmiClockStop, 0);
@@ -1010,26 +1489,54 @@ bool SetMode(const Mode &mode) {
   WriteReg(kHdmi0Base, kHdmiMiscControl,
            ReadReg(kHdmi0Base, kHdmiMiscControl) & ~0xFU);
 
-  WriteReg(kPv0Base, kPvHorza, MakePvHorza(mode));
-  WriteReg(kPv0Base, kPvHorzb, MakePvHorzb(mode));
-  WriteReg(kPv0Base, kPvVerta, MakePvVerta(mode));
-  WriteReg(kPv0Base, kPvVertb, MakePvVertb(mode));
-  WriteReg(kPv0Base, kPvVControl,
-           ReadReg(kPv0Base, kPvVControl) | kPvVControlVideoEnable);
-  WriteReg(kPv0Base, kPvMuxCfg, 0x00000020);
-  WriteReg(kPv0Base, kPvPipeInitCtrl, 0x00030002);
+  ConfigureHdmiRgbOutput(mode);
+
+  u32 deep_color = ReadReg(kHdmi0Base, kHdmiDeepColorConfig1);
+  deep_color &= ~(kHdmiDeepColorInitPackPhaseMask |
+                  kHdmiDeepColorDepthMask);
+  deep_color |= kHdmiDeepColorInitPackPhase8Bpc;
+  WriteReg(kHdmi0Base, kHdmiDeepColorConfig1, deep_color);
+
+  u32 gcp_word1 = ReadReg(kHdmi0Base, kHdmiGcpWord1);
+  gcp_word1 &= ~kHdmiGcpSubpacketBytes01Mask;
+  gcp_word1 |= kHdmiGcpClearAvMute;
+  WriteReg(kHdmi0Base, kHdmiGcpWord1, gcp_word1);
+  WriteReg(kHdmi0Base, kHdmiGcpConfig,
+           ReadReg(kHdmi0Base, kHdmiGcpConfig) | kHdmiGcpEnable);
+
+  ConfigurePixelValve(mode);
+
+  const u32 fifo = ReadReg(kHdmi0Base, kHdmiFifoCtl) &
+                   kHdmiFifoValidWriteMask;
+  WriteReg(kHdmi0Base, kHdmiFifoCtl,
+           fifo | kHdmiFifoMasterSlaveN);
 
   ProgramHvsDisplay0(mode);
 
-  const u32 fifo = ReadReg(kHdmi0Base, kHdmiFifoCtl) & kHdmiFifoValidWriteMask;
-  WriteReg(kHdmi0Base, kHdmiFifoCtl, fifo & ~kHdmiFifoRecenter);
-  WriteReg(kHdmi0Base, kHdmiFifoCtl, fifo | kHdmiFifoRecenter);
+  WriteReg(kPv0Base, kPvControl,
+           PvConfiguredControl() | kPvControlEnable);
+  WriteReg(kPv0Base, kPvVControl,
+           PvConfiguredVControl() | kPvVControlVideoEnable);
 
-  WriteReg(kPv0Base, kPvControl, (pv_control_before | kPvControlEnable) &
-                                     ~kPvControlFifoClear);
+  if (live_modeset) {
+    // Preserve packet producers which remain active across this one-shot
+    // transition (notably HDMI audio).  AVI is rewritten below for the mode.
+    WriteReg(kHdmi0Base, kHdmiRamPacketConfig,
+             packet_config_before & ~kHdmiAviPacketEnable);
+  }
 
-  printf("boot: pi5kms set complete\r\n");
-  return true;
+  const bool output_ready = EnableHdmiOutput(mode);
+  if (output_ready) {
+    g_active_mode = mode;
+    g_active_mode_valid = true;
+    g_waiting_for_initial_sink = !HdmiSinkConnected();
+  }
+  printf("boot: pi5kms set complete output=%s\r\n",
+         output_ready ? "ready" : "not-ready");
+  printf("boot: pi5kms startup sink hotplug=0x%08x state=%s\r\n",
+         ReadReg(kHdmi0Base, kHdmiHotplug),
+         g_waiting_for_initial_sink ? "waiting-initial-attach" : "complete");
+  return output_ready;
 }
 
 bool CreateFramebuffer(u32 width, u32 height, u32 depth, Framebuffer *fb) {
@@ -1046,6 +1553,7 @@ bool CreateFramebuffer(u32 width, u32 height, u32 depth, Framebuffer *fb) {
     return false;
   }
 
+  fb->allocation = pixels;
   fb->pixels = pixels;
   fb->width = width;
   fb->height = height;
@@ -1067,13 +1575,8 @@ void DestroyFramebuffer(Framebuffer *fb) {
     return;
   }
 
-  delete[] fb->pixels;
-  fb->pixels = nullptr;
-  fb->width = 0;
-  fb->height = 0;
-  fb->pitch = 0;
-  fb->depth = 0;
-  fb->size = 0;
+  delete[] fb->allocation;
+  memset(fb, 0, sizeof *fb);
 }
 
 void ClearFramebuffer(const Framebuffer &fb) {
@@ -1093,6 +1596,21 @@ void FlushFramebuffer(const Framebuffer &fb) {
   CleanDataCacheRange((u64)(uintptr)fb.pixels, fb.size);
 }
 
+void FlushFramebufferRows(const Framebuffer &fb, u32 first_row,
+                          u32 row_count) {
+  if (fb.pixels == nullptr || fb.pitch == 0 || first_row >= fb.height ||
+      row_count == 0) {
+    return;
+  }
+
+  if (row_count > fb.height - first_row) {
+    row_count = fb.height - first_row;
+  }
+  CleanDataCacheRange(
+      (u64)(uintptr)(fb.pixels + first_row * fb.pitch),
+      row_count * fb.pitch);
+}
+
 u32 HvsDisplay0Mode() {
   return (ReadReg(kHvsBase, HvsDisp0StatusOffset()) &
           kHvsStatusModeMask) >> kHvsStatusModeShift;
@@ -1103,6 +1621,23 @@ bool WaitForVBlank(unsigned timeout_us) {
 
   while ((unsigned)(CTimer::GetClockTicks() - start) < timeout_us) {
     if (HvsDisplay0Mode() == kHvsStatusModeEof) {
+      return true;
+    }
+    CTimer::SimpleusDelay(10);
+  }
+
+  return false;
+}
+
+bool WaitForNextVBlank(unsigned timeout_us) {
+  const unsigned start = CTimer::GetClockTicks();
+  bool left_end_of_frame = HvsDisplay0Mode() != kHvsStatusModeEof;
+
+  while ((unsigned)(CTimer::GetClockTicks() - start) < timeout_us) {
+    const u32 mode = HvsDisplay0Mode();
+    if (mode != kHvsStatusModeEof) {
+      left_end_of_frame = true;
+    } else if (left_end_of_frame) {
       return true;
     }
     CTimer::SimpleusDelay(10);
@@ -1156,8 +1691,17 @@ bool ConfigureScanout(const Plane *planes, unsigned plane_count,
 bool PresentScanout(const Plane *planes, unsigned plane_count,
                     u32 display_width, u32 display_height,
                     bool wait_for_vblank) {
+  ServiceInitialSinkAttach();
   return ProgramScanout(planes, plane_count, display_width, display_height,
                         wait_for_vblank, false, false);
+}
+
+bool GetLastPresentTiming(PresentTiming *timing) {
+  if (timing == nullptr) {
+    return false;
+  }
+  *timing = g_last_present_timing;
+  return timing->valid;
 }
 
 }  // namespace pi5kms

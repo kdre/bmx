@@ -415,6 +415,9 @@ int emux_keyboard_mapping_lookup(long keycode, unsigned char usb_modifiers,
 int emux_keyboard_mapping_target_name(int row, int column, int flags,
                                       char *buffer, size_t buffer_size);
 const char *emux_keyboard_mapping_file(void);
+// Refreshes a built-in positional map after a machine keyboard type change.
+// Custom and hardware-specific mappings are left untouched.
+void emux_keyboard_type_changed(void);
 int emux_keymap_editor_begin(struct keymap_editor_model *model,
                              int *editable,
                              char *error, size_t error_size);

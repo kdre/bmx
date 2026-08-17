@@ -11,6 +11,9 @@ extern "C" {
 
 #define MENU_CONTROL_KEY_SIZE 64
 #define MENU_CONTROL_PAGE_MAX 16
+/* Use only when the stable menu ID uniquely identifies an item and sub_id is
+   private callback data rather than part of the public binding identity. */
+#define MENU_CONTROL_SUB_ID_ANY (-1)
 
 typedef enum menu_control_status {
   MENU_CONTROL_OK = 0,

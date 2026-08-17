@@ -19,7 +19,7 @@
 #include <stdio.h>
 
 extern "C" {
-unsigned long circle_get_ticks(void);
+uint64_t circle_get_ticks64(void);
 void sem_dec(uint32_t *semaphore);
 void sem_inc(uint32_t *semaphore);
 }
@@ -126,38 +126,43 @@ void PrintPairWindow() {
     return;
   }
 
-  printf("sidbench: machine=%s worker=%s blocks=%llu parallel=%llu "
-         "fallback=%llu frames=%llu pair_us_avg=%llu pair_us_max=%llu "
-         "local_us_avg=%llu worker_us_avg=%llu wait_us_avg=%llu "
-         "sample_mismatch=%llu clock_mismatch=%llu\r\n",
+  // Circle's AArch32 printf and the GCC variadic AAPCS alignment disagree
+  // after the leading string arguments when several 64-bit values follow.
+  // Every reported counter is bounded by this reset window, so publish the
+  // metrics as 32-bit values on both boards and keep the wire log identical.
+  printf("sidbench: machine=%s worker=%s blocks=%u parallel=%u "
+         "fallback=%u frames=%u pair_us_avg=%u pair_us_max=%u "
+         "local_us_avg=%u worker_us_avg=%u wait_us_avg=%u "
+         "sample_mismatch=%u clock_mismatch=%u\r\n",
          MachineName(), WorkerMode(),
-         static_cast<unsigned long long>(g_pair.blocks),
-         static_cast<unsigned long long>(g_pair.parallel_blocks),
-         static_cast<unsigned long long>(g_pair.fallback_blocks),
-         static_cast<unsigned long long>(g_pair.frames),
-         static_cast<unsigned long long>(g_pair.pair_us / g_pair.blocks),
-         static_cast<unsigned long long>(g_pair.pair_us_max),
-         static_cast<unsigned long long>(g_pair.local_us / g_pair.blocks),
-         static_cast<unsigned long long>(g_pair.worker_us / g_pair.blocks),
-         static_cast<unsigned long long>(g_pair.wait_us / g_pair.blocks),
-         static_cast<unsigned long long>(g_pair.sample_count_mismatches),
-         static_cast<unsigned long long>(g_pair.clock_mismatches));
+         static_cast<unsigned>(g_pair.blocks),
+         static_cast<unsigned>(g_pair.parallel_blocks),
+         static_cast<unsigned>(g_pair.fallback_blocks),
+         static_cast<unsigned>(g_pair.frames),
+         static_cast<unsigned>(g_pair.pair_us / g_pair.blocks),
+         static_cast<unsigned>(g_pair.pair_us_max),
+         static_cast<unsigned>(g_pair.local_us / g_pair.blocks),
+         static_cast<unsigned>(g_pair.worker_us / g_pair.blocks),
+         static_cast<unsigned>(g_pair.wait_us / g_pair.blocks),
+         static_cast<unsigned>(g_pair.sample_count_mismatches),
+         static_cast<unsigned>(g_pair.clock_mismatches));
   ResetPairWindow();
 }
 
 void PrintPCMWindow() {
   unsigned queue_min = g_queue_min_used == UINT_MAX ? 0 : g_queue_min_used;
-  printf("sidpcm: machine=%s worker=%s window=%llu values=%llu "
-         "hash=%016llx jobs_submitted=%llu jobs_completed=%llu "
-         "queue_min_used=%u queue_empty=%llu queue_polls=%llu\r\n",
+  printf("sidpcm: machine=%s worker=%s window=%u values=%u "
+         "hash=%08x%08x jobs_submitted=%u jobs_completed=%u "
+         "queue_min_used=%u queue_empty=%u queue_polls=%u\r\n",
          MachineName(), WorkerMode(),
-         static_cast<unsigned long long>(g_pcm_window),
-         static_cast<unsigned long long>(g_pcm_window_values),
-         static_cast<unsigned long long>(g_pcm_hash),
-         static_cast<unsigned long long>(g_jobs_submitted),
-         static_cast<unsigned long long>(g_jobs_completed), queue_min,
-         static_cast<unsigned long long>(g_queue_empty_polls),
-         static_cast<unsigned long long>(g_queue_polls));
+         static_cast<unsigned>(g_pcm_window),
+         static_cast<unsigned>(g_pcm_window_values),
+         static_cast<unsigned>(g_pcm_hash >> 32),
+         static_cast<unsigned>(g_pcm_hash),
+         static_cast<unsigned>(g_jobs_submitted),
+         static_cast<unsigned>(g_jobs_completed), queue_min,
+         static_cast<unsigned>(g_queue_empty_polls),
+         static_cast<unsigned>(g_queue_polls));
   ++g_pcm_window;
   g_pcm_hash = kFNVOffset;
   g_pcm_window_values = 0;
@@ -280,7 +285,7 @@ int bmx_sid_worker_wait(int *result, uint64_t *delta_t,
 
 uint64_t bmx_sid_diag_now_us(void) {
 #if BMX_SID_DIAGNOSTICS
-  return static_cast<uint64_t>(circle_get_ticks());
+  return circle_get_ticks64();
 #else
   return 0;
 #endif

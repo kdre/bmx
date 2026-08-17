@@ -27,6 +27,7 @@ int main(void) {
   }
 
   ViceApp::TShutdownMode ShutdownMode = Kernel.Run();
+  Kernel.Cleanup();
 
   switch (ShutdownMode) {
   case ViceApp::ShutdownReboot:

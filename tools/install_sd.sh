@@ -64,7 +64,7 @@ done
 case "$BOARD" in
   pi4)
     BOARD_NAME="Pi 4 / Pi 400"
-    KERNEL_NAME="kernel7l.img.c64"
+    KERNEL_NAME=""
     ;;
   pi5)
     BOARD_NAME="Pi 5 / Pi 500"
@@ -90,6 +90,24 @@ fi
 
 if [ -z "$STAGE_DIR" ]; then
   STAGE_DIR="$(bmc64_stage_dir "$BOARD")"
+fi
+
+if [ "$BOARD" = pi4 ]; then
+  SELECTOR="$STAGE_DIR/bmx-active-kernel.txt"
+  [ -f "$SELECTOR" ] || {
+    echo "Pi4 stage is missing bmx-active-kernel.txt" >&2
+    exit 1
+  }
+  KERNEL_NAME="$(sed -n 's/^kernel=\(kernel[^[:space:]]*\.img\.c64\)$/\1/p' \
+    "$SELECTOR")"
+  case "$KERNEL_NAME" in
+    kernel8.img.c64|kernel7l.img.c64)
+      ;;
+    *)
+      echo "Pi4 stage selects an unsupported or ambiguous C64 kernel" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 bmc64_install_boot_partition "$BOARD_NAME" "$STAGE_DIR" "$MOUNTPOINT" \
