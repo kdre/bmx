@@ -5,7 +5,7 @@ current BMX port. It distinguishes between sources that are vendored in
 this repository, sources downloaded by build/staging scripts, and sources used
 only as implementation references.
 
-Last checked: 2026-08-11
+Last checked: 2026-08-19
 
 ## BMC64 upstream
 
@@ -51,6 +51,21 @@ bare-metal build time. Image-directory PETSCII uses the active machine's
 character ROM; BMX-owned PETSCII UI uses the fixed Unscii profile so it looks
 identical on every machine. Raw virtual-keyboard symbols also continue to use
 the active machine's character ROM.
+
+## VectorPortal hand cursor
+
+| Item | Value |
+| --- | --- |
+| Role | Shape reference for the BMX menu's solid mouse-pointer bitmap |
+| Runtime bitmap | `third_party/common/ui.c` |
+| Source | Hand Cursor Free Vector by VectorPortal.com |
+| Source URL | https://vectorportal.com/de/vector/handcursor-freier-vektor/8614 |
+| Downloaded EPS SHA-256 | `d6d36cde24c8c61da9d0f4733d474cc0a06adadf8376c6bd9ff3745389d756cb` |
+| License | Creative Commons Attribution 4.0 International (CC BY 4.0) |
+| License URL | https://creativecommons.org/licenses/by/4.0/ |
+
+The original vector was modified into a 12x16 one-color pixel silhouette with
+a fingertip hotspot. The EPS itself is not vendored or required at build time.
 
 ## VICE
 

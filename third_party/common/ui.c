@@ -28,6 +28,7 @@
 #include "ui_geometry.h"
 
 #include <assert.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -109,6 +110,31 @@ static unsigned pending_ui_key_tail = 0U;
 static long pending_ui_key[16];
 static int pending_ui_key_pressed[16];
 
+#define UI_MENU_MOUSE_QUEUE_SIZE 32U
+
+struct ui_menu_mouse_event {
+  unsigned buttons;
+  int delta_x;
+  int delta_y;
+  int wheel_move;
+};
+
+static unsigned pending_ui_mouse_head;
+static unsigned pending_ui_mouse_tail;
+static struct ui_menu_mouse_event
+    pending_ui_mouse[UI_MENU_MOUSE_QUEUE_SIZE];
+static int ui_menu_mouse_session_active;
+static int ui_menu_mouse_pointer_x;
+static int ui_menu_mouse_pointer_y;
+static unsigned ui_menu_mouse_buttons;
+static struct menu_item *ui_menu_mouse_drag_item;
+static int ui_menu_mouse_drag_axis;
+static int ui_menu_mouse_drag_x;
+static int ui_menu_mouse_drag_y;
+static int ui_menu_mouse_drag_remainder;
+static int ui_menu_mouse_adjusting;
+static int ui_menu_mouse_selecting;
+
 // This overlay is entered only by the explicit System > Update action.  It
 // owns no network or update callback and therefore cannot start work by
 // itself.  All strings are fixed here; authenticated or remote values never
@@ -173,8 +199,11 @@ static int ui_target_width;
 static int ui_target_height;
 static int ui_menu_scale_percent = UI_MENU_SCALE_DEFAULT;
 static int ui_menu_row_gap = UI_MENU_ROW_GAP_DEFAULT;
+static int ui_menu_mouse_enabled = UI_MENU_MOUSE_DEFAULT;
+static int ui_menu_mouse_drag_speed = UI_MENU_MOUSE_DRAG_SPEED_DEFAULT;
 
 static void ui_apply_menu_row_gap_layout(void);
+static void ui_traverse(void);
 
 static void ui_load_appearance_settings(void) {
   FILE *fp;
@@ -182,6 +211,8 @@ static void ui_load_appearance_settings(void) {
 
   ui_menu_scale_percent = UI_MENU_SCALE_DEFAULT;
   ui_menu_row_gap = UI_MENU_ROW_GAP_DEFAULT;
+  ui_menu_mouse_enabled = UI_MENU_MOUSE_DEFAULT;
+  ui_menu_mouse_drag_speed = UI_MENU_MOUSE_DRAG_SPEED_DEFAULT;
   fp = fopen("/settings-ui.txt", "r");
   if (fp == NULL) {
     return;
@@ -205,6 +236,16 @@ static void ui_load_appearance_settings(void) {
       setting = &ui_menu_row_gap;
       minimum = UI_MENU_ROW_GAP_MIN;
       maximum = UI_MENU_ROW_GAP_MAX;
+    } else if (strncmp(line, "menu_mouse=", 11U) == 0) {
+      value_start = line + 11;
+      setting = &ui_menu_mouse_enabled;
+      minimum = 0;
+      maximum = 1;
+    } else if (strncmp(line, "menu_mouse_drag_speed=", 22U) == 0) {
+      value_start = line + 22;
+      setting = &ui_menu_mouse_drag_speed;
+      minimum = UI_MENU_MOUSE_DRAG_SPEED_SLOW;
+      maximum = UI_MENU_MOUSE_DRAG_SPEED_FAST;
     } else {
       continue;
     }
@@ -230,6 +271,16 @@ int ui_save_appearance_settings(void) {
   }
   failed = fprintf(fp, "menu_scale=%d\n", ui_menu_scale_percent) < 0;
   if (fprintf(fp, "menu_row_gap=%d\n", ui_menu_row_gap) < 0 || ferror(fp)) {
+    failed = 1;
+  }
+  if (fprintf(fp, "menu_mouse=%d\n",
+              __atomic_load_n(&ui_menu_mouse_enabled,
+                              __ATOMIC_ACQUIRE)) < 0 ||
+      ferror(fp)) {
+    failed = 1;
+  }
+  if (fprintf(fp, "menu_mouse_drag_speed=%d\n",
+              ui_menu_mouse_drag_speed) < 0 || ferror(fp)) {
     failed = 1;
   }
   if (fclose(fp) != 0) {
@@ -357,6 +408,39 @@ int ui_set_menu_row_gap(int gap) {
 
   ui_menu_row_gap = gap;
   ui_apply_menu_row_gap_layout();
+  return 1;
+}
+
+int ui_get_menu_mouse_enabled(void) {
+  return __atomic_load_n(&ui_menu_mouse_enabled, __ATOMIC_ACQUIRE) != 0;
+}
+
+int ui_set_menu_mouse_enabled(int enabled) {
+  int normalized = enabled != 0;
+  int previous = __atomic_exchange_n(&ui_menu_mouse_enabled, normalized,
+                                     __ATOMIC_ACQ_REL);
+
+  if (previous == normalized) {
+    return 1;
+  }
+  if (normalized && ui_enabled) {
+    ui_menu_mouse_session_begin();
+  } else {
+    ui_menu_mouse_session_end();
+  }
+  return 1;
+}
+
+int ui_get_menu_mouse_drag_speed(void) {
+  return ui_menu_mouse_drag_speed;
+}
+
+int ui_set_menu_mouse_drag_speed(int speed) {
+  if (speed < UI_MENU_MOUSE_DRAG_SPEED_SLOW ||
+      speed > UI_MENU_MOUSE_DRAG_SPEED_FAST) {
+    return 0;
+  }
+  ui_menu_mouse_drag_speed = speed;
   return 1;
 }
 
@@ -603,6 +687,17 @@ static void ui_type_char(char ch) {
   }
 }
 
+static void ui_end_item_preview(void) {
+  if (ui_transparent) {
+    vsync_suspend_speed_eval();
+  }
+  ui_mouse_preview_end();
+  ui_transparent = 0;
+  ui_transparent_layer = -1;
+  ui_canvas_preview_mode = UI_CANVAS_PREVIEW_CONTENT;
+  ui_render_current_item_only = 0;
+}
+
 // Happens on main loop.
 static void ui_key_pressed(long key) {
   struct menu_item *cur = menu_cursor_item[current_menu];
@@ -624,14 +719,7 @@ static void ui_key_pressed(long key) {
   // only while the user is on the item they were triggered
   // for.
   if (key != KEYCODE_Left && key != KEYCODE_Right) {
-    if (ui_transparent) {
-      vsync_suspend_speed_eval();
-    }
-    ui_mouse_preview_end();
-    ui_transparent = 0;
-    ui_transparent_layer = -1;
-    ui_canvas_preview_mode = UI_CANVAS_PREVIEW_CONTENT;
-    ui_render_current_item_only = 0;
+    ui_end_item_preview();
   }
 
   if (key == commodore_key_sym) {
@@ -899,6 +987,37 @@ static void ui_render_update_progress(void) {
   }
 }
 
+static void ui_render_menu_mouse_pointer(void) {
+  // Solid adaptation of VectorPortal's "Hand Cursor Free Vector" (CC BY 4.0).
+  // Attribution and source details: THIRD_PARTY_SOURCES.md.
+  static const char *const cursor[] = {
+      "...##.......", "...###......", "...###......", "...###......",
+      "...######...", "...########.", "##.#########", "############",
+      "############", ".###########", ".###########", "..##########",
+      "..#########.", "...########.", "...########.", "...########.",
+  };
+  int fill_color = ui_menu_mouse_drag_item != NULL ? HILITE_COLOR : FG_COLOR;
+
+  if (!ui_menu_mouse_session_active || !ui_get_menu_mouse_enabled() ||
+      mouse_preview_active || update_progress_active) {
+    return;
+  }
+  for (unsigned y = 0U; y < sizeof(cursor) / sizeof(cursor[0]); ++y) {
+    for (unsigned x = 0U; cursor[y][x] != '\0'; ++x) {
+      if (cursor[y][x] == '#') {
+        int draw_x = ui_menu_mouse_pointer_x -
+                     UI_MENU_MOUSE_POINTER_HOTSPOT_X + (int)x;
+        int draw_y = ui_menu_mouse_pointer_y -
+                     UI_MENU_MOUSE_POINTER_HOTSPOT_Y + (int)y;
+        if (draw_x >= 0 && draw_x < ui_fb_w &&
+            draw_y >= 0 && draw_y < ui_fb_h) {
+          ui_draw_rect(draw_x, draw_y, 1, 1, fill_color, 1);
+        }
+      }
+    }
+  }
+}
+
 void ui_render_single_frame() {
   uint32_t ready_mask = FB_LAYER_MASK(FB_LAYER_UI);
 
@@ -952,6 +1071,7 @@ void ui_render_single_frame() {
   }
 
   ui_render_update_progress();
+  ui_render_menu_mouse_pointer();
 
   if (overlay_dirty && !overlay_status_layer_suppressed()) {
     ready_mask |= FB_LAYER_MASK(FB_LAYER_STATUS);
@@ -1171,6 +1291,427 @@ static void ui_action(long action) {
   }
 }
 
+enum {
+  UI_MENU_MOUSE_LEFT = 1U,
+  UI_MENU_MOUSE_RIGHT = 1U << 1,
+  UI_MENU_MOUSE_MIDDLE = 1U << 2,
+  UI_MENU_MOUSE_DRAG_NONE = 0,
+  UI_MENU_MOUSE_DRAG_HORIZONTAL = 1,
+  UI_MENU_MOUSE_DRAG_VERTICAL = 2,
+};
+
+static int ui_menu_mouse_saturating_add(int left, int right) {
+  int64_t sum = (int64_t)left + (int64_t)right;
+  if (sum > INT_MAX) return INT_MAX;
+  if (sum < INT_MIN) return INT_MIN;
+  return (int)sum;
+}
+
+static int ui_menu_mouse_saturating_negate(int value) {
+  return value == INT_MIN ? INT_MAX : -value;
+}
+
+static unsigned ui_menu_mouse_magnitude(int value) {
+  return value < 0 ? (unsigned)(-(int64_t)value) : (unsigned)value;
+}
+
+static int ui_menu_mouse_drag_step_distance(void) {
+  switch (ui_get_menu_mouse_drag_speed()) {
+    case UI_MENU_MOUSE_DRAG_SPEED_SLOW:
+      return 24;
+    case UI_MENU_MOUSE_DRAG_SPEED_FAST:
+      return 8;
+    case UI_MENU_MOUSE_DRAG_SPEED_NORMAL:
+    default:
+      return 16;
+  }
+}
+
+static int ui_menu_mouse_consume_dead_zone(int movement) {
+  if (movement > 0) return movement - UI_MENU_MOUSE_DRAG_DEAD_ZONE;
+  if (movement < 0) return movement + UI_MENU_MOUSE_DRAG_DEAD_ZONE;
+  return 0;
+}
+
+static void ui_menu_mouse_clear_queue(void) {
+  circle_lock_acquire();
+  pending_ui_mouse_head = pending_ui_mouse_tail;
+  circle_lock_release();
+}
+
+static void ui_menu_mouse_reset_drag(void) {
+  ui_menu_mouse_drag_item = NULL;
+  ui_menu_mouse_drag_axis = UI_MENU_MOUSE_DRAG_NONE;
+  ui_menu_mouse_drag_x = 0;
+  ui_menu_mouse_drag_y = 0;
+  ui_menu_mouse_drag_remainder = 0;
+}
+
+void ui_menu_mouse_session_begin(void) {
+  int width = ui_fb_w > 0 ? ui_fb_w : UI_SOURCE_WIDTH;
+  int height = ui_fb_h > 0 ? ui_fb_h : UI_SOURCE_HEIGHT;
+
+  ui_menu_mouse_clear_queue();
+  ui_menu_mouse_buttons = 0;
+  ui_menu_mouse_reset_drag();
+  ui_menu_mouse_session_active = ui_get_menu_mouse_enabled() && ui_enabled;
+  if (!ui_menu_mouse_session_active) return;
+
+  if (current_menu >= 0) {
+    ui_menu_mouse_pointer_x = menu_roots[current_menu].menu_left +
+                              menu_roots[current_menu].menu_width / 2;
+    ui_menu_mouse_pointer_y = menu_roots[current_menu].menu_top +
+                              menu_roots[current_menu].menu_height / 2;
+  } else {
+    ui_menu_mouse_pointer_x = width / 2;
+    ui_menu_mouse_pointer_y = height / 2;
+  }
+}
+
+void ui_menu_mouse_session_end(void) {
+  ui_menu_mouse_clear_queue();
+  ui_menu_mouse_session_active = 0;
+  ui_menu_mouse_buttons = 0;
+  ui_menu_mouse_reset_drag();
+}
+
+int emu_wants_menu_mouse(void) {
+  return ui_enabled &&
+         __atomic_load_n(&ui_menu_mouse_enabled, __ATOMIC_ACQUIRE) != 0;
+}
+
+void emu_set_menu_mouse(int left, int right, int middle,
+                        int delta_x, int delta_y, int wheel_move) {
+  unsigned buttons = (left ? UI_MENU_MOUSE_LEFT : 0U) |
+                     (right ? UI_MENU_MOUSE_RIGHT : 0U) |
+                     (middle ? UI_MENU_MOUSE_MIDDLE : 0U);
+
+  circle_lock_acquire();
+  if (pending_ui_mouse_head != pending_ui_mouse_tail) {
+    unsigned last_index =
+        (pending_ui_mouse_tail - 1U) & (UI_MENU_MOUSE_QUEUE_SIZE - 1U);
+    struct ui_menu_mouse_event *last = &pending_ui_mouse[last_index];
+    if (last->buttons == buttons) {
+      last->delta_x = ui_menu_mouse_saturating_add(last->delta_x, delta_x);
+      last->delta_y = ui_menu_mouse_saturating_add(last->delta_y, delta_y);
+      last->wheel_move =
+          ui_menu_mouse_saturating_add(last->wheel_move, wheel_move);
+      circle_lock_release();
+      return;
+    }
+  }
+  if (pending_ui_mouse_tail - pending_ui_mouse_head >=
+      UI_MENU_MOUSE_QUEUE_SIZE) {
+    pending_ui_mouse_head++;
+  }
+  struct ui_menu_mouse_event *event =
+      &pending_ui_mouse[pending_ui_mouse_tail &
+                        (UI_MENU_MOUSE_QUEUE_SIZE - 1U)];
+  event->buttons = buttons;
+  event->delta_x = delta_x;
+  event->delta_y = delta_y;
+  event->wheel_move = wheel_move;
+  pending_ui_mouse_tail++;
+  circle_lock_release();
+}
+
+static struct menu_item *ui_menu_mouse_find_index(struct menu_item *node,
+                                                   int index) {
+  while (node != NULL) {
+    struct menu_item *found;
+    if (!node->hidden) {
+      if (node->render_index == index) return node;
+      if (node->type == FOLDER && node->is_expanded &&
+          node->first_child != NULL) {
+        found = ui_menu_mouse_find_index(node->first_child, index);
+        if (found != NULL) return found;
+      }
+    }
+    node = node->next;
+  }
+  return NULL;
+}
+
+static struct menu_item *ui_menu_mouse_focus_index(struct menu_item *first,
+                                                   int target_index) {
+  struct menu_item *target;
+  int focus_menu;
+
+  if (first == NULL || current_menu < 0 || target_index < 0) return NULL;
+  target = ui_menu_mouse_find_index(first, target_index);
+  if (target == NULL || menu_cursor[current_menu] == target_index) {
+    return target;
+  }
+
+  focus_menu = current_menu;
+  apply_text_field_before_focus_change(menu_cursor_item[current_menu]);
+  if (current_menu != focus_menu) return NULL;
+  ui_end_item_preview();
+  menu_cursor[current_menu] = target_index;
+  ui_menu_mouse_selecting = 1;
+  cursor_pos_updated();
+  ui_menu_mouse_selecting = 0;
+  ui_traverse();
+  return menu_cursor_item[current_menu];
+}
+
+static struct menu_item *ui_menu_mouse_hovered_item(void) {
+  struct menu_item *first;
+  int row_pitch;
+  int row;
+  int target_index;
+
+  if (!ui_menu_mouse_session_active || current_menu < 0) return NULL;
+  first = menu_roots[current_menu].first_child;
+  if (first == NULL) return NULL;
+
+  ui_traverse();
+  if (ui_menu_mouse_pointer_x < first->menu_left ||
+      ui_menu_mouse_pointer_x >= first->menu_left + first->menu_width ||
+      ui_menu_mouse_pointer_y < first->menu_top ||
+      ui_menu_mouse_pointer_y >= first->menu_top + first->menu_height) {
+    return NULL;
+  }
+  row_pitch = ui_menu_row_pitch(ui_menu_row_gap);
+  if (row_pitch <= 0) return NULL;
+  row = (ui_menu_mouse_pointer_y - first->menu_top) / row_pitch;
+  target_index = menu_window_top[current_menu] + row;
+  if (target_index < menu_window_top[current_menu] ||
+      target_index >= menu_window_bottom[current_menu] ||
+      target_index >= max_index[current_menu]) {
+    return NULL;
+  }
+  return ui_menu_mouse_focus_index(first, target_index);
+}
+
+static void ui_menu_mouse_move_pointer(int delta_x, int delta_y) {
+  int width = ui_fb_w > 0 ? ui_fb_w : UI_SOURCE_WIDTH;
+  int height = ui_fb_h > 0 ? ui_fb_h : UI_SOURCE_HEIGHT;
+  int max_x = width > 0 ? width - 1 : 0;
+  int max_y = height > 0 ? height - 1 : 0;
+
+  ui_menu_mouse_pointer_x =
+      ui_menu_mouse_saturating_add(ui_menu_mouse_pointer_x, delta_x);
+  ui_menu_mouse_pointer_y =
+      ui_menu_mouse_saturating_add(ui_menu_mouse_pointer_y, delta_y);
+  if (ui_menu_mouse_pointer_x < 0) ui_menu_mouse_pointer_x = 0;
+  if (ui_menu_mouse_pointer_y < 0) ui_menu_mouse_pointer_y = 0;
+  if (ui_menu_mouse_pointer_x > max_x) ui_menu_mouse_pointer_x = max_x;
+  if (ui_menu_mouse_pointer_y > max_y) ui_menu_mouse_pointer_y = max_y;
+}
+
+static int ui_menu_mouse_scroll_at_edge(int delta_y) {
+  struct menu_item *root;
+  struct menu_item *first;
+  int target_index;
+  int action;
+  int pointer_left;
+  int pointer_top;
+  int right;
+  int bottom;
+
+  if (current_menu < 0 || delta_y == 0) return 0;
+  root = &menu_roots[current_menu];
+  first = root->first_child;
+  if (first == NULL || root->menu_width <= 0 || root->menu_height <= 0) {
+    return 0;
+  }
+
+  right = root->menu_left + root->menu_width;
+  bottom = root->menu_top + root->menu_height;
+  pointer_left =
+      ui_menu_mouse_pointer_x - UI_MENU_MOUSE_POINTER_HOTSPOT_X;
+  pointer_top = ui_menu_mouse_pointer_y - UI_MENU_MOUSE_POINTER_HOTSPOT_Y;
+  if (pointer_left >= right ||
+      pointer_left + UI_MENU_MOUSE_POINTER_WIDTH <= root->menu_left) {
+    return 0;
+  }
+
+  ui_traverse();
+  if (delta_y < 0 && pointer_top <= root->menu_top &&
+      menu_window_top[current_menu] > 0) {
+    target_index = menu_window_top[current_menu];
+    action = ACTION_Up;
+  } else if (delta_y > 0 &&
+             pointer_top + UI_MENU_MOUSE_POINTER_HEIGHT >= bottom &&
+             menu_window_bottom[current_menu] < max_index[current_menu]) {
+    target_index = menu_window_bottom[current_menu] - 1;
+    if (target_index >= max_index[current_menu]) {
+      target_index = max_index[current_menu] - 1;
+    }
+    action = ACTION_Down;
+  } else {
+    return 0;
+  }
+
+  if (ui_menu_mouse_focus_index(first, target_index) == NULL) return 0;
+  ui_action(action);
+  ui_traverse();
+  return 1;
+}
+
+static void ui_menu_mouse_adjust_range(struct menu_item *item,
+                                       int signed_steps, int fine) {
+  int increment;
+  int64_t next;
+
+  if (item == NULL || item->type != RANGE || item->disabled ||
+      signed_steps == 0) {
+    return;
+  }
+  increment = fine ? item->ministep : item->step;
+  if (increment <= 0) increment = 1;
+  next = (int64_t)item->value + (int64_t)signed_steps * increment;
+  if (next < item->min) next = item->min;
+  if (next > item->max) next = item->max;
+  if (next == item->value) return;
+
+  item->value = (int)next;
+  ui_menu_mouse_adjusting = 1;
+  ui_menu_commit(item);
+  ui_menu_mouse_adjusting = 0;
+}
+
+static void ui_menu_mouse_start_drag(struct menu_item *item) {
+  ui_menu_mouse_drag_item = item;
+  ui_menu_mouse_drag_axis = UI_MENU_MOUSE_DRAG_NONE;
+  ui_menu_mouse_drag_x = 0;
+  ui_menu_mouse_drag_y = 0;
+  ui_menu_mouse_drag_remainder = 0;
+}
+
+static void ui_menu_mouse_continue_drag(const struct ui_menu_mouse_event *event) {
+  int just_locked = 0;
+  int signed_steps;
+  int step_distance;
+
+  if (ui_menu_mouse_drag_item == NULL) return;
+  if ((event->buttons & UI_MENU_MOUSE_LEFT) == 0U) {
+    ui_menu_mouse_reset_drag();
+    return;
+  }
+
+  if (ui_menu_mouse_drag_axis == UI_MENU_MOUSE_DRAG_NONE) {
+    ui_menu_mouse_drag_x =
+        ui_menu_mouse_saturating_add(ui_menu_mouse_drag_x, event->delta_x);
+    ui_menu_mouse_drag_y =
+        ui_menu_mouse_saturating_add(ui_menu_mouse_drag_y, event->delta_y);
+    if (ui_menu_mouse_magnitude(ui_menu_mouse_drag_x) <
+            UI_MENU_MOUSE_DRAG_DEAD_ZONE &&
+        ui_menu_mouse_magnitude(ui_menu_mouse_drag_y) <
+            UI_MENU_MOUSE_DRAG_DEAD_ZONE) {
+      return;
+    }
+    ui_menu_mouse_drag_axis =
+        ui_menu_mouse_magnitude(ui_menu_mouse_drag_x) >=
+                ui_menu_mouse_magnitude(ui_menu_mouse_drag_y)
+            ? UI_MENU_MOUSE_DRAG_HORIZONTAL
+            : UI_MENU_MOUSE_DRAG_VERTICAL;
+    ui_menu_mouse_drag_remainder =
+        ui_menu_mouse_drag_axis == UI_MENU_MOUSE_DRAG_HORIZONTAL
+            ? ui_menu_mouse_drag_x
+            : ui_menu_mouse_saturating_negate(ui_menu_mouse_drag_y);
+    ui_menu_mouse_drag_remainder =
+        ui_menu_mouse_consume_dead_zone(ui_menu_mouse_drag_remainder);
+    just_locked = 1;
+  }
+
+  if (!just_locked) {
+    int movement =
+        ui_menu_mouse_drag_axis == UI_MENU_MOUSE_DRAG_HORIZONTAL
+            ? event->delta_x
+            : ui_menu_mouse_saturating_negate(event->delta_y);
+    ui_menu_mouse_drag_remainder = ui_menu_mouse_saturating_add(
+        ui_menu_mouse_drag_remainder, movement);
+  }
+  step_distance = ui_menu_mouse_drag_step_distance();
+  signed_steps = ui_menu_mouse_drag_remainder / step_distance;
+  if (signed_steps != 0) {
+    ui_menu_mouse_drag_remainder %= step_distance;
+    if (signed_steps > UI_MENU_MOUSE_DRAG_MAX_STEPS_PER_REPORT) {
+      signed_steps = UI_MENU_MOUSE_DRAG_MAX_STEPS_PER_REPORT;
+    } else if (signed_steps < -UI_MENU_MOUSE_DRAG_MAX_STEPS_PER_REPORT) {
+      signed_steps = -UI_MENU_MOUSE_DRAG_MAX_STEPS_PER_REPORT;
+    }
+    ui_menu_mouse_adjust_range(ui_menu_mouse_drag_item, signed_steps, 1);
+  }
+}
+
+static void ui_menu_mouse_process_event(
+    const struct ui_menu_mouse_event *event) {
+  unsigned pressed = event->buttons & ~ui_menu_mouse_buttons;
+  struct menu_item *hovered;
+  int wheel;
+
+  ui_menu_mouse_buttons = event->buttons;
+  if (!ui_menu_mouse_session_active || !ui_get_menu_mouse_enabled() ||
+      !ui_enabled || update_progress_active) {
+    ui_menu_mouse_reset_drag();
+    return;
+  }
+
+  if (mouse_preview_active && ui_menu_mouse_drag_item == NULL) {
+    if ((pressed & (UI_MENU_MOUSE_LEFT | UI_MENU_MOUSE_RIGHT)) == 0U &&
+        event->wheel_move == 0) {
+      return;
+    }
+    ui_end_item_preview();
+  }
+
+  if (ui_menu_mouse_drag_item != NULL) {
+    ui_menu_mouse_continue_drag(event);
+    return;
+  }
+
+  ui_menu_mouse_move_pointer(event->delta_x, event->delta_y);
+  ui_menu_mouse_scroll_at_edge(event->delta_y);
+  hovered = ui_menu_mouse_hovered_item();
+
+  if ((pressed & UI_MENU_MOUSE_RIGHT) != 0U) {
+    ui_action(ACTION_Escape);
+    return;
+  }
+
+  wheel = event->wheel_move;
+  if (wheel > 16) wheel = 16;
+  if (wheel < -16) wheel = -16;
+  if (wheel != 0 && hovered != NULL && hovered->type == RANGE) {
+    ui_menu_mouse_adjust_range(hovered, wheel, 0);
+    return;
+  }
+
+  if ((pressed & UI_MENU_MOUSE_LEFT) != 0U && hovered != NULL) {
+    if (hovered->type == RANGE && !hovered->disabled) {
+      ui_menu_mouse_start_drag(hovered);
+    } else {
+      ui_action(ACTION_Return);
+    }
+  }
+}
+
+static void ui_check_mouse(void) {
+  struct ui_menu_mouse_event events[UI_MENU_MOUSE_QUEUE_SIZE];
+  unsigned count = 0U;
+
+  circle_lock_acquire();
+  if (pending_ui_mouse_tail - pending_ui_mouse_head >
+      UI_MENU_MOUSE_QUEUE_SIZE) {
+    pending_ui_mouse_head =
+        pending_ui_mouse_tail - UI_MENU_MOUSE_QUEUE_SIZE;
+  }
+  while (pending_ui_mouse_head != pending_ui_mouse_tail &&
+         count < UI_MENU_MOUSE_QUEUE_SIZE) {
+    events[count++] = pending_ui_mouse[
+        pending_ui_mouse_head & (UI_MENU_MOUSE_QUEUE_SIZE - 1U)];
+    pending_ui_mouse_head++;
+  }
+  circle_lock_release();
+
+  for (unsigned i = 0U; i < count; ++i) {
+    ui_menu_mouse_process_event(&events[i]);
+  }
+}
+
 // queue a key for press/release on the UI loop
 void emu_ui_key_interrupt(long key, int pressed) {
   circle_lock_acquire();
@@ -1254,6 +1795,7 @@ void ui_check_key(void) {
         update_progress_cancel_requested = 1;
       }
     }
+    ui_check_mouse();
     ui_key_action = ACTION_None;
     return;
   }
@@ -1266,6 +1808,8 @@ void ui_check_key(void) {
       ui_key_released(process_ui_key[i]);
     }
   }
+
+  ui_check_mouse();
 
   // Ui action frame tick
   ui_action_frame();
@@ -2660,6 +3204,12 @@ void ui_canvas_preview_temp(int layer, ui_canvas_preview_mode_t mode) {
 }
 
 void ui_mouse_preview_begin(void) {
+  // Mouse focus and range changes already provide direct feedback with a
+  // visible or frozen pointer. Starting the legacy sensitivity preview from
+  // either path would steal subsequent menu movement or the active drag.
+  if (ui_menu_mouse_adjusting || ui_menu_mouse_selecting) {
+    return;
+  }
   if (!mouse_preview_active) {
     mouse_preview_x = menu_roots[0].menu_left +
                       menu_roots[0].menu_width / 2.0f;

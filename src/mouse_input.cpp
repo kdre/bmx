@@ -12,6 +12,9 @@ void emu_mouse_wheel_down(int pressed);
 int emu_wants_raw_mouse(void);
 void emu_set_raw_mouse(int left, int right, int middle,
                        int delta_x, int delta_y, int wheel_move);
+int emu_wants_menu_mouse(void);
+void emu_set_menu_mouse(int left, int right, int middle,
+                        int delta_x, int delta_y, int wheel_move);
 }
 
 namespace {
@@ -25,25 +28,33 @@ void forward_button(unsigned buttons, unsigned previous_buttons,
   }
 }
 
+void release_emulator_buttons(BmxMouseStatusState *state) {
+  forward_button(0, state->previous_buttons, MOUSE_BUTTON_LEFT,
+                 emu_mouse_button_left);
+  forward_button(0, state->previous_buttons, MOUSE_BUTTON_RIGHT,
+                 emu_mouse_button_right);
+  forward_button(0, state->previous_buttons, MOUSE_BUTTON_MIDDLE,
+                 emu_mouse_button_middle);
+  state->previous_buttons = 0;
+}
+
 }  // namespace
 
 void bmx_mouse_status_update(unsigned buttons, int delta_x, int delta_y,
                              int wheel_move, BmxMouseStatusState *state) {
   const int monitor_active = emu_wants_raw_mouse();
+  const int menu_active = !monitor_active && emu_wants_menu_mouse();
 
   if (monitor_active) {
     if (!state->monitor_active) {
-      // Do not leave a button pressed in VICE when the monitor starts
-      // consuming mouse input.
-      forward_button(0, state->previous_buttons, MOUSE_BUTTON_LEFT,
-                     emu_mouse_button_left);
-      forward_button(0, state->previous_buttons, MOUSE_BUTTON_RIGHT,
-                     emu_mouse_button_right);
-      forward_button(0, state->previous_buttons, MOUSE_BUTTON_MIDDLE,
-                     emu_mouse_button_middle);
-      state->previous_buttons = 0;
+      // Do not leave a button pressed in VICE when another consumer starts
+      // receiving complete mouse reports.
+      if (!state->menu_active) {
+        release_emulator_buttons(state);
+      }
       state->suppressed_buttons = 0;
       state->monitor_active = 1;
+      state->menu_active = 0;
     }
 
     emu_set_raw_mouse((buttons & MOUSE_BUTTON_LEFT) != 0,
@@ -53,11 +64,42 @@ void bmx_mouse_status_update(unsigned buttons, int delta_x, int delta_y,
     return;
   }
 
-  if (state->monitor_active) {
-    // Buttons still held when leaving the monitor must be released before a
-    // later press can reach VICE. This prevents a held monitor click from
+  if (menu_active) {
+    if (!state->menu_active) {
+      // A button already held by VICE, or while leaving the raw monitor, must
+      // be released before a fresh press can activate a menu item.  A genuinely
+      // new first menu click is not suppressed.
+      state->suppressed_buttons = state->monitor_active
+          ? buttons
+          : state->previous_buttons & buttons;
+      if (!state->monitor_active) {
+        release_emulator_buttons(state);
+      } else {
+        state->previous_buttons = 0;
+      }
+      state->monitor_active = 0;
+      state->menu_active = 1;
+    }
+
+    state->suppressed_buttons &= buttons;
+    buttons &= ~state->suppressed_buttons;
+
+    // Keep movement available to the existing sensitivity preview.  Button
+    // and wheel input remain exclusively owned by the menu in this mode.
+    emu_mouse_move(delta_x, delta_y);
+    emu_set_menu_mouse((buttons & MOUSE_BUTTON_LEFT) != 0,
+                       (buttons & MOUSE_BUTTON_RIGHT) != 0,
+                       (buttons & MOUSE_BUTTON_MIDDLE) != 0,
+                       delta_x, delta_y, wheel_move);
+    return;
+  }
+
+  if (state->monitor_active || state->menu_active) {
+    // Buttons still held when leaving an exclusive consumer must be released
+    // before a later press can reach VICE. This prevents a menu click from
     // turning into a phantom click in the emulated machine.
     state->monitor_active = 0;
+    state->menu_active = 0;
     state->suppressed_buttons = buttons;
     state->previous_buttons = 0;
   }

@@ -355,6 +355,8 @@ extern int circle_get_sound_output_priority(void);
 extern void circle_set_sound_output_priority(int value);
 extern int circle_get_model();
 extern int circle_cycles_per_sec();
+extern unsigned circle_audio_generator_sample_rate(
+    unsigned output_sample_rate, unsigned machine_cycles_per_sec);
 extern unsigned circle_get_arm_clock();
 extern int circle_gpio_enabled();
 extern int circle_gpio_outputs_enabled();

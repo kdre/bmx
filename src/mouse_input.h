@@ -5,6 +5,7 @@ typedef struct {
   unsigned previous_buttons;
   unsigned suppressed_buttons;
   int monitor_active;
+  int menu_active;
 } BmxMouseStatusState;
 
 void bmx_mouse_status_update(unsigned buttons, int delta_x, int delta_y,

@@ -64,6 +64,20 @@ extern "C" {
 // refresh rate.  Circle clock ticks are microseconds.
 #define UI_UPDATE_PROGRESS_RENDER_INTERVAL_TICKS UINT32_C(200000)
 
+// Mouse menu control is deliberately opt-in so existing emulator mouse
+// configurations keep receiving input exactly as before.
+#define UI_MENU_MOUSE_DEFAULT 0
+#define UI_MENU_MOUSE_DRAG_SPEED_SLOW 0
+#define UI_MENU_MOUSE_DRAG_SPEED_NORMAL 1
+#define UI_MENU_MOUSE_DRAG_SPEED_FAST 2
+#define UI_MENU_MOUSE_DRAG_SPEED_DEFAULT UI_MENU_MOUSE_DRAG_SPEED_NORMAL
+#define UI_MENU_MOUSE_DRAG_DEAD_ZONE 12
+#define UI_MENU_MOUSE_DRAG_MAX_STEPS_PER_REPORT 4
+#define UI_MENU_MOUSE_POINTER_WIDTH 12
+#define UI_MENU_MOUSE_POINTER_HEIGHT 16
+#define UI_MENU_MOUSE_POINTER_HOTSPOT_X 4
+#define UI_MENU_MOUSE_POINTER_HOTSPOT_Y 0
+
 // Special menu id for items that do nothing or have no action callback
 #define MENU_ID_DO_NOTHING -1
 
@@ -365,7 +379,19 @@ int ui_get_menu_scale_percent(void);
 int ui_set_menu_scale_percent(int percent);
 int ui_get_menu_row_gap(void);
 int ui_set_menu_row_gap(int gap);
+int ui_get_menu_mouse_enabled(void);
+int ui_set_menu_mouse_enabled(int enabled);
+int ui_get_menu_mouse_drag_speed(void);
+int ui_set_menu_mouse_drag_speed(int speed);
 int ui_save_appearance_settings(void);
+void ui_menu_mouse_session_begin(void);
+void ui_menu_mouse_session_end(void);
+
+// Core-0 mouse reports use this bounded bridge instead of touching the
+// Core-1 menu tree directly.
+int emu_wants_menu_mouse(void);
+void emu_set_menu_mouse(int left, int right, int middle,
+                        int delta_x, int delta_y, int wheel_move);
 
 // Used to ensure we process all key events before transitioning to
 // the ui. Can be set to 2 from an ISR to ensure handling from key queue and

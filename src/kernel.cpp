@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "audio_pacing.h"
 #include "kernel.h"
 #include "mouse_input.h"
 #include "third_party/common/gpio_layout.h"
@@ -419,6 +420,16 @@ void circle_boot_complete() {
 int circle_cycles_per_sec() {
   // Always ok
   return static_kernel->circle_cycles_per_second();
+}
+
+unsigned circle_audio_generator_sample_rate(
+    unsigned output_sample_rate, unsigned machine_cycles_per_sec) {
+  // Keep VICE's machine and sound-chip clocks nominal.  The generator emits
+  // the number of samples that the physical output consumes while those
+  // nominal cycles are presented at the selected output timing.
+  return bmc64::AudioGeneratorSampleRate(
+      output_sample_rate, machine_cycles_per_sec,
+      static_cast<unsigned>(static_kernel->circle_cycles_per_second()));
 }
 
 int circle_alloc_fbl(int layer, int pixelmode, uint8_t **pixels,
@@ -2717,7 +2728,7 @@ void CKernel::ProcessControlRequest() {
                                               joy_values, joy_count);
         }
         if (mouse_count != 0U) {
-          static BmxMouseStatusState remote_mouse = {0, 0, 0};
+          static BmxMouseStatusState remote_mouse = {0, 0, 0, 0};
           for (size_t i = 0U; i < request.input_count; ++i) {
             const bmx::remote::BmxInputEvent &event = request.input[i];
             bmx_mouse_status_update(
@@ -2780,7 +2791,7 @@ void CKernel::ProcessControlRequest() {
 
 void CKernel::MouseStatusHandler(unsigned nButtons, int deltaX, int deltaY,
                                  int wheelMove) {
-  static BmxMouseStatusState state = {0, 0, 0};
+  static BmxMouseStatusState state = {0, 0, 0, 0};
   bmx_mouse_status_update(nButtons, deltaX, deltaY, wheelMove, &state);
 }
 

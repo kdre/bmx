@@ -59,6 +59,11 @@
 #include "math.h"
 #include "ui.h"
 
+#ifdef RASPI_COMPILE
+extern unsigned int circle_audio_generator_sample_rate(
+    unsigned int output_sample_rate, unsigned int machine_cycles_per_sec);
+#endif
+
 /* #define DEBUG_SOUND */
 
 #ifdef DEBUG_SOUND
@@ -914,6 +919,18 @@ static unsigned int cycles_per_sec;
 static unsigned int cycles_per_rfsh;
 static double rfsh_per_sec;
 
+static unsigned int sound_generator_sample_rate(unsigned int output_sample_rate,
+                                                unsigned int machine_cycles_per_sec)
+{
+#ifdef RASPI_COMPILE
+    return circle_audio_generator_sample_rate(output_sample_rate,
+                                              machine_cycles_per_sec);
+#else
+    (void)machine_cycles_per_sec;
+    return output_sample_rate;
+#endif
+}
+
 /* Speed in percent, tracks relative_speed from vsync.c */
 static double speed_percent;
 
@@ -1056,6 +1073,7 @@ static int sid_open(void)
 static int sid_init(void)
 {
     double speed_factor;
+    unsigned int generator_sample_rate;
     int c, speed;
 
     /* Special handling for cycle based as opposed to sample based sound
@@ -1065,10 +1083,13 @@ static int sid_init(void)
     /* "No limit" doesn't make sense for cycle based sound engines,
        which have a fixed sampling rate. */
     speed_factor = speed_percent ? speed_percent : 100;
-    speed = sample_rate * 100 / speed_factor;
+    generator_sample_rate = sound_generator_sample_rate(sample_rate,
+                                                        cycles_per_sec);
+    speed = generator_sample_rate * 100 / speed_factor;
 
     /* Sample based sound engines rely on clkstep for timing */
-    snddata.clkstep = SOUNDCLK_CONSTANT(speed_percent / 100 * cycles_per_sec) / sample_rate;
+    snddata.clkstep = SOUNDCLK_CONSTANT(speed_percent / 100 * cycles_per_sec)
+                      / generator_sample_rate;
 
     snddata.origclkstep = snddata.clkstep;
     snddata.clkfactor = SOUNDCLK_CONSTANT(1.0);

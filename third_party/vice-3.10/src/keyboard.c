@@ -149,13 +149,15 @@ signed long key_joy_keypad[KBD_JOY_KEYPAD_ROWS][KBD_JOY_KEYPAD_COLS]; /* FIXME *
  */
 static int kbd_statusbar_enabled = 0;
 
-/** \brief  Enable scan-safe, two-phase transitions for de-shifted keys */
+/** \brief  Enable scan-safe staged transitions for de-shifted keys */
 static int keyboard_staged_deshift_enabled = 0;
 
 typedef enum {
     STAGED_DESHIFT_NONE = 0,
+    STAGED_DESHIFT_PRESS_VIRTUAL_MODIFIERS,
     STAGED_DESHIFT_PRESS_TARGET,
-    STAGED_DESHIFT_RELEASE_MODIFIERS
+    STAGED_DESHIFT_RELEASE_VIRTUAL_MODIFIERS,
+    STAGED_DESHIFT_RELEASE_DESHIFT
 } staged_deshift_phase_t;
 
 typedef struct {
@@ -170,6 +172,9 @@ static staged_deshift_t staged_deshift = {
 };
 
 #define STAGED_DESHIFT_DELAY 1000
+#define STAGED_DESHIFT_VIRTUAL_DELAY 2000
+#define STAGED_DESHIFT_VIRTUAL_MASK \
+    (VIRTUAL_SHIFT | VIRTUAL_CTRL | VIRTUAL_CBM)
 
 typedef struct {
     signed long key;
@@ -191,6 +196,7 @@ static int keyboard_restore_pressed(void);
 static int keyboard_restore_released(void);
 
 static void keyboard_event_record(void);
+static void keyboard_latch_modifier_states(void);
 
 /* custom keys */
 static int keyboard_custom_key_func_by_keysym(int keysym, int pressed);
@@ -262,8 +268,24 @@ static CLOCK kbd_make_event_timestap(CLOCK offset, int num)
     return offset;
 }
 
-/* Keep the two visible DESHIFT matrix changes apart without adding the
-   normal random host-key delay. */
+/* Give a running KERNAL matrix scan time to leave physical Shift behind
+   before adding a virtual modifier (and vice versa on release).  Target-key
+   transitions need only the original short matrix-scan separation. */
+static CLOCK kbd_staged_deshift_phase_delay(void)
+{
+    CLOCK delay = STAGED_DESHIFT_DELAY;
+
+    if ((staged_deshift.shift & STAGED_DESHIFT_VIRTUAL_MASK)
+        && (staged_deshift.phase
+                == STAGED_DESHIFT_PRESS_VIRTUAL_MODIFIERS
+            || staged_deshift.phase == STAGED_DESHIFT_RELEASE_DESHIFT)) {
+        delay = STAGED_DESHIFT_VIRTUAL_DELAY;
+    }
+    return delay;
+}
+
+/* Keep visible DESHIFT matrix changes apart without adding the normal random
+   host-key delay. */
 static void kbd_schedule_staged_deshift(void)
 {
     CLOCK timestamp = maincpu_clk;
@@ -271,7 +293,7 @@ static void kbd_schedule_staged_deshift(void)
     if (timestamp < keyboard_latch_timestamp) {
         timestamp = keyboard_latch_timestamp;
     }
-    timestamp += STAGED_DESHIFT_DELAY;
+    timestamp += kbd_staged_deshift_phase_delay();
     keyboard_latch_timestamp = timestamp;
     alarm_set(keyboard_alarm, timestamp);
 }
@@ -491,6 +513,29 @@ static inline void keyboard_key_released_modifier(int row, int column, int shift
            virtual_shift_down, virtual_cbm_down, virtual_ctrl_down,
             virtual_deshift,
             keyboard_shiftlock));
+}
+
+/* Change only the virtual modifier portion of a staged DESHIFT key.  Keep
+   IS_PRESSED and DESHIFT_SHIFT active so physical Shift stays hidden until
+   every newly added virtual modifier is safely out of the matrix again. */
+static inline void keyboard_key_add_staged_virtual_modifiers(int row,
+                                                              int column,
+                                                              int shift)
+{
+    virtual_modifier_flags[row][column]
+        |= shift & STAGED_DESHIFT_VIRTUAL_MASK;
+    update_virtual_modifier_flags();
+    keyboard_latch_modifier_states();
+}
+
+static inline void keyboard_key_remove_staged_virtual_modifiers(int row,
+                                                                 int column,
+                                                                 int shift)
+{
+    virtual_modifier_flags[row][column]
+        &= ~(shift & STAGED_DESHIFT_VIRTUAL_MASK);
+    update_virtual_modifier_flags();
+    keyboard_latch_modifier_states();
 }
 
 /*-----------------------------------------------------------------------*/
@@ -719,7 +764,7 @@ int keyboard_keymap_lookup(signed long key, int mod,
  * key: host key
  * mod: host key modifier
  * pressed: press (=1) or release (=0)
- * allow_staging: allow this event to start a two-phase DESHIFT transition
+ * allow_staging: allow this event to start a staged DESHIFT transition
  * returns 1 if a staged transition was started, otherwise 0
  */
 static int kbd_key_pressed(signed long key, int mod, int pressed,
@@ -755,13 +800,21 @@ static int kbd_key_pressed(signed long key, int mod, int pressed,
             && !network_connected() && (shift & DESHIFT_SHIFT)
             && !key_is_modifier(row, column)) {
             if (pressed) {
-                if (!keyboard_key_pressed_matrix(row, column, shift)) {
+                if (!keyboard_key_pressed_matrix(
+                        row, column,
+                        shift & ~STAGED_DESHIFT_VIRTUAL_MASK)) {
                     return 0;
                 }
-                staged_deshift.phase = STAGED_DESHIFT_PRESS_TARGET;
+                staged_deshift.phase
+                    = (shift & STAGED_DESHIFT_VIRTUAL_MASK)
+                        ? STAGED_DESHIFT_PRESS_VIRTUAL_MODIFIERS
+                        : STAGED_DESHIFT_PRESS_TARGET;
             } else {
                 keyboard_set_latch_keyarr(row, column, 0);
-                staged_deshift.phase = STAGED_DESHIFT_RELEASE_MODIFIERS;
+                staged_deshift.phase
+                    = (shift & STAGED_DESHIFT_VIRTUAL_MASK)
+                        ? STAGED_DESHIFT_RELEASE_VIRTUAL_MODIFIERS
+                        : STAGED_DESHIFT_RELEASE_DESHIFT;
             }
             staged_deshift.row = row;
             staged_deshift.column = column;
@@ -789,18 +842,37 @@ static int kbd_key_pressed(signed long key, int mod, int pressed,
     return 0;
 }
 
-static void kbd_finish_staged_deshift(void)
+/* Finish one visible transition.  A non-zero return value requests another
+   scheduled phase before the host keyboard queue may continue. */
+static int kbd_finish_staged_deshift(void)
 {
-    if (staged_deshift.phase == STAGED_DESHIFT_PRESS_TARGET) {
-        keyboard_set_latch_keyarr(staged_deshift.row,
-                                  staged_deshift.column, 1);
-    } else if (staged_deshift.phase
-               == STAGED_DESHIFT_RELEASE_MODIFIERS) {
-        keyboard_key_released_matrix(staged_deshift.row,
-                                     staged_deshift.column,
-                                     staged_deshift.shift);
+    switch (staged_deshift.phase) {
+        case STAGED_DESHIFT_PRESS_VIRTUAL_MODIFIERS:
+            keyboard_key_add_staged_virtual_modifiers(
+                staged_deshift.row, staged_deshift.column,
+                staged_deshift.shift);
+            staged_deshift.phase = STAGED_DESHIFT_PRESS_TARGET;
+            return 1;
+        case STAGED_DESHIFT_PRESS_TARGET:
+            keyboard_set_latch_keyarr(staged_deshift.row,
+                                      staged_deshift.column, 1);
+            break;
+        case STAGED_DESHIFT_RELEASE_VIRTUAL_MODIFIERS:
+            keyboard_key_remove_staged_virtual_modifiers(
+                staged_deshift.row, staged_deshift.column,
+                staged_deshift.shift);
+            staged_deshift.phase = STAGED_DESHIFT_RELEASE_DESHIFT;
+            return 1;
+        case STAGED_DESHIFT_RELEASE_DESHIFT:
+            keyboard_key_released_matrix(
+                staged_deshift.row, staged_deshift.column,
+                staged_deshift.shift & ~STAGED_DESHIFT_VIRTUAL_MASK);
+            break;
+        default:
+            return 0;
     }
     staged_deshift.phase = STAGED_DESHIFT_NONE;
+    return 0;
 }
 
 /* keyboard alarm handler, this consumes the host keyboard queue */
@@ -809,15 +881,20 @@ static void keyboard_alarm_handler(CLOCK offset, void *data)
     int key, mod, pressed;
     int queuepos;
     int transition_started;
+    int transition_pending;
 
     alarm_unset(keyboard_alarm);
     alarm_context_update_next_pending(keyboard_alarm->context);
 
     if (staged_deshift.phase != STAGED_DESHIFT_NONE) {
-        kbd_finish_staged_deshift();
+        transition_pending = kbd_finish_staged_deshift();
         keyboard_latch_matrix(offset);
         keyboard_event_record();
-        kbd_retrigger_alarm();
+        if (transition_pending) {
+            kbd_schedule_staged_deshift();
+        } else {
+            kbd_retrigger_alarm();
+        }
         return;
     }
 

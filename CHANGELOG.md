@@ -1,3 +1,22 @@
+Version 2026.08.19
+------------------
+* New features
+  * The BMX menu can now be controlled with a mouse after enabling it 
+    (Mouse->Menu control). Usage: Left click: opens menu, switches parameters
+    between "on" or "off". Holding left mouse button and dragging left/right or
+    up/down on a numeric paramter changes the value fine-grained. Using the
+    scroll wheel on a numeric parameter changes it in coarse steps. Righ click:
+    back. Moving the mouse pointer to the top or button of the menu scrolls it
+    up/down. Sensitivit is currently not taken into account during menu 
+    navigation. Drag speed can be configured as well.
+
+* Bugfixes
+  * A timing fix from 28.7.2026 that fixed audio problems caused new timing 
+    issus on x64sc (e.g. demo freeze). Reverted the fix and implemented a new
+    one which decouples machine and audio timing.
+  * Shift + _ caused wrong displayed characters. The "safe shifted symbols" fix
+    has been enhanced to include all virtual modifier keys.
+
 Version 2026.08.17
 ------------------
 * New feature

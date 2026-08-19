@@ -4407,6 +4407,18 @@ static void menu_row_gap_changed(struct menu_item *item) {
   }
 }
 
+static void menu_mouse_control_changed(struct menu_item *item) {
+  if (!ui_set_menu_mouse_enabled(item->value)) {
+    item->value = ui_get_menu_mouse_enabled();
+  }
+}
+
+static void menu_mouse_drag_speed_changed(struct menu_item *item) {
+  if (!ui_set_menu_mouse_drag_speed(item->value)) {
+    item->value = ui_get_menu_mouse_drag_speed();
+  }
+}
+
 static int save_settings() {
   FILE *fp;
   switch (emux_machine_class) {
@@ -9635,6 +9647,18 @@ void build_menu(struct menu_item *root) {
   detected_mouse_item = ui_menu_add_button_with_value(
       MENU_TEXT, parent, "Detected 1", 0, "", "");
   emu_set_mouse_info(detected_mouse_present, detected_mouse_product);
+  child = ui_menu_add_toggle_labels(
+      MENU_ID_DO_NOTHING, parent, "Menu control",
+      ui_get_menu_mouse_enabled(), "Disabled", "Enabled");
+  child->on_value_changed = menu_mouse_control_changed;
+  child = ui_menu_add_multiple_choice(
+      MENU_ID_DO_NOTHING, parent, "Menu drag speed");
+  child->num_choices = 3;
+  child->value = ui_get_menu_mouse_drag_speed();
+  strcpy(child->choices[UI_MENU_MOUSE_DRAG_SPEED_SLOW], "Slow");
+  strcpy(child->choices[UI_MENU_MOUSE_DRAG_SPEED_NORMAL], "Normal");
+  strcpy(child->choices[UI_MENU_MOUSE_DRAG_SPEED_FAST], "Fast");
+  child->on_value_changed = menu_mouse_drag_speed_changed;
   ui_menu_add_divider(parent);
   selected_mouse_type = BMX_MOUSE_TYPE_DEFAULT;
   if (machine_supports_mouse_type()) {
@@ -10008,11 +10032,13 @@ int statusbar_always(void) {
 // Stuff to do when menu is activated
 void menu_about_to_activate() {
   emux_mouse_input_clear();
+  ui_menu_mouse_session_begin();
   emux_get_int(Setting_WarpMode, &warp_item->value);
 }
 
 // Stuff to do before going back to emulator
 void menu_about_to_deactivate() {
+  ui_menu_mouse_session_end();
   ui_mouse_preview_end();
   emux_mouse_input_clear();
 }

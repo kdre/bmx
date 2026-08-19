@@ -60,12 +60,7 @@
          with reasonable defaults when needed.
 */
 
-#ifdef RASPI_COMPILE
-extern int circle_cycles_per_sec(void);
-#define PET_PAL_CYCLES_PER_SEC   (circle_cycles_per_sec())
-#else
 #define PET_PAL_CYCLES_PER_SEC   1000000
-#endif
 /* #define PET_PAL_CYCLES_PER_SEC  999600 */ /* works with "8296d diagnostics" if editor rom 901474-04 (50Hz) is used */
 
 #define PET_PAL_CYCLES_PER_LINE  64
@@ -73,11 +68,7 @@ extern int circle_cycles_per_sec(void);
 #define PET_PAL_CYCLES_PER_RFSH  (PET_PAL_SCREEN_LINES * PET_PAL_CYCLES_PER_LINE)
 #define PET_PAL_RFSH_PER_SEC     (1.0 / ((double)PET_PAL_CYCLES_PER_RFSH / (double)PET_PAL_CYCLES_PER_SEC))
 
-#ifdef RASPI_COMPILE
-#define PET_NTSC_CYCLES_PER_SEC  (circle_cycles_per_sec())
-#else
 #define PET_NTSC_CYCLES_PER_SEC  1000000
-#endif
 
 #define PET_NTSC_CYCLES_PER_LINE 64
 #define PET_NTSC_SCREEN_LINES    264
